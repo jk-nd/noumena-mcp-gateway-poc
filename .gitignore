@@ -29,6 +29,11 @@ deployments/secrets/
 *.local.yaml
 *.local.yml
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+
 # Logs
 *.log
 logs/

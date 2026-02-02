@@ -2,6 +2,12 @@
 """
 MCP Service Registration Tool
 
+Setup:
+    cd tools
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+
 Registers a new MCP service by:
 1. Adding to docker-compose.yml
 2. Adding to upstreams.yaml
