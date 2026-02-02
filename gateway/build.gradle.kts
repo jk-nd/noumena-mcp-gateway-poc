@@ -14,20 +14,21 @@ dependencies {
     // Kotlin MCP SDK - Server
     implementation("io.modelcontextprotocol:kotlin-sdk-server:0.8.3")
     
-    // Ktor Server
-    implementation("io.ktor:ktor-server-core:2.3.7")
-    implementation("io.ktor:ktor-server-netty:2.3.7")
-    implementation("io.ktor:ktor-server-content-negotiation:2.3.7")
-    implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.7")
-    implementation("io.ktor:ktor-server-auth:2.3.7")
-    implementation("io.ktor:ktor-server-auth-jwt:2.3.7")
-    implementation("io.ktor:ktor-server-status-pages:2.3.7")
-    implementation("io.ktor:ktor-server-call-logging:2.3.7")
+    // Ktor Server (version must match what MCP SDK uses)
+    val ktorVersion = "3.2.3"
+    implementation("io.ktor:ktor-server-core:$ktorVersion")
+    implementation("io.ktor:ktor-server-netty:$ktorVersion")
+    implementation("io.ktor:ktor-server-content-negotiation:$ktorVersion")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
+    implementation("io.ktor:ktor-server-auth:$ktorVersion")
+    implementation("io.ktor:ktor-server-auth-jwt:$ktorVersion")
+    implementation("io.ktor:ktor-server-status-pages:$ktorVersion")
+    implementation("io.ktor:ktor-server-call-logging:$ktorVersion")
     
     // Ktor Client (for NPL Engine calls)
-    implementation("io.ktor:ktor-client-core:2.3.7")
-    implementation("io.ktor:ktor-client-cio:2.3.7")
-    implementation("io.ktor:ktor-client-content-negotiation:2.3.7")
+    implementation("io.ktor:ktor-client-core:$ktorVersion")
+    implementation("io.ktor:ktor-client-cio:$ktorVersion")
+    implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
     
     // Config
     implementation("com.sksamuel.hoplite:hoplite-core:2.7.5")

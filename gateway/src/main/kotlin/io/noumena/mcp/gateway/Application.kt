@@ -7,11 +7,16 @@ import io.ktor.server.routing.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.plugins.calllogging.*
+import io.ktor.server.response.*
 import io.noumena.mcp.gateway.server.mcpRoutes
 import io.noumena.mcp.gateway.callback.callbackRoutes
 import mu.KotlinLogging
+import kotlinx.serialization.Serializable
 
 private val logger = KotlinLogging.logger {}
+
+@Serializable
+data class HealthResponse(val status: String, val service: String)
 
 fun main() {
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
@@ -34,7 +39,7 @@ fun Application.configureGateway() {
     routing {
         // Health check
         get("/health") {
-            call.respond(mapOf("status" to "ok", "service" to "gateway"))
+            call.respond(HealthResponse("ok", "gateway"))
         }
         
         // MCP endpoints (agent-facing)
