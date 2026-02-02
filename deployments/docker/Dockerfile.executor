@@ -1,0 +1,22 @@
+# Executor Dockerfile
+# NOTE: Executor HAS Vault access
+# SECURITY: Protected by network isolation, not signatures
+
+FROM gradle:8.5-jdk17 AS builder
+WORKDIR /app
+COPY . .
+RUN gradle :executor:shadowJar --no-daemon
+
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+
+# Copy JAR
+COPY --from=builder /app/executor/build/libs/executor-*-all.jar executor.jar
+
+# Copy config
+COPY configs/executor.yaml /app/configs/
+COPY configs/upstreams.yaml /app/configs/
+
+EXPOSE 8081
+
+ENTRYPOINT ["java", "-jar", "executor.jar"]

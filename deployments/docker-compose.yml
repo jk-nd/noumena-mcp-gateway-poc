@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Noumena MCP Gateway (NO Vault access)
+  # ─────────────────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - NPL_URL=http://npl-engine:8080
+      - OIDC_ISSUER=http://keycloak:8080/realms/noumena
+      - CALLBACK_URL=http://gateway:8080/callback
+      # NOTE: No VAULT_* environment variables - Gateway has no Vault access
+    depends_on:
+      - keycloak
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Noumena MCP Executor (HAS Vault access)
+  # ─────────────────────────────────────────────────────────────────────────
+  executor:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.executor
+    environment:
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=dev-token
+    depends_on:
+      - vault
+    # SECURITY: Executor is NOT exposed externally - only NPL can reach it
+    # This network isolation is the security boundary (no signature verification needed)
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # NPL Engine (Policy Only)
+  # ─────────────────────────────────────────────────────────────────────────
+  # npl-engine:
+  #   image: noumena/npl-engine:latest
+  #   ports:
+  #     - "8082:8080"
+  #   environment:
+  #     - EXECUTOR_URL=http://executor:8081/execute
+  #     - NPL_PRIVATE_KEY_PATH=/keys/npl-private.pem
+  #   volumes:
+  #     - ./keys:/keys:ro
+  #   networks:
+  #     - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Docker MCP Containers (from Docker Hub MCP Catalog)
+  # ─────────────────────────────────────────────────────────────────────────
+  # google-mcp:
+  #   image: docker.io/mcp/google-workspace:latest
+  #   environment:
+  #     - GOOGLE_OAUTH_CONFIG_PATH=/secrets/google-oauth.json
+  #   volumes:
+  #     - ./secrets/google:/secrets:ro
+  #   networks:
+  #     - mcp-network
+
+  # slack-mcp:
+  #   image: docker.io/mcp/slack:latest
+  #   environment:
+  #     - SLACK_TOKEN_PATH=/secrets/slack-token
+  #   volumes:
+  #     - ./secrets/slack:/secrets:ro
+  #   networks:
+  #     - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Infrastructure
+  # ─────────────────────────────────────────────────────────────────────────
+  vault:
+    image: hashicorp/vault:latest
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=dev-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - mcp-network
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    ports:
+      - "8083:8080"
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+    command: start-dev
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

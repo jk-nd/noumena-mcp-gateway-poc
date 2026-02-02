@@ -1,0 +1,41 @@
+# Upstream Service Configuration
+
+upstreams:
+  # Docker MCP containers
+  google_gmail:
+    type: docker_mcp
+    endpoint: http://google-mcp:8080
+    vault_path: "secret/data/tenants/{tenant}/users/{user}/google"
+    auth_type: oauth
+    
+  google_calendar:
+    type: docker_mcp
+    endpoint: http://google-mcp:8080
+    vault_path: "secret/data/tenants/{tenant}/users/{user}/google"
+    auth_type: oauth
+
+  slack:
+    type: docker_mcp
+    endpoint: http://slack-mcp:8080
+    vault_path: "secret/data/tenants/{tenant}/users/{user}/slack"
+    auth_type: oauth
+
+  stripe:
+    type: docker_mcp
+    endpoint: http://stripe-mcp:8080
+    vault_path: "secret/data/tenants/{tenant}/api_keys/stripe"
+    auth_type: api_key
+
+  # Direct REST (no MCP)
+  sap:
+    type: direct_rest
+    base_url: ${SAP_BASE_URL:-https://sap.example.com/sap/opu/odata}
+    vault_path: "secret/data/tenants/{tenant}/api_keys/sap"
+    auth_type: api_key
+    endpoints:
+      create_purchase_order:
+        method: POST
+        path: /API_PURCHASEORDER_SRV/PurchaseOrder
+      get_vendor:
+        method: GET
+        path: "/API_BUSINESS_PARTNER/A_BusinessPartner('{vendor_id}')"

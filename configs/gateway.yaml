@@ -1,0 +1,22 @@
+# Gateway Configuration
+# NOTE: Gateway has NO Vault access - this is by design
+
+server:
+  port: 8080
+
+oidc:
+  issuer: ${OIDC_ISSUER:-http://keycloak:8080/realms/noumena}
+  audience: noumena-mcp-gateway
+
+npl:
+  url: ${NPL_URL:-http://npl-engine:8080}
+  timeout_ms: 30000
+
+callback:
+  url: ${CALLBACK_URL:-http://gateway:8080/callback}
+
+policy:
+  mode: required  # required | optional | audit_only
+
+logging:
+  level: INFO

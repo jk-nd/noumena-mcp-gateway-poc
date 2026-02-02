@@ -1,0 +1,22 @@
+# Gateway Dockerfile
+# NOTE: Gateway has NO Vault access
+
+FROM gradle:8.5-jdk17 AS builder
+WORKDIR /app
+COPY . .
+RUN gradle :gateway:shadowJar --no-daemon
+
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+
+# Copy JAR
+COPY --from=builder /app/gateway/build/libs/gateway-*-all.jar gateway.jar
+
+# Copy config
+COPY configs/gateway.yaml /app/configs/
+
+# No secrets volumes - Gateway has no Vault access
+
+EXPOSE 8080
+
+ENTRYPOINT ["java", "-jar", "gateway.jar"]

@@ -1,0 +1,39 @@
+# Gradle
+.gradle/
+build/
+bin/
+out/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Kotlin
+*.class
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit)
+*.pem
+*.key
+*.p12
+secrets/
+
+# Local config overrides
+*.local.yaml
+*.local.yml
+
+# Logs
+*.log
+logs/
+
+# Test outputs
+test-results/
+
+# Extracted archives
+npl-connectors/
