@@ -8,8 +8,7 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
-import io.noumena.mcp.executor.secrets.Credentials
-import io.noumena.mcp.executor.secrets.CredentialType
+import io.noumena.mcp.executor.secrets.ServiceCredentials
 import io.noumena.mcp.shared.config.ConfigLoader
 import kotlinx.serialization.json.Json
 import mu.KotlinLogging
@@ -39,7 +38,7 @@ class RestUpstream {
         service: String,
         operation: String,
         params: Map<String, String>,
-        credentials: Credentials
+        credentials: ServiceCredentials
     ): Map<String, String> {
         val config = restConfig[service]
             ?: throw IllegalArgumentException("No REST config for service: $service")
@@ -59,15 +58,13 @@ class RestUpstream {
         val response = client.request(url) {
             method = HttpMethod.parse(endpoint.method)
             
-            // Add authentication
-            when (credentials.type) {
-                CredentialType.OAUTH -> {
-                    header("Authorization", "Bearer ${credentials.accessToken}")
-                }
-                CredentialType.API_KEY -> {
-                    header("X-API-Key", credentials.apiKey)
-                }
-                else -> {}
+            // Add authentication based on available credentials
+            credentials.accessToken?.let {
+                header("Authorization", "Bearer $it")
+            } ?: credentials.apiKey?.let {
+                header("X-API-Key", it)
+            } ?: credentials.sessionId?.let {
+                header("X-SAP-Session", it)
             }
             
             // Add body for POST/PUT

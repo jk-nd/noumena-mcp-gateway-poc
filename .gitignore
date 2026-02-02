@@ -18,11 +18,12 @@ out/
 .DS_Store
 Thumbs.db
 
-# Secrets (never commit)
+# Secrets (never commit actual secret files)
 *.pem
 *.key
 *.p12
-secrets/
+/secrets/
+deployments/secrets/
 
 # Local config overrides
 *.local.yaml

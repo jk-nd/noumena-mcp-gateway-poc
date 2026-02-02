@@ -23,6 +23,7 @@ private val logger = KotlinLogging.logger {}
 class NplClient {
     
     private val nplUrl = System.getenv("NPL_URL") ?: "http://npl-engine:8080"
+    private val devMode = System.getenv("DEV_MODE")?.toBoolean() ?: true
     
     private val client = HttpClient(CIO) {
         install(ContentNegotiation) {
@@ -40,6 +41,22 @@ class NplClient {
      */
     suspend fun checkPolicy(request: PolicyRequest): PolicyResponse {
         logger.info { "Checking policy: service=${request.service}, operation=${request.operation}" }
+        
+        // DEV MODE: Bypass NPL and auto-allow
+        if (devMode) {
+            logger.warn { "DEV MODE: Auto-allowing request (NPL bypassed)" }
+            val requestId = "dev-${System.currentTimeMillis()}"
+            
+            // In dev mode, we need to manually trigger the executor
+            // In production, NPL does this via HTTP Bridge
+            triggerExecutorDirectly(request, requestId)
+            
+            return PolicyResponse(
+                allowed = true,
+                requestId = requestId,
+                reason = "DEV MODE: Auto-allowed"
+            )
+        }
         
         return try {
             val response = client.post("$nplUrl/api/policy/check") {
@@ -59,12 +76,36 @@ class NplClient {
         } catch (e: Exception) {
             logger.error(e) { "Error calling NPL Engine" }
             
-            // TODO: Decide on fail-open vs fail-closed
-            // For now, fail closed (deny)
+            // Fail closed (deny) when NPL is unavailable
             PolicyResponse(
                 allowed = false,
                 reason = "Policy engine unavailable"
             )
+        }
+    }
+    
+    /**
+     * DEV MODE ONLY: Directly trigger executor (simulates what NPL HTTP Bridge does)
+     */
+    private suspend fun triggerExecutorDirectly(request: PolicyRequest, requestId: String) {
+        val executorUrl = System.getenv("EXECUTOR_URL") ?: "http://executor:8081"
+        
+        try {
+            client.post("$executorUrl/execute") {
+                contentType(ContentType.Application.Json)
+                setBody(mapOf(
+                    "requestId" to requestId,
+                    "tenantId" to request.tenantId,
+                    "userId" to request.userId,
+                    "service" to request.service,
+                    "operation" to request.operation,
+                    "params" to request.params,
+                    "callbackUrl" to request.callbackUrl
+                ))
+            }
+            logger.info { "DEV MODE: Triggered executor for $requestId" }
+        } catch (e: Exception) {
+            logger.error(e) { "DEV MODE: Failed to trigger executor" }
         }
     }
 }

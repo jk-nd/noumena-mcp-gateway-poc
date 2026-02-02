@@ -7,8 +7,7 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
-import io.noumena.mcp.executor.secrets.Credentials
-import io.noumena.mcp.executor.secrets.CredentialType
+import io.noumena.mcp.executor.secrets.ServiceCredentials
 import kotlinx.serialization.json.Json
 import mu.KotlinLogging
 
@@ -34,7 +33,7 @@ class McpUpstream {
         endpoint: String,
         operation: String,
         params: Map<String, String>,
-        credentials: Credentials
+        credentials: ServiceCredentials
     ): Map<String, String> {
         logger.info { "Calling MCP: $endpoint/$operation" }
         
@@ -44,15 +43,11 @@ class McpUpstream {
         val response = client.post("$endpoint/tools/$operation") {
             contentType(ContentType.Application.Json)
             
-            // Add authentication based on credential type
-            when (credentials.type) {
-                CredentialType.OAUTH -> {
-                    header("Authorization", "Bearer ${credentials.accessToken}")
-                }
-                CredentialType.API_KEY -> {
-                    header("X-API-Key", credentials.apiKey)
-                }
-                else -> {}
+            // Add authentication based on available credentials
+            credentials.accessToken?.let {
+                header("Authorization", "Bearer $it")
+            } ?: credentials.apiKey?.let {
+                header("X-API-Key", it)
             }
             
             setBody(params)

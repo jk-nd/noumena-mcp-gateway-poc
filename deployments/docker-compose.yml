@@ -14,9 +14,12 @@ services:
       - NPL_URL=http://npl-engine:8080
       - OIDC_ISSUER=http://keycloak:8080/realms/noumena
       - CALLBACK_URL=http://gateway:8080/callback
+      - EXECUTOR_URL=http://executor:8081
+      - DEV_MODE=true  # Bypasses NPL and auth for testing
       # NOTE: No VAULT_* environment variables - Gateway has no Vault access
     depends_on:
       - keycloak
+      - executor
     networks:
       - mcp-network
 
@@ -30,6 +33,7 @@ services:
     environment:
       - VAULT_ADDR=http://vault:8200
       - VAULT_TOKEN=dev-token
+      - DEV_MODE=true  # Uses mock credentials instead of Vault
     depends_on:
       - vault
     # SECURITY: Executor is NOT exposed externally - only NPL can reach it
