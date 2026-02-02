@@ -1,12 +1,10 @@
-version: '3.8'
-
 services:
   # ─────────────────────────────────────────────────────────────────────────
   # Noumena MCP Gateway (NO Vault access)
   # ─────────────────────────────────────────────────────────────────────────
   gateway:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.gateway
     ports:
       - "8080:8080"
@@ -28,7 +26,7 @@ services:
   # ─────────────────────────────────────────────────────────────────────────
   executor:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.executor
     environment:
       - VAULT_ADDR=http://vault:8200

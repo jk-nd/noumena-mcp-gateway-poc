@@ -91,17 +91,19 @@ class NplClient {
         val executorUrl = System.getenv("EXECUTOR_URL") ?: "http://executor:8081"
         
         try {
+            val executeRequest = io.noumena.mcp.shared.models.ExecuteRequest(
+                requestId = requestId,
+                tenantId = request.tenantId,
+                userId = request.userId,
+                service = request.service,
+                operation = request.operation,
+                params = request.params,
+                callbackUrl = request.callbackUrl
+            )
+            
             client.post("$executorUrl/execute") {
                 contentType(ContentType.Application.Json)
-                setBody(mapOf(
-                    "requestId" to requestId,
-                    "tenantId" to request.tenantId,
-                    "userId" to request.userId,
-                    "service" to request.service,
-                    "operation" to request.operation,
-                    "params" to request.params,
-                    "callbackUrl" to request.callbackUrl
-                ))
+                setBody(executeRequest)
             }
             logger.info { "DEV MODE: Triggered executor for $requestId" }
         } catch (e: Exception) {
