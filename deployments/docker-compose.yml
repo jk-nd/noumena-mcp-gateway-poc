@@ -55,23 +55,39 @@ services:
   #     - mcp-network
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Docker MCP Containers (from Docker Hub MCP Catalog)
+  # Mock MCP Server (for testing without real credentials)
   # ─────────────────────────────────────────────────────────────────────────
-  # google-mcp:
+  mock-mcp:
+    build:
+      context: ../mock-mcp
+      dockerfile: Dockerfile
+    networks:
+      - mcp-network
+
+  # Alias services to point to mock (for dev testing)
+  google-mcp:
+    build:
+      context: ../mock-mcp
+      dockerfile: Dockerfile
+    networks:
+      - mcp-network
+
+  slack-mcp:
+    build:
+      context: ../mock-mcp
+      dockerfile: Dockerfile
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Real Docker MCP Containers (uncomment when you have credentials)
+  # ─────────────────────────────────────────────────────────────────────────
+  # google-mcp-real:
   #   image: docker.io/mcp/google-workspace:latest
   #   environment:
   #     - GOOGLE_OAUTH_CONFIG_PATH=/secrets/google-oauth.json
   #   volumes:
   #     - ./secrets/google:/secrets:ro
-  #   networks:
-  #     - mcp-network
-
-  # slack-mcp:
-  #   image: docker.io/mcp/slack:latest
-  #   environment:
-  #     - SLACK_TOKEN_PATH=/secrets/slack-token
-  #   volumes:
-  #     - ./secrets/slack:/secrets:ro
   #   networks:
   #     - mcp-network
 
