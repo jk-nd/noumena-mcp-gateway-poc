@@ -1,0 +1,8 @@
+# Custom RabbitMQ with proper erlang cookie setup
+FROM rabbitmq:3.12-management
+
+# Set the erlang cookie with proper permissions
+RUN mkdir -p /var/lib/rabbitmq && \
+    echo "mcp-gateway-cookie" > /var/lib/rabbitmq/.erlang.cookie && \
+    chown -R rabbitmq:rabbitmq /var/lib/rabbitmq && \
+    chmod 400 /var/lib/rabbitmq/.erlang.cookie

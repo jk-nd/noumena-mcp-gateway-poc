@@ -1,0 +1,50 @@
+# Party Automation Rules for MCP Gateway
+#
+# Maps JWT claims to NPL protocol parties.
+# Party names use 'p' prefix to distinguish from JWT claim roles.
+#
+# Hierarchy:
+# - pAdmin: Organization administrators (full control)
+# - pUser: End users (tool ownership)
+# - pAgent: AI agents (tool invocation)
+#
+# Note: Gateway uses built-in NPL 'observers' mechanism for read access.
+# Admin adds Gateway as observer via addObserver permission.
+
+# ============================================================================
+# REGISTRY PACKAGE - Service Management
+# ============================================================================
+
+registry.ServiceRegistry:
+  # Admin has full control
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+
+# ============================================================================
+# SERVICES PACKAGE - Tool Governance
+# ============================================================================
+
+services.ToolExecutionPolicy:
+  # Admin has override control on all tools
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  # Agent invokes the tool (checkAndApprove)
+  pAgent:
+    set:
+      claims:
+        role:
+          - agent
+          - admin  # Admin can act as agent
+  # Executor validates and reports completion
+  pExecutor:
+    set:
+      claims:
+        role:
+          - executor
+          - admin  # Admin can act as executor

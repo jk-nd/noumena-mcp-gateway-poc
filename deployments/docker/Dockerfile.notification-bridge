@@ -1,0 +1,18 @@
+# Notification Bridge Dockerfile
+# Lightweight service that receives NPL notifications and forwards to Executor
+# SECURITY: Protected by network isolation
+
+FROM gradle:8.5-jdk17 AS builder
+WORKDIR /app
+COPY . .
+RUN gradle :notification-bridge:shadowJar --no-daemon
+
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+
+# Copy JAR
+COPY --from=builder /app/notification-bridge/build/libs/notification-bridge-*-all.jar notification-bridge.jar
+
+EXPOSE 8082
+
+ENTRYPOINT ["java", "-jar", "notification-bridge.jar"]

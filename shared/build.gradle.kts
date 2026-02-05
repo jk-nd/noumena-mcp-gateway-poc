@@ -13,4 +13,18 @@ dependencies {
     // Config loading
     implementation("com.sksamuel.hoplite:hoplite-core:2.7.5")
     implementation("com.sksamuel.hoplite:hoplite-yaml:2.7.5")
+    
+    // Testing
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+}
+
+tasks.test {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed", "standardOut", "standardError")
+        showExceptions = true
+        showCauses = true
+        showStackTraces = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

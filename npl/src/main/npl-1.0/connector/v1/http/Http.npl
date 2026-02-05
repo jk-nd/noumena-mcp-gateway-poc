@@ -1,0 +1,75 @@
+package connector.v1.http // Do not modify the package name. Required for http-connector integration.
+
+/**
+ * HTTP methods supported by the connector
+ */
+enum HttpMethod {
+    GET,
+    POST,
+    PUT,
+    PATCH,
+    DELETE
+};
+
+/**
+ * Execution status of an HTTP request
+ */
+enum ExecutionStatus {
+    Success,
+    Failure
+};
+
+/**
+ * Union type for HTTP data payloads
+ * Supports various JSON-compatible data structures
+ */
+union HttpData {
+    Text,
+    Number,
+    Boolean,
+    List<HttpData>,
+    Pair<Text, HttpData>,
+    List<Pair<Text, HttpData>>
+};
+
+/**
+ * HTTP request structure
+ * @param method The HTTP method to use
+ * @param url The URL to send the request to
+ * @param data The request body data
+ */
+struct HttpRequest {
+    method: HttpMethod,
+    url: Text,
+    data: HttpData
+};
+
+/**
+ * HTTP response structure
+ * @param executionStatus Whether the request succeeded or failed
+ * @param statusCode The HTTP status code
+ * @param data The response body data (as JSON string for simplicity)
+ */
+struct HttpResponse {
+    executionStatus: ExecutionStatus,
+    statusCode: Number,
+    data: Text
+};
+
+/**
+ * Notification for executing HTTP requests via the HTTP Connector.
+ * The HTTP Connector subscribes to this notification via AMQP,
+ * executes the request, and returns the response.
+ * @param httpRequest The HTTP request to execute
+ * @return The HTTP response from the external service
+ */
+notification HttpRequestExecutionMessage(httpRequest: HttpRequest) returns HttpResponse;
+
+/**
+ * Helper function to check if an HTTP status code indicates success (2xx)
+ * @param statusCode The HTTP status code to check
+ * @return True if the status code is in the 2xx range
+ */
+function httpStatusCodeIsSuccess(statusCode: Number) returns Boolean -> {
+    return statusCode >= 200 && statusCode < 300;
+};

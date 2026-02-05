@@ -44,9 +44,21 @@ data class ExecuteResult(
     /** Whether the execution succeeded */
     val success: Boolean,
     
-    /** Result data (if success) */
+    /** Result data - flattened key-value pairs (legacy) */
     val data: Map<String, String>? = null,
     
     /** Error message (if failure) */
-    val error: String? = null
+    val error: String? = null,
+    
+    /** 
+     * Raw MCP content array from upstream tool.
+     * Preserves the full CallToolResult.content structure as JSON string.
+     * Gateway should parse this and pass through to MCP client.
+     */
+    val mcpContent: String? = null,
+    
+    /**
+     * Whether the upstream tool returned isError=true
+     */
+    val mcpIsError: Boolean = false
 )

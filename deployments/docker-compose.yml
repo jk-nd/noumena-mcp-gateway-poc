@@ -1,78 +1,356 @@
+volumes:
+  engine-db: { }
+  keycloak-db: { }
+  keycloak-provisioning: { }
+
 services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # NPL Engine
+  # ─────────────────────────────────────────────────────────────────────────
+  npl-engine:
+    image: ghcr.io/noumenadigital/images/engine:latest
+    ports:
+      - "12000:12000"
+      - "12400:12400"
+    extra_hosts:
+      # Allow NPL engine to reach host machine's localhost for JWKS validation
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../npl/src/main/yaml:/npl/yaml:ro
+      - ../npl/src/main/npl-1.0:/npl/npl-1.0:ro
+    environment:
+      ENGINE_DEV_MODE: "false"
+      # Trust tokens from both localhost (browser) and keycloak (Docker)
+      ENGINE_ALLOWED_ISSUERS: >-
+        http://keycloak:11000/realms/mcpgateway,
+        http://localhost:11000/realms/mcpgateway
+      # Map localhost issuer to host.docker.internal for JWKS resolution
+      ENGINE_ISSUER_JWKS_URL_OVERRIDES: "http://localhost:11000/realms/mcpgateway=http://host.docker.internal:11000/realms/mcpgateway/protocol/openid-connect/certs"
+      ENGINE_DB_URL: "jdbc:postgresql://engine-db:5432/engine"
+      ENGINE_DB_USER: engine
+      ENGINE_DB_PASSWORD: secret
+      ENGINE_DB_HISTORY_USER: history
+      ENGINE_DB_HISTORY_SCHEMA: history
+      ENGINE_DB_READ_MODEL_USER: postgraphile
+      ENGINE_NPL_MIGRATION_DIRECTORY_PATH: /npl
+      ENGINE_CORS_ALLOWED_ORIGINS: "*"
+      # AMQP Configuration for HTTP Connector
+      AMQP_USERNAME: guest
+      AMQP_PASSWORD: guest
+      AMQP_BROKER_URL: "amqp://rabbitmq:5672"
+      AMQP_QUEUE_NAME: "/exchange/npl-exchange"
+      AMQP_POLLING_PERIOD_SECONDS: 1
+    depends_on:
+      engine-db:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - mcp-network
+
+  engine-db:
+    image: postgres:14.4-alpine
+    mem_limit: 256m
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: engine
+      ENGINE_DB_USER: engine
+      ENGINE_DB_PASSWORD: secret
+      HISTORY_DB_USER: history
+      HISTORY_DB_PASSWORD: secret
+      HISTORY_DB_SCHEMA: history
+      READ_MODEL_DB_USER: postgraphile
+      READ_MODEL_DB_PASSWORD: secret
+    volumes:
+      - engine-db:/var/lib/postgresql/data
+      - ../db_init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: pg_isready -U postgres
+      interval: 1s
+      timeout: 5s
+      retries: 50
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Keycloak + Provisioning
+  # ─────────────────────────────────────────────────────────────────────────
+  keycloak:
+    build:
+      context: ../keycloak
+    command: |
+      start-dev
+      --spi-events-listener-jboss-logging-success-level=info
+      --spi-events-listener-jboss-logging-error-level=error
+      --hostname-strict=false
+      --health-enabled=true
+      --http-enabled=true
+      --db=postgres
+      --http-port=11000
+    ports:
+      - "11000:11000"
+      - "9000:9000"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: welcome
+      KC_DB_URL: jdbc:postgresql://keycloak-db/postgres
+      KC_DB_USERNAME: postgres
+      KC_DB_PASSWORD: testing
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: 11000
+      KC_HOSTNAME_STRICT: "false"
+    depends_on:
+      keycloak-db:
+        condition: service_started
+    healthcheck:
+      test: curl http://localhost:9000/health || exit 1
+      interval: 1s
+      retries: 60
+    networks:
+      - mcp-network
+
+  keycloak-db:
+    image: postgres:14.4-alpine
+    mem_limit: 256m
+    volumes:
+      - keycloak-db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: testing
+    healthcheck:
+      test: pg_isready -U postgres
+      interval: 1s
+      timeout: 5s
+      retries: 50
+    networks:
+      - mcp-network
+
+  keycloak-provisioning:
+    build:
+      context: ../keycloak-provisioning
+    command: /local.sh
+    volumes:
+      - keycloak-provisioning:/state
+    environment:
+      KEYCLOAK_USER: admin
+      KEYCLOAK_PASSWORD: welcome
+      KEYCLOAK_URL: http://keycloak:11000
+      TF_VAR_default_password: Welcome123
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Inspector (to view NPL state)
+  # ─────────────────────────────────────────────────────────────────────────
+  inspector:
+    image: ghcr.io/noumenadigital/packages/inspector:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - NPL_ENGINE_URL=http://npl-engine:12000
+      - KEYCLOAK_URL=http://keycloak:11000
+      - KEYCLOAK_REALM=mcpgateway
+      - KEYCLOAK_CLIENT_ID=mcpgateway
+    depends_on:
+      - npl-engine
+      - keycloak-provisioning
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # RabbitMQ (Message Broker for HTTP Connector)
+  # ─────────────────────────────────────────────────────────────────────────
+  rabbitmq:
+    # Custom RabbitMQ with proper erlang cookie setup
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics ping
+      interval: 3s
+      timeout: 10s
+      retries: 60
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # HTTP Bridge (Local dev replacement for HTTP Connector - no network restrictions)
+  # ─────────────────────────────────────────────────────────────────────────
+  http-bridge:
+    build:
+      context: ../tools/http-bridge
+      dockerfile: Dockerfile
+    environment:
+      ENGINE_URL: http://npl-engine:12000
+      KEYCLOAK_URL: http://keycloak:11000
+      KEYCLOAK_REALM: mcpgateway
+      KEYCLOAK_CLIENT_ID: mcpgateway
+      KEYCLOAK_USERNAME: admin
+      KEYCLOAK_PASSWORD: Welcome123
+      AMQP_HOST: rabbitmq
+      AMQP_PORT: "5672"
+      AMQP_USERNAME: guest
+      AMQP_PASSWORD: guest
+      AMQP_QUEUE_NAME: npl-notifications
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      npl-engine:
+        condition: service_healthy
+      keycloak-provisioning:
+        condition: service_completed_successfully
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Gateway (NO Vault access)
+  # ─────────────────────────────────────────────────────────────────────────
   gateway:
     build:
       context: ..
       dockerfile: deployments/docker/Dockerfile.gateway
     ports:
-    - 8080:8080
+      - "8000:8080"
     environment:
-    - NPL_URL=http://npl-engine:8080
-    - OIDC_ISSUER=http://keycloak:8080/realms/noumena
-    - CALLBACK_URL=http://gateway:8080/callback
-    - EXECUTOR_URL=http://executor:8081
-    - DEV_MODE=true
+      - NPL_URL=http://npl-engine:12000
+      - KEYCLOAK_URL=http://keycloak:11000
+      - KEYCLOAK_REALM=mcpgateway
+      - KEYCLOAK_CLIENT_ID=mcpgateway
+      - GATEWAY_URL=http://gateway:8080
+      - CALLBACK_URL=http://gateway:8080/callback
+      # RabbitMQ configuration (for triggering Executor after NPL approval)
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - EXECUTION_QUEUE=npl.execution.requests
+      - DEV_MODE=false  # Use real NPL policy checks
     depends_on:
-    - keycloak
-    - executor
+      npl-engine:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
-    - mcp-network
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Executor (HAS Vault access, network isolated via RabbitMQ)
+  # ─────────────────────────────────────────────────────────────────────────
   executor:
     build:
       context: ..
       dockerfile: deployments/docker/Dockerfile.executor
+    ports:
+      - "8001:8081"  # Health check only - no inbound HTTP for execution
     environment:
-    - VAULT_ADDR=http://vault:8200
-    - VAULT_TOKEN=dev-token
-    - DEV_MODE=true
+      # Vault configuration
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=dev-token
+      # RabbitMQ configuration (network isolated execution)
+      - USE_RABBITMQ=true
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - EXECUTION_QUEUE=npl.execution.requests
+      # NPL configuration (for validation and resume)
+      - NPL_URL=http://npl-engine:12000
+      - KEYCLOAK_URL=http://keycloak:11000
+      - KEYCLOAK_REALM=mcpgateway
+      - EXECUTOR_CLIENT_SECRET=executor-secret
+      # Dev mode - set to false for real NPL validation and completion reports
+      - DEV_MODE=false
     depends_on:
-    - vault
+      vault:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      npl-engine:
+        condition: service_healthy
     networks:
-    - mcp-network
-  mock-mcp:
-    build:
-      context: ../mock-mcp
-      dockerfile: Dockerfile
-    networks:
-    - mcp-network
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Mock MCP Servers
+  # ─────────────────────────────────────────────────────────────────────────
   google-mcp:
     build:
       context: ../mock-mcp
       dockerfile: Dockerfile
     networks:
-    - mcp-network
+      - mcp-network
+
   slack-mcp:
     build:
       context: ../mock-mcp
       dockerfile: Dockerfile
     networks:
-    - mcp-network
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Real MCP Servers - REMOVED
+  # ─────────────────────────────────────────────────────────────────────────
+  # MCP servers (duckduckgo, fetch) are now built into the Executor image
+  # and communicate via STDIO. This eliminates:
+  # - Separate bridge containers
+  # - HTTP exposure between services
+  # - Duplicated translation logic
+  # 
+  # The Executor spawns MCP processes directly and communicates via JSON-RPC
+  # over STDIO - more secure and efficient.
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Vault (Secret Store)
+  # ─────────────────────────────────────────────────────────────────────────
   vault:
     image: hashicorp/vault:latest
     ports:
-    - 8200:8200
+      - "8200:8200"
     environment:
-    - VAULT_DEV_ROOT_TOKEN_ID=dev-token
-    - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+      - VAULT_DEV_ROOT_TOKEN_ID=dev-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
     cap_add:
-    - IPC_LOCK
+      - IPC_LOCK
     networks:
-    - mcp-network
-  keycloak:
-    image: quay.io/keycloak/keycloak:latest
-    ports:
-    - 8083:8080
-    environment:
-    - KEYCLOAK_ADMIN=admin
-    - KEYCLOAK_ADMIN_PASSWORD=admin
-    command: start-dev
-    networks:
-    - mcp-network
-  weather-api-mcp:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Integration Test Runner (on-demand)
+  # ─────────────────────────────────────────────────────────────────────────
+  test-runner:
     build:
-      context: ../mock-mcp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: integration-tests/Dockerfile
+    environment:
+      - NPL_URL=http://npl-engine:12000
+      - KEYCLOAK_URL=http://keycloak:11000
+      - GATEWAY_URL=http://gateway:8080
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      gateway:
+        condition: service_started
     networks:
-    - mcp-network
+      - mcp-network
+    profiles:
+      - test  # Only runs when explicitly requested
+
 networks:
   mcp-network:
     driver: bridge

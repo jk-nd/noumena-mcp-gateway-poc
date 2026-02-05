@@ -25,6 +25,7 @@ dependencies {
     implementation("io.ktor:ktor-server-auth-jwt:$ktorVersion")
     implementation("io.ktor:ktor-server-status-pages:$ktorVersion")
     implementation("io.ktor:ktor-server-call-logging:$ktorVersion")
+    implementation("io.ktor:ktor-server-websockets:$ktorVersion")
     
     // Ktor Client (for NPL Engine calls)
     implementation("io.ktor:ktor-client-core:$ktorVersion")
@@ -35,11 +36,31 @@ dependencies {
     implementation("com.sksamuel.hoplite:hoplite-core:2.7.5")
     implementation("com.sksamuel.hoplite:hoplite-yaml:2.7.5")
     
+    // RabbitMQ - for triggering Executor after NPL approval
+    implementation("com.rabbitmq:amqp-client:5.20.0")
+    
     // NOTE: Gateway has NO Vault dependency - this is intentional for security
+    
+    // Testing
+    testImplementation("io.ktor:ktor-server-test-host:$ktorVersion")
+    testImplementation("io.ktor:ktor-client-mock:$ktorVersion")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+    testImplementation("io.mockk:mockk:1.13.8")
 }
 
 tasks.jar {
     manifest {
         attributes["Main-Class"] = "io.noumena.mcp.gateway.ApplicationKt"
+    }
+}
+
+tasks.test {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed", "standardOut", "standardError")
+        showExceptions = true
+        showCauses = true
+        showStackTraces = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
 }

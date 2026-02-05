@@ -1,0 +1,76 @@
+{
+  "rabbit_version": "3.13.0",
+  "default_vhost": "/",
+  "default_user": "${AMQP_USERNAME}",
+  "default_pass": "${AMQP_PASSWORD}",
+  "users": [
+    {
+      "name": "${AMQP_USERNAME}",
+      "password": "${AMQP_PASSWORD}",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "${AMQP_USERNAME}",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "parameters": [],
+  "global_parameters": [
+    {
+      "name": "internal_cluster_id",
+      "value": "rabbitmq-cluster-id-1"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "ha",
+      "pattern": ".*",
+      "priority": 1,
+      "definition": {
+        "delivery-limit": 3,
+        "max-length-bytes": 536870912,
+        "overflow": "reject-publish"
+      }
+    }
+  ],
+  "queues":[
+    {
+      "name":"${AMQP_QUEUE_NAME}",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges":[
+    {
+      "name": "npl-exchange",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings":[
+    {
+      "source":"npl-exchange",
+      "vhost":"/",
+      "destination":"${AMQP_QUEUE_NAME}",
+      "destination_type":"queue",
+      "arguments":{}
+    }
+  ]
+}
