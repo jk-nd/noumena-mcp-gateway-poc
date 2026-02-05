@@ -48,7 +48,7 @@ A policy-enforced MCP (Model Context Protocol) gateway that enables AI agents to
 │  └─────────────┘  └─────────────┘  └─────────────┘           │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
-```
+       ```
 
 ## Agent Connectivity
 
@@ -58,8 +58,9 @@ The Gateway supports multiple transport options for maximum agent compatibility:
 |----------|-----------|----------|
 | `POST /mcp` | HTTP | LangChain, ADK, Sligo.ai, simple agents |
 | `WS /mcp/ws` | WebSocket | Streaming agents, long-running connections |
+| `GET /sse` | SSE | MCP Inspector, browser-based clients |
 
-Both endpoints accept standard MCP JSON-RPC messages and return the same responses.
+All endpoints accept standard MCP JSON-RPC messages and return the same responses.
 
 ## Components
 
@@ -192,10 +193,37 @@ noumena-mcp-gateway/
 │   ├── full_demo.py
 │   └── verbose_flow_demo.py
 │
+├── tui/                     # MCP Gateway Wizard (CLI)
+│   └── src/
+│       ├── cli.ts           # Main wizard (Clack-based)
+│       └── lib/             # Config, API, Docker clients
+│
+├── configs/                 # Service configurations
+│   └── services.yaml        # Upstream MCP service definitions
+│
 ├── keycloak-provisioning/   # Terraform for Keycloak setup
 ├── rabbitmq/                # RabbitMQ configuration
 └── docs/                    # Architecture documentation
 ```
+
+## MCP Gateway Wizard
+
+An interactive CLI for managing MCP Gateway services:
+
+```bash
+cd tui
+npm install
+npm start
+```
+
+Features:
+- **Service management** - Enable/disable services (syncs with NPL policy)
+- **Container control** - Pull, start, stop Docker containers for MCP servers
+- **Tool management** - Enable/disable individual tools per service
+- **Docker Hub search** - Find and add MCP servers from the `mcp/*` namespace
+- **Custom images** - Add local or private registry Docker images
+
+See [tui/README.md](tui/README.md) for detailed documentation.
 
 ## Configuration
 

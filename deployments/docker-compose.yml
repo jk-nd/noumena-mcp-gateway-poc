@@ -1,3 +1,11 @@
+# Gateway Infrastructure
+# Start with: docker compose up -d
+#
+# This creates a "gateway" folder in Docker Desktop for all gateway infrastructure.
+# For MCP servers, use: docker compose -f docker-compose.mcp.yml up -d
+
+name: gateway
+
 volumes:
   engine-db: { }
   keycloak-db: { }
@@ -188,33 +196,33 @@ services:
       - mcp-network
 
   # ─────────────────────────────────────────────────────────────────────────
-  # HTTP Bridge (Local dev replacement for HTTP Connector - no network restrictions)
+  # HTTP Bridge (disabled - tools/http-bridge not yet implemented)
   # ─────────────────────────────────────────────────────────────────────────
-  http-bridge:
-    build:
-      context: ../tools/http-bridge
-      dockerfile: Dockerfile
-    environment:
-      ENGINE_URL: http://npl-engine:12000
-      KEYCLOAK_URL: http://keycloak:11000
-      KEYCLOAK_REALM: mcpgateway
-      KEYCLOAK_CLIENT_ID: mcpgateway
-      KEYCLOAK_USERNAME: admin
-      KEYCLOAK_PASSWORD: Welcome123
-      AMQP_HOST: rabbitmq
-      AMQP_PORT: "5672"
-      AMQP_USERNAME: guest
-      AMQP_PASSWORD: guest
-      AMQP_QUEUE_NAME: npl-notifications
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      npl-engine:
-        condition: service_healthy
-      keycloak-provisioning:
-        condition: service_completed_successfully
-    networks:
-      - mcp-network
+  # http-bridge:
+  #   build:
+  #     context: ../tools/http-bridge
+  #     dockerfile: Dockerfile
+  #   environment:
+  #     ENGINE_URL: http://npl-engine:12000
+  #     KEYCLOAK_URL: http://keycloak:11000
+  #     KEYCLOAK_REALM: mcpgateway
+  #     KEYCLOAK_CLIENT_ID: mcpgateway
+  #     KEYCLOAK_USERNAME: admin
+  #     KEYCLOAK_PASSWORD: Welcome123
+  #     AMQP_HOST: rabbitmq
+  #     AMQP_PORT: "5672"
+  #     AMQP_USERNAME: guest
+  #     AMQP_PASSWORD: guest
+  #     AMQP_QUEUE_NAME: npl-notifications
+  #   depends_on:
+  #     rabbitmq:
+  #       condition: service_healthy
+  #     npl-engine:
+  #       condition: service_healthy
+  #     keycloak-provisioning:
+  #       condition: service_completed_successfully
+  #   networks:
+  #     - mcp-network
 
   # ─────────────────────────────────────────────────────────────────────────
   # Gateway (NO Vault access)
@@ -225,6 +233,8 @@ services:
       dockerfile: deployments/docker/Dockerfile.gateway
     ports:
       - "8000:8080"
+    volumes:
+      - ../configs/services.yaml:/app/configs/services.yaml:ro
     environment:
       - NPL_URL=http://npl-engine:12000
       - KEYCLOAK_URL=http://keycloak:11000
@@ -239,6 +249,8 @@ services:
       - RABBITMQ_PASS=guest
       - EXECUTION_QUEUE=npl.execution.requests
       - DEV_MODE=false  # Use real NPL policy checks
+      # Dynamic services configuration
+      - SERVICES_CONFIG_PATH=/app/configs/services.yaml
     depends_on:
       npl-engine:
         condition: service_healthy
@@ -256,6 +268,8 @@ services:
       dockerfile: deployments/docker/Dockerfile.executor
     ports:
       - "8001:8081"  # Health check only - no inbound HTTP for execution
+    volumes:
+      - ../configs/services.yaml:/app/configs/services.yaml:ro
     environment:
       # Vault configuration
       - VAULT_ADDR=http://vault:8200
@@ -274,6 +288,8 @@ services:
       - EXECUTOR_CLIENT_SECRET=executor-secret
       # Dev mode - set to false for real NPL validation and completion reports
       - DEV_MODE=false
+      # Dynamic services configuration
+      - SERVICES_CONFIG_PATH=/app/configs/services.yaml
     depends_on:
       vault:
         condition: service_started
@@ -283,35 +299,6 @@ services:
         condition: service_healthy
     networks:
       - mcp-network
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Mock MCP Servers
-  # ─────────────────────────────────────────────────────────────────────────
-  google-mcp:
-    build:
-      context: ../mock-mcp
-      dockerfile: Dockerfile
-    networks:
-      - mcp-network
-
-  slack-mcp:
-    build:
-      context: ../mock-mcp
-      dockerfile: Dockerfile
-    networks:
-      - mcp-network
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Real MCP Servers - REMOVED
-  # ─────────────────────────────────────────────────────────────────────────
-  # MCP servers (duckduckgo, fetch) are now built into the Executor image
-  # and communicate via STDIO. This eliminates:
-  # - Separate bridge containers
-  # - HTTP exposure between services
-  # - Duplicated translation logic
-  # 
-  # The Executor spawns MCP processes directly and communicates via JSON-RPC
-  # over STDIO - more secure and efficient.
 
   # ─────────────────────────────────────────────────────────────────────────
   # Vault (Secret Store)

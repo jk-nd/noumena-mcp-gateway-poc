@@ -26,6 +26,7 @@ dependencies {
     implementation("io.ktor:ktor-server-status-pages:$ktorVersion")
     implementation("io.ktor:ktor-server-call-logging:$ktorVersion")
     implementation("io.ktor:ktor-server-websockets:$ktorVersion")
+    implementation("io.ktor:ktor-server-cors:$ktorVersion")
     
     // Ktor Client (for NPL Engine calls)
     implementation("io.ktor:ktor-client-core:$ktorVersion")

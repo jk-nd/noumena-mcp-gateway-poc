@@ -1,0 +1,53 @@
+# MCP Servers
+# Start with: docker compose -p mcp -f docker-compose.mcp.yml up -d
+#
+# This creates a separate "mcp" folder in Docker Desktop for all MCP servers.
+
+name: mcp
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Atlassian MCP (Jira, Confluence)
+  # ─────────────────────────────────────────────────────────────────────────
+  atlassian:
+    image: mcp/atlassian
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    environment:
+      # Configure via environment variables or mount config
+      - ATLASSIAN_URL=${ATLASSIAN_URL:-}
+      - ATLASSIAN_USERNAME=${ATLASSIAN_USERNAME:-}
+      - ATLASSIAN_API_TOKEN=${ATLASSIAN_API_TOKEN:-}
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Fetch MCP (HTTP requests)
+  # ─────────────────────────────────────────────────────────────────────────
+  fetch:
+    image: mcp/fetch
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Add more MCP servers here as needed
+  # ─────────────────────────────────────────────────────────────────────────
+  # Example:
+  # 
+  # github:
+  #   image: mcp/github
+  #   stdin_open: true
+  #   tty: true
+  #   restart: unless-stopped
+  #   environment:
+  #     - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+  #   networks:
+  #     - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

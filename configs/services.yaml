@@ -1,0 +1,52 @@
+# Dynamic MCP Service Configuration
+# This file defines all upstream services and their tools.
+# Both Gateway (for tool listing) and Executor (for routing) read this config.
+
+services:
+  - name: "atlassian"
+    displayName: "Atlassian"
+    type: "MCP_STDIO"
+    enabled: false
+    command: "docker run -i --rm mcp/atlassian"
+    args: []
+    requiresCredentials: false
+    description: "Tools for Atlassian products (Confluence and Jira). This integration supports both Atlassian Clou..."
+    tools:
+      - name: "atlassian_default"
+        description: "Default tool for atlassian - discover actual tools by running the container"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+  - name: "sequentialthinking"
+    displayName: "Sequentialthinking"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/sequentialthinking"
+    args: []
+    requiresCredentials: false
+    description: "Dynamic and reflective problem-solving through thought sequences."
+    tools:
+      - name: "sequentialthinking_default"
+        description: "Default tool for sequentialthinking - discover actual tools by running the container"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true
+  - name: "duckduckgo"
+    displayName: "Duckduckgo"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/duckduckgo"
+    args: []
+    requiresCredentials: false
+    description: "A Model Context Protocol (MCP) server that provides web search capabilities through DuckDuckGo, w..."
+    tools:
+      - name: "duckduckgo_default"
+        description: "Default tool for duckduckgo - discover actual tools by running the container"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true

@@ -7,26 +7,46 @@ import io.ktor.server.routing.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.plugins.calllogging.*
+import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.response.*
 import io.ktor.server.request.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
 import io.ktor.http.*
+import io.ktor.utils.io.*
 import io.noumena.mcp.gateway.server.McpServerHandler
 import io.noumena.mcp.gateway.callback.callbackRoutes
 import io.noumena.mcp.gateway.context.contextRoutes
 import io.noumena.mcp.gateway.context.ContextStore
 import io.noumena.mcp.gateway.messaging.ExecutorPublisher
+import io.noumena.mcp.shared.config.ServicesConfigLoader
+import io.noumena.mcp.shared.config.ToolDefinition
 import mu.KotlinLogging
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 
 private val logger = KotlinLogging.logger {}
 
 @Serializable
 data class HealthResponse(val status: String, val service: String, val mcpEnabled: Boolean = true)
+
+/**
+ * SSE session for MCP Inspector connections.
+ * Each session has a channel for sending responses back to the client.
+ */
+data class SseSession(
+    val id: String,
+    val responseChannel: Channel<String> = Channel(Channel.UNLIMITED),
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+// Active SSE sessions (sessionId -> SseSession)
+private val sseSessions = ConcurrentHashMap<String, SseSession>()
 
 fun main() {
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
@@ -36,6 +56,7 @@ fun main() {
     logger.info { "MCP endpoints:" }
     logger.info { "  POST /mcp     - HTTP (LangChain, ADK, Sligo.ai, etc.)" }
     logger.info { "  WS   /mcp/ws  - WebSocket (streaming agents)" }
+    logger.info { "  GET  /sse     - SSE (MCP Inspector)" }
     
     embeddedServer(Netty, port = port) {
         configureGateway()
@@ -51,6 +72,16 @@ fun Application.configureGateway() {
     }
     
     install(CallLogging)
+    
+    // CORS for MCP Inspector and other cross-origin clients
+    install(CORS) {
+        anyHost()
+        allowHeader(HttpHeaders.ContentType)
+        allowHeader(HttpHeaders.Authorization)
+        allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Post)
+        allowMethod(HttpMethod.Options)
+    }
     
     install(WebSockets) {
         pingPeriod = 15.seconds
@@ -70,6 +101,74 @@ fun Application.configureGateway() {
         // Health check
         get("/health") {
             call.respond(HealthResponse("ok", "gateway"))
+        }
+        
+        // ─────────────────────────────────────────────────────────────────────
+        // Admin endpoints for service management
+        // ─────────────────────────────────────────────────────────────────────
+        
+        // List all services with their status
+        get("/admin/services") {
+            val configPath = System.getenv("SERVICES_CONFIG_PATH") ?: "/app/configs/services.yaml"
+            val config = try {
+                ServicesConfigLoader.load(configPath)
+            } catch (e: Exception) {
+                logger.error { "Failed to load services config: ${e.message}" }
+                call.respondText(
+                    """{"error": "Failed to load config: ${e.message}"}""",
+                    ContentType.Application.Json,
+                    HttpStatusCode.InternalServerError
+                )
+                return@get
+            }
+            
+            val response = buildJsonObject {
+                putJsonArray("services") {
+                    config.services.forEach { svc ->
+                        addJsonObject {
+                            put("name", svc.name)
+                            put("displayName", svc.displayName)
+                            put("type", svc.type)
+                            put("enabled", svc.enabled)
+                            put("description", svc.description)
+                            put("toolCount", svc.tools.size)
+                            putJsonArray("tools") {
+                                svc.tools.forEach { tool ->
+                                    addJsonObject {
+                                        put("name", tool.name)
+                                        put("description", tool.description)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                put("totalServices", config.services.size)
+                put("enabledServices", config.services.count { it.enabled })
+                put("totalTools", config.services.flatMap { it.tools }.size)
+            }
+            
+            call.respondText(
+                Json.encodeToString(JsonObject.serializer(), response),
+                ContentType.Application.Json
+            )
+        }
+        
+        // Reload services configuration
+        post("/admin/services/reload") {
+            logger.info { "Reloading services configuration..." }
+            val config = ServicesConfigLoader.reload()
+            
+            val response = buildJsonObject {
+                put("status", "reloaded")
+                put("servicesLoaded", config.services.size)
+                put("enabledServices", config.services.count { it.enabled })
+            }
+            
+            call.respondText(
+                Json.encodeToString(JsonObject.serializer(), response),
+                ContentType.Application.Json
+            )
         }
         
         // MCP HTTP POST endpoint for agents (LangChain, ADK, Sligo.ai, etc.)
@@ -125,6 +224,111 @@ fun Application.configureGateway() {
             }
         }
         
+        // ─────────────────────────────────────────────────────────────────────
+        // SSE endpoint for MCP Inspector
+        // ─────────────────────────────────────────────────────────────────────
+        
+        get("/sse") {
+            val sessionId = UUID.randomUUID().toString()
+            val session = SseSession(id = sessionId)
+            sseSessions[sessionId] = session
+            
+            logger.info { "╔════════════════════════════════════════════════════════════════╗" }
+            logger.info { "║ 🔗 SSE CLIENT CONNECTED (MCP Inspector)                        ║" }
+            logger.info { "║ Session: $sessionId" }
+            logger.info { "╚════════════════════════════════════════════════════════════════╝" }
+            
+            // Determine the base URL for the message endpoint
+            val host = call.request.host()
+            val port = call.request.port()
+            val scheme = if (call.request.local.scheme == "https") "https" else "http"
+            val messageEndpoint = "$scheme://$host:$port/message?sessionId=$sessionId"
+            
+            call.response.cacheControl(CacheControl.NoCache(null))
+            call.respondTextWriter(contentType = ContentType.Text.EventStream) {
+                try {
+                    // Send the endpoint event first (tells Inspector where to POST messages)
+                    write("event: endpoint\n")
+                    write("data: $messageEndpoint\n\n")
+                    flush()
+                    
+                    logger.info { "SSE: Sent endpoint event: $messageEndpoint" }
+                    
+                    // Keep connection alive and forward responses from the channel
+                    while (true) {
+                        // Wait for messages with timeout for keepalive
+                        val message = withTimeoutOrNull(30_000) {
+                            session.responseChannel.receive()
+                        }
+                        
+                        if (message != null) {
+                            write("event: message\n")
+                            write("data: $message\n\n")
+                            flush()
+                            logger.info { "SSE: Sent message event" }
+                        } else {
+                            // Send keepalive comment
+                            write(": keepalive\n\n")
+                            flush()
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.info { "SSE connection closed: ${e.message}" }
+                } finally {
+                    sseSessions.remove(sessionId)
+                    session.responseChannel.close()
+                    logger.info { "SSE session $sessionId cleaned up" }
+                }
+            }
+        }
+        
+        // Message endpoint for SSE clients to send requests
+        post("/message") {
+            val sessionId = call.request.queryParameters["sessionId"]
+            if (sessionId == null) {
+                call.respondText(
+                    """{"error": "Missing sessionId parameter"}""",
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest
+                )
+                return@post
+            }
+            
+            val session = sseSessions[sessionId]
+            if (session == null) {
+                call.respondText(
+                    """{"error": "Session not found"}""",
+                    ContentType.Application.Json,
+                    HttpStatusCode.NotFound
+                )
+                return@post
+            }
+            
+            val requestBody = call.receiveText()
+            
+            logger.info { "╔════════════════════════════════════════════════════════════════╗" }
+            logger.info { "║ 📨 MCP REQUEST via SSE (MCP Inspector)                         ║" }
+            logger.info { "╚════════════════════════════════════════════════════════════════╝" }
+            
+            try {
+                // Process the MCP message
+                val response = processMcpMessage(mcpServer, requestBody, mcpHandler)
+                
+                // Send response back through SSE channel
+                session.responseChannel.send(response)
+                
+                // Acknowledge the POST request
+                call.respondText("Accepted", ContentType.Text.Plain, HttpStatusCode.Accepted)
+            } catch (e: Exception) {
+                logger.error(e) { "SSE message processing error" }
+                call.respondText(
+                    """{"error": "${e.message}"}""",
+                    ContentType.Application.Json,
+                    HttpStatusCode.InternalServerError
+                )
+            }
+        }
+        
         // Callback endpoint (receives results from Executor)
         callbackRoutes()
         
@@ -132,11 +336,23 @@ fun Application.configureGateway() {
         contextRoutes()
     }
     
-    // Periodic cleanup of expired contexts
+    // Periodic cleanup of expired contexts and stale SSE sessions
     val cleanupJob = CoroutineScope(Dispatchers.Default).launch {
         while (isActive) {
             delay(60_000) // Every minute
             ContextStore.cleanupExpired()
+            
+            // Clean up stale SSE sessions (older than 1 hour)
+            val staleThreshold = System.currentTimeMillis() - 3600_000
+            sseSessions.entries.removeIf { (id, session) ->
+                if (session.createdAt < staleThreshold) {
+                    session.responseChannel.close()
+                    logger.info { "Cleaned up stale SSE session: $id" }
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
     
@@ -192,85 +408,44 @@ private suspend fun processMcpMessage(
             }
             
             "tools/list" -> {
+                // Load tools dynamically from services.yaml
+                val configPath = System.getenv("SERVICES_CONFIG_PATH") ?: "/app/configs/services.yaml"
+                val allTools = try {
+                    ServicesConfigLoader.load(configPath).services
+                        .filter { it.enabled }
+                        .flatMap { svc -> svc.tools.filter { it.enabled } }
+                } catch (e: Exception) {
+                    logger.warn { "Failed to load services config: ${e.message}. Using empty tool list." }
+                    emptyList()
+                }
+                
+                logger.info { "Returning ${allTools.size} tools from dynamic config" }
+                
                 val response = buildJsonObject {
                     put("jsonrpc", "2.0")
                     put("id", id ?: JsonNull)
                     putJsonObject("result") {
                         putJsonArray("tools") {
-                            addJsonObject {
-                                put("name", "google_gmail_send_email")
-                                put("description", "Send an email via Google Gmail. Requires NPL policy approval.")
-                                putJsonObject("inputSchema") {
-                                    put("type", "object")
-                                    putJsonObject("properties") {
-                                        putJsonObject("to") { put("type", "string"); put("description", "Recipient email address") }
-                                        putJsonObject("subject") { put("type", "string"); put("description", "Email subject") }
-                                        putJsonObject("body") { put("type", "string"); put("description", "Email body") }
+                            allTools.forEach { tool ->
+                                addJsonObject {
+                                    put("name", tool.name)
+                                    put("description", tool.description)
+                                    putJsonObject("inputSchema") {
+                                        put("type", tool.inputSchema.type)
+                                        putJsonObject("properties") {
+                                            tool.inputSchema.properties.forEach { (propName, propSchema) ->
+                                                putJsonObject(propName) {
+                                                    put("type", propSchema.type)
+                                                    put("description", propSchema.description)
+                                                }
+                                            }
+                                        }
+                                        if (tool.inputSchema.required.isNotEmpty()) {
+                                            putJsonArray("required") {
+                                                tool.inputSchema.required.forEach { add(it) }
+                                            }
+                                        }
                                     }
-                                    putJsonArray("required") { add("to"); add("subject"); add("body") }
-                                }
-                            }
-                            addJsonObject {
-                                put("name", "slack_send_message")
-                                put("description", "Send a message to a Slack channel.")
-                                putJsonObject("inputSchema") {
-                                    put("type", "object")
-                                    putJsonObject("properties") {
-                                        putJsonObject("channel") { put("type", "string"); put("description", "Channel ID or name") }
-                                        putJsonObject("message") { put("type", "string"); put("description", "Message text") }
-                                    }
-                                }
-                            }
-                            addJsonObject {
-                                put("name", "google_calendar_create_event")
-                                put("description", "Create a calendar event in Google Calendar.")
-                                putJsonObject("inputSchema") {
-                                    put("type", "object")
-                                    putJsonObject("properties") {
-                                        putJsonObject("title") { put("type", "string"); put("description", "Event title") }
-                                        putJsonObject("start") { put("type", "string"); put("description", "Start time (ISO 8601)") }
-                                        putJsonObject("end") { put("type", "string"); put("description", "End time (ISO 8601)") }
-                                    }
-                                }
-                            }
-                            // Real MCP Server: Fetch (official mcp/fetch image)
-                            addJsonObject {
-                                put("name", "web_fetch")
-                                put("description", "Fetch a URL and extract its content. Uses real MCP server.")
-                                putJsonObject("inputSchema") {
-                                    put("type", "object")
-                                    putJsonObject("properties") {
-                                        putJsonObject("url") { put("type", "string"); put("description", "URL to fetch") }
-                                        putJsonObject("max_length") { put("type", "integer"); put("description", "Maximum content length (optional)") }
-                                        putJsonObject("start_index") { put("type", "integer"); put("description", "Start index for content (optional)") }
-                                        putJsonObject("raw") { put("type", "boolean"); put("description", "Return raw HTML instead of markdown (optional)") }
-                                    }
-                                    putJsonArray("required") { add("url") }
-                                }
-                            }
-                            // Real MCP Server: DuckDuckGo Search (official mcp/duckduckgo image)
-                            addJsonObject {
-                                put("name", "duckduckgo_search")
-                                put("description", "Search DuckDuckGo and return formatted results. Uses real MCP server - no API key required.")
-                                putJsonObject("inputSchema") {
-                                    put("type", "object")
-                                    putJsonObject("properties") {
-                                        putJsonObject("query") { put("type", "string"); put("description", "Search query string") }
-                                        putJsonObject("max_results") { put("type", "integer"); put("description", "Maximum number of results (default: 10)") }
-                                    }
-                                    putJsonArray("required") { add("query") }
-                                }
-                            }
-                            // Real MCP Server: DuckDuckGo Fetch Content (official mcp/duckduckgo image)
-                            addJsonObject {
-                                put("name", "duckduckgo_fetch_content")
-                                put("description", "Fetch and parse content from a webpage URL using DuckDuckGo. Uses real MCP server.")
-                                putJsonObject("inputSchema") {
-                                    put("type", "object")
-                                    putJsonObject("properties") {
-                                        putJsonObject("url") { put("type", "string"); put("description", "URL to fetch content from") }
-                                    }
-                                    putJsonArray("required") { add("url") }
                                 }
                             }
                         }
@@ -291,6 +466,52 @@ private suspend fun processMcpMessage(
                 
                 // Parse service and operation from tool name
                 val (service, operation) = parseToolName(toolName)
+                
+                // Check if the service is enabled before executing
+                val configPath = System.getenv("SERVICES_CONFIG_PATH") ?: "/app/configs/services.yaml"
+                val serviceConfig = try {
+                    ServicesConfigLoader.load(configPath).services.find { it.name == service }
+                } catch (e: Exception) {
+                    null
+                }
+                
+                if (serviceConfig == null || !serviceConfig.enabled) {
+                    logger.warn { "Service '$service' is not enabled or not found. Rejecting tool call." }
+                    val errorResponse = buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        put("id", id ?: JsonNull)
+                        putJsonObject("result") {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", "Error: Service '$service' is disabled or not found. Tool call rejected.")
+                                }
+                            }
+                            put("isError", true)
+                        }
+                    }
+                    return@processMcpMessage json.encodeToString(JsonObject.serializer(), errorResponse)
+                }
+                
+                // Check if the specific tool is enabled
+                val toolConfig = serviceConfig.tools.find { it.name == toolName }
+                if (toolConfig != null && !toolConfig.enabled) {
+                    logger.warn { "Tool '$toolName' is disabled. Rejecting tool call." }
+                    val errorResponse = buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        put("id", id ?: JsonNull)
+                        putJsonObject("result") {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", "Error: Tool '$toolName' is disabled. Tool call rejected.")
+                                }
+                            }
+                            put("isError", true)
+                        }
+                    }
+                    return@processMcpMessage json.encodeToString(JsonObject.serializer(), errorResponse)
+                }
                 
                 // Call the actual handler
                 val toolResult = mcpHandler.handleToolCallDirect(
