@@ -8,8 +8,10 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.plugins.calllogging.*
 import io.ktor.server.response.*
+import io.ktor.server.request.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import io.ktor.http.*
 import io.noumena.mcp.gateway.server.McpServerHandler
 import io.noumena.mcp.gateway.callback.callbackRoutes
 import io.noumena.mcp.gateway.context.contextRoutes
@@ -31,7 +33,9 @@ fun main() {
     
     logger.info { "Starting Noumena MCP Gateway on port $port" }
     logger.info { "NOTE: Gateway has NO Vault access - this is by design" }
-    logger.info { "MCP endpoints: /mcp/ws (WebSocket), /mcp/* (REST)" }
+    logger.info { "MCP endpoints:" }
+    logger.info { "  POST /mcp     - HTTP (LangChain, ADK, Sligo.ai, etc.)" }
+    logger.info { "  WS   /mcp/ws  - WebSocket (streaming agents)" }
     
     embeddedServer(Netty, port = port) {
         configureGateway()
@@ -68,7 +72,32 @@ fun Application.configureGateway() {
             call.respond(HealthResponse("ok", "gateway"))
         }
         
-        // MCP WebSocket endpoint for agents
+        // MCP HTTP POST endpoint for agents (LangChain, ADK, Sligo.ai, etc.)
+        post("/mcp") {
+            val requestBody = call.receiveText()
+            
+            logger.info { "╔════════════════════════════════════════════════════════════════╗" }
+            logger.info { "║ 📨 MCP REQUEST via HTTP POST                                   ║" }
+            logger.info { "╚════════════════════════════════════════════════════════════════╝" }
+            
+            try {
+                val response = processMcpMessage(mcpServer, requestBody, mcpHandler)
+                call.respondText(response, ContentType.Application.Json)
+            } catch (e: Exception) {
+                logger.error(e) { "HTTP MCP error" }
+                val errorResponse = buildJsonObject {
+                    put("jsonrpc", "2.0")
+                    put("id", null as String?)
+                    putJsonObject("error") {
+                        put("code", -32603)
+                        put("message", e.message ?: "Internal error")
+                    }
+                }
+                call.respondText(errorResponse.toString(), ContentType.Application.Json, HttpStatusCode.InternalServerError)
+            }
+        }
+        
+        // MCP WebSocket endpoint for agents (streaming/realtime)
         webSocket("/mcp/ws") {
             logger.info { "╔════════════════════════════════════════════════════════════════╗" }
             logger.info { "║ 🔌 AGENT CONNECTED via WebSocket                               ║" }
