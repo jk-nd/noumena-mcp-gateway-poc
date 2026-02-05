@@ -5,30 +5,49 @@ A policy-enforced MCP (Model Context Protocol) gateway that enables AI agents to
 ## Architecture
 
 ```
+                                                                    ┌─────────────┐
+                                                                    │   VAULT     │
+                                                                    │  (secrets)  │
+┌───────────┐                                                       └──────▲──────┘
+│   Agent   │                                                              │
+│   (LLM)   │                                                              │
+└─────┬─────┘                                                              │
+      │ HTTP/WS                                                            │
+      ▼                                                                    │
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                           NOUMENA MCP GATEWAY SYSTEM                                │
+│                              NOUMENA MCP GATEWAY                                    │
 │                                                                                     │
-│              HTTP/WS                                                                │
-│  ┌────────┐─────────▶┌─────────┐     ┌───────────┐     ┌──────────┐     ┌────────┐ │
-│  │ Agent  │          │ Gateway │────▶│ NPL       │────▶│ RabbitMQ │────▶│Executor│ │
-│  │        │◀─────────│         │     │ Engine    │     │          │     │        │ │
-│  └────────┘          │         │     └───────────┘     └──────────┘     └───┬────┘ │
-│                      │         │                                            │      │
-│                      │         │◀───────────────────────────────────────────┤      │
-│                      └────┬────┘                                            │      │
-│                           │                                                 ▼      │
-│                      ┌────┴────┐                                       ┌────────┐  │
-│                      │Keycloak │                                       │ VAULT  │  │
-│                      │ (auth)  │                                       │(secrets│  │
-│                      └─────────┘                                       └────────┘  │
-│                                                                                     │
-│  KEY SECURITY PROPERTIES:                                                           │
-│  • Gateway has NO Vault access - only validates tokens and checks policy            │
-│  • Only Executor has Vault access - credentials never leave Executor process        │
-│  • NPL enforces policy BEFORE execution - disabled services are blocked             │
-│  • Agent connects via HTTP POST or WebSocket - both supported                       │
-│                                                                                     │
-└─────────────────────────────────────────────────────────────────────────────────────┘
+│  ┌─────────────┐      ┌─────────────┐      ┌──────────┐      ┌─────────────────┐   │
+│  │   Gateway   │─────▶│ NPL Engine  │─────▶│ RabbitMQ │─────▶│    Executor     │───┼──┐
+│  │             │      │             │      │          │      │                 │   │  │
+│  │ POST /mcp   │      │ Policy:     │      │          │      │ Vault Client    │   │  │
+│  │ WS /mcp/ws  │      │ - Approve   │      │          │      │ Upstream Router │   │  │
+│  │             │◀─────│ - Deny      │      │          │◀─────│ (STDIO/HTTP)    │   │  │
+│  └──────┬──────┘      │ - Audit     │      │          │      └─────────────────┘   │  │
+│         │             └─────────────┘      └──────────┘                            │  │
+│         │                                                                          │  │
+│         ▼                                                                          │  │
+│  ┌─────────────┐                                                                   │  │
+│  │  Keycloak   │                                                                   │  │
+│  │   (auth)    │                                                                   │  │
+│  └─────────────┘                                                                   │  │
+│                                                                                     │  │
+│  Security: Gateway has NO Vault access • Only Executor can fetch secrets           │  │
+│                                                                                     │  │
+└─────────────────────────────────────────────────────────────────────────────────────┘  │
+                                                                                         │
+      ┌──────────────────────────────────────────────────────────────────────────────────┘
+      │
+      ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    UPSTREAM MCP SERVICES                     │
+│                                                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │
+│  │ DuckDuckGo  │  │    Fetch    │  │   Slack     │  ...      │
+│  │   (STDIO)   │  │   (STDIO)   │  │   (REST)    │           │
+│  └─────────────┘  └─────────────┘  └─────────────┘           │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Agent Connectivity
