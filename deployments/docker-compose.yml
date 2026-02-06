@@ -240,6 +240,8 @@ services:
       - KEYCLOAK_URL=http://keycloak:11000
       - KEYCLOAK_REALM=mcpgateway
       - KEYCLOAK_CLIENT_ID=mcpgateway
+      # Issuer must match what Keycloak puts in tokens (the URL clients use to obtain them)
+      - KEYCLOAK_ISSUER=http://localhost:11000/realms/mcpgateway
       - GATEWAY_URL=http://gateway:8080
       - CALLBACK_URL=http://gateway:8080/callback
       # RabbitMQ configuration (for triggering Executor after NPL approval)

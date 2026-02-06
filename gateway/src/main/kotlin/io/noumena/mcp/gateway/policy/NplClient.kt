@@ -18,7 +18,11 @@ private val logger = KotlinLogging.logger {}
 /**
  * Client for NPL Engine policy checks.
  * 
- * Calls the real NPL Engine to evaluate policy via the ToolExecutionPolicy protocol.
+ * The Gateway only uses the `agent` role to call checkAndApprove on ToolExecutionPolicy.
+ * It never holds admin credentials. All admin-level NPL operations (creating
+ * ServiceRegistry, ToolExecutionPolicy, enabling/disabling services) are performed
+ * via the TUI, which the admin runs locally.
+ * 
  * NPL Engine checks:
  * 1. ServiceRegistry has the service enabled
  * 2. Policy-specific rules
@@ -30,7 +34,8 @@ class NplClient {
     private val nplUrl = System.getenv("NPL_URL") ?: "http://npl-engine:12000"
     private val keycloakUrl = System.getenv("KEYCLOAK_URL") ?: "http://keycloak:11000"
     private val keycloakRealm = System.getenv("KEYCLOAK_REALM") ?: "mcpgateway"
-    private val gatewayUrl = System.getenv("GATEWAY_URL") ?: "http://gateway:8080"
+    private val agentUsername = System.getenv("AGENT_USERNAME") ?: "agent"
+    private val agentPassword = System.getenv("AGENT_PASSWORD") ?: "Welcome123"
     private val devMode = System.getenv("DEV_MODE")?.toBoolean() ?: false
     
     private val client = HttpClient(CIO) {
@@ -41,8 +46,7 @@ class NplClient {
         }
     }
     
-    // Cache for protocol instance IDs
-    private var registryId: String? = null
+    // Cached ToolExecutionPolicy instance ID
     private var policyId: String? = null
     
     /**
@@ -69,11 +73,11 @@ class NplClient {
         }
         
         return try {
-            // Get agent token from Keycloak
+            // Get agent token from Keycloak (minimum privilege)
             val agentToken = getAgentToken()
             
-            // Ensure ToolExecutionPolicy instance exists
-            val toolPolicyId = ensurePolicyExists(agentToken)
+            // Find ToolExecutionPolicy instance (must be bootstrapped via TUI)
+            val toolPolicyId = findPolicyId(agentToken)
             
             // Encode metadata as JSON string
             val metadataJson = buildJsonObject {
@@ -103,6 +107,7 @@ class NplClient {
     
     /**
      * Get a token for the agent from Keycloak.
+     * The agent has minimum privilege - it can only call checkAndApprove.
      */
     private suspend fun getAgentToken(): String {
         val response = client.submitForm(
@@ -110,8 +115,8 @@ class NplClient {
             formParameters = parameters {
                 append("grant_type", "password")
                 append("client_id", "mcpgateway")
-                append("username", "agent")
-                append("password", "Welcome123")
+                append("username", agentUsername)
+                append("password", agentPassword)
             }
         )
         
@@ -125,130 +130,31 @@ class NplClient {
     }
     
     /**
-     * Get a token for admin from Keycloak (for setup operations).
+     * Find the existing ToolExecutionPolicy instance.
+     * The policy must be bootstrapped via the TUI before the Gateway can operate.
+     * The agent role (pAgent) has read access to list protocol instances.
      */
-    private suspend fun getAdminToken(): String {
-        val response = client.submitForm(
-            url = "$keycloakUrl/realms/$keycloakRealm/protocol/openid-connect/token",
-            formParameters = parameters {
-                append("grant_type", "password")
-                append("client_id", "mcpgateway")
-                append("username", "admin")
-                append("password", "Welcome123")
-            }
-        )
-        
-        if (!response.status.isSuccess()) {
-            throw RuntimeException("Failed to get admin token: ${response.status}")
-        }
-        
-        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
-        return body["access_token"]?.jsonPrimitive?.content
-            ?: throw RuntimeException("No access_token in response")
-    }
-    
-    /**
-     * Ensure ServiceRegistry exists and google_gmail is enabled.
-     */
-    private suspend fun ensureRegistryExists(adminToken: String): String {
-        if (registryId != null) return registryId!!
-        
-        // Check for existing
-        val listResponse = client.get("$nplUrl/npl/registry/ServiceRegistry/") {
-            header("Authorization", "Bearer $adminToken")
-        }
-        
-        val listBody = Json.parseToJsonElement(listResponse.bodyAsText()).jsonObject
-        val items = listBody["items"]?.jsonArray
-        
-        if (items != null && items.isNotEmpty()) {
-            registryId = items[0].jsonObject["@id"]?.jsonPrimitive?.content
-            logger.info { "Found existing ServiceRegistry: $registryId" }
-            return registryId!!
-        }
-        
-        // Create new
-        val createResponse = client.post("$nplUrl/npl/registry/ServiceRegistry/") {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody("""{"@parties": {}}""")
-        }
-        
-        if (!createResponse.status.isSuccess()) {
-            throw RuntimeException("Failed to create ServiceRegistry: ${createResponse.status}")
-        }
-        
-        val createBody = Json.parseToJsonElement(createResponse.bodyAsText()).jsonObject
-        registryId = createBody["@id"]?.jsonPrimitive?.content
-        logger.info { "Created ServiceRegistry: $registryId" }
-        
-        // Enable google_gmail
-        client.post("$nplUrl/npl/registry/ServiceRegistry/$registryId/enableService") {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "google_gmail"}""")
-        }
-        logger.info { "Enabled google_gmail service" }
-        
-        return registryId!!
-    }
-    
-    /**
-     * Ensure ToolExecutionPolicy exists.
-     */
-    private suspend fun ensurePolicyExists(agentToken: String): String {
+    private suspend fun findPolicyId(agentToken: String): String {
         if (policyId != null) return policyId!!
         
-        // Need admin token to check/create
-        val adminToken = getAdminToken()
-        
-        // Ensure registry exists first
-        val regId = ensureRegistryExists(adminToken)
-        
-        // Check for existing ToolExecutionPolicy
         val listResponse = client.get("$nplUrl/npl/services/ToolExecutionPolicy/") {
-            header("Authorization", "Bearer $adminToken")
+            header("Authorization", "Bearer $agentToken")
         }
         
-        val listBody = Json.parseToJsonElement(listResponse.bodyAsText()).jsonObject
+        val responseText = listResponse.bodyAsText()
+        val listBody = Json.parseToJsonElement(responseText).jsonObject
         val items = listBody["items"]?.jsonArray
         
         if (items != null && items.isNotEmpty()) {
             policyId = items[0].jsonObject["@id"]?.jsonPrimitive?.content
-            logger.info { "Found existing ToolExecutionPolicy: $policyId" }
+            logger.info { "Found ToolExecutionPolicy: $policyId" }
             return policyId!!
         }
         
-        // Create new ToolExecutionPolicy
-        // Party assignment is handled by rules.yml based on JWT 'role' claims:
-        // - pAdmin: users with role=admin
-        // - pAgent: users with role=agent (or admin)
-        // - pExecutor: users with role=executor (or admin)
-        val createPayload = buildJsonObject {
-            putJsonObject("@parties") {} // Empty - let rules.yml handle party assignment
-            put("registry", regId)
-            put("policyTenantId", "default")
-            put("policyGatewayUrl", gatewayUrl)
-        }
-        
-        logger.info { "Creating ToolExecutionPolicy (party assignment via rules.yml)" }
-        
-        val createResponse = client.post("$nplUrl/npl/services/ToolExecutionPolicy/") {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody(createPayload.toString())
-        }
-        
-        if (!createResponse.status.isSuccess()) {
-            val errorBody = createResponse.bodyAsText()
-            throw RuntimeException("Failed to create ToolExecutionPolicy: ${createResponse.status} - $errorBody")
-        }
-        
-        val createBody = Json.parseToJsonElement(createResponse.bodyAsText()).jsonObject
-        policyId = createBody["@id"]?.jsonPrimitive?.content
-        logger.info { "Created ToolExecutionPolicy: $policyId" }
-        
-        return policyId!!
+        throw RuntimeException(
+            "ToolExecutionPolicy not initialized. " +
+            "Run 'npm start' in the TUI directory and use 'NPL Bootstrap' to set up."
+        )
     }
     
     /**

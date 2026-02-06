@@ -1,59 +1,40 @@
 package io.noumena.mcp.gateway.auth
 
+import io.ktor.server.auth.jwt.*
 import mu.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
 
 /**
- * Claims extracted from a validated Actor Token.
+ * Helper to extract identity information from a validated JWT principal.
+ * 
+ * The actual JWT validation is handled by Ktor's Authentication plugin
+ * configured in Application.kt. This helper extracts the claims into
+ * a typed data class for use in request handlers.
  */
-data class ActorTokenClaims(
-    val tenantId: String,
-    val delegatedBy: String,  // The user who delegated to the agent
-    val agentId: String,
-    val allowedServices: List<String>,
-    val delegationId: String
+data class UserIdentity(
+    val subject: String,           // Keycloak user ID (UUID)
+    val preferredUsername: String,  // Human-readable username
+    val email: String?,
+    val roles: List<String>,       // Custom "role" attribute from Keycloak
+    val organization: List<String> // Custom "organization" attribute
 ) {
-    fun hasScope(service: String): Boolean {
-        return allowedServices.contains(service) || allowedServices.contains("*")
-    }
+    fun hasRole(role: String): Boolean = roles.contains(role)
+    fun isAdmin(): Boolean = hasRole("admin")
+    fun isAgent(): Boolean = hasRole("agent")
+    fun isExecutor(): Boolean = hasRole("executor")
 }
 
 /**
- * Validates Actor Tokens (delegated JWTs) via Keycloak.
- * 
- * Actor Tokens are issued when a user delegates to an agent.
- * They contain:
- * - sub: agent ID
- * - act.sub: delegating user
- * - noumena.allowed_services: services the agent can access
+ * Extract UserIdentity from a validated JWTPrincipal.
  */
-class ActorTokenValidator {
-    
-    private val issuer = System.getenv("OIDC_ISSUER") ?: "http://keycloak:8080/realms/noumena"
-    
-    /**
-     * Validate an Actor Token and extract claims.
-     * 
-     * TODO: Implement actual JWT validation with Keycloak JWKS
-     */
-    fun validate(token: String): ActorTokenClaims {
-        // TODO: Implement real validation:
-        // 1. Fetch JWKS from $issuer/.well-known/openid-configuration
-        // 2. Verify JWT signature
-        // 3. Check expiration
-        // 4. Extract claims
-        
-        logger.debug { "Validating token (stub implementation)" }
-        
-        // STUB: For development, return mock claims
-        // REMOVE THIS IN PRODUCTION
-        return ActorTokenClaims(
-            tenantId = "demo-tenant",
-            delegatedBy = "user@example.com",
-            agentId = "dev-agent",
-            allowedServices = listOf("google_gmail", "slack", "sap"),
-            delegationId = "del-dev-001"
-        )
-    }
+fun JWTPrincipal.toUserIdentity(): UserIdentity {
+    val payload = this.payload
+    return UserIdentity(
+        subject = payload.subject ?: "unknown",
+        preferredUsername = payload.getClaim("preferred_username")?.asString() ?: "unknown",
+        email = payload.getClaim("email")?.asString(),
+        roles = payload.getClaim("role")?.asList(String::class.java) ?: emptyList(),
+        organization = payload.getClaim("organization")?.asList(String::class.java) ?: emptyList()
+    )
 }

@@ -246,6 +246,22 @@ export function addTool(serviceName: string, tool: ToolDefinition): boolean {
 }
 
 /**
+ * Replace all tools for a service (used after tool discovery)
+ */
+export function updateServiceTools(serviceName: string, tools: ToolDefinition[]): boolean {
+  const config = loadConfig();
+  const service = config.services.find((s) => s.name === serviceName);
+  
+  if (!service) {
+    console.error(`Service not found: ${serviceName}`);
+    return false;
+  }
+  
+  service.tools = tools;
+  return saveConfig(config);
+}
+
+/**
  * Remove a tool from a service
  */
 export function removeTool(serviceName: string, toolName: string): boolean {

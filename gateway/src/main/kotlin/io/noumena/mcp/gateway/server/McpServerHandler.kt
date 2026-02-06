@@ -10,7 +10,6 @@ import io.ktor.serialization.kotlinx.json.*
 import io.modelcontextprotocol.kotlin.sdk.Implementation
 import io.modelcontextprotocol.kotlin.sdk.server.*
 import io.modelcontextprotocol.kotlin.sdk.types.*
-import io.noumena.mcp.gateway.auth.ActorTokenValidator
 import io.noumena.mcp.gateway.callback.PendingRequests
 import io.noumena.mcp.gateway.context.ContextStore
 import io.noumena.mcp.gateway.messaging.ExecutorPublisher
@@ -36,7 +35,6 @@ private val logger = KotlinLogging.logger {}
  * 6. Returns proper MCP response to LLM
  */
 class McpServerHandler(
-    private val tokenValidator: ActorTokenValidator = ActorTokenValidator(),
     private val nplClient: NplClient = NplClient()
 ) {
     

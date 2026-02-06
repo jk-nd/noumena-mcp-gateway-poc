@@ -15,6 +15,7 @@ import {
   removeService,
   addService,
   setToolEnabled,
+  updateServiceTools,
   type ServiceDefinition,
 } from "./lib/config.js";
 import { 
@@ -26,6 +27,12 @@ import {
   startContainer,
   stopContainer,
   imageExists,
+  discoverToolsFromContainer,
+  discoveredToToolDefinitions,
+  setAdminCredentials,
+  validateCredentials,
+  bootstrapNpl,
+  isNplBootstrapped,
 } from "./lib/api.js";
 
 // Noumena color palette
@@ -47,6 +54,111 @@ function showHeader() {
   console.log();
   console.log(noumena.purple("  ◆ NOUMENA MCP Gateway Wizard"));
   console.log();
+}
+
+/**
+ * Admin login flow - prompts for credentials and validates against Keycloak.
+ * Credentials are stored in memory only for the duration of the session.
+ * Returns true if login was successful.
+ */
+async function adminLogin(): Promise<boolean> {
+  console.log();
+  console.log(noumena.purple("  Admin Login"));
+  console.log(noumena.textDim("  Credentials are stored in memory only for this session."));
+  console.log();
+
+  // Allow env vars for CI/automation
+  const envUser = process.env.MCP_ADMIN_USER;
+  const envPass = process.env.MCP_ADMIN_PASSWORD;
+
+  if (envUser && envPass) {
+    const s = p.spinner();
+    s.start("Authenticating with environment credentials...");
+    const valid = await validateCredentials(envUser, envPass);
+    if (valid) {
+      setAdminCredentials(envUser, envPass);
+      s.stop(noumena.success(`Authenticated as ${envUser}`));
+      return true;
+    } else {
+      s.stop(noumena.purpleDim("Environment credentials invalid - prompting for login"));
+    }
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const username = await p.text({
+      message: "Username:",
+      initialValue: "admin",
+      validate: (v) => (!v || v.trim().length === 0 ? "Username is required" : undefined),
+    });
+
+    if (p.isCancel(username)) return false;
+
+    const password = await p.password({
+      message: "Password:",
+      validate: (v) => (!v || v.length === 0 ? "Password is required" : undefined),
+    });
+
+    if (p.isCancel(password)) return false;
+
+    const s = p.spinner();
+    s.start("Authenticating...");
+
+    const valid = await validateCredentials(String(username).trim(), String(password));
+    if (valid) {
+      setAdminCredentials(String(username).trim(), String(password));
+      s.stop(noumena.success(`Authenticated as ${username}`));
+      return true;
+    } else {
+      s.stop(noumena.purpleDim("Invalid credentials"));
+      if (attempt < 2) {
+        p.log.warn("Please try again.");
+      }
+    }
+  }
+
+  p.log.error("Too many failed attempts.");
+  return false;
+}
+
+/**
+ * NPL Bootstrap flow - creates ServiceRegistry and ToolExecutionPolicy if needed.
+ */
+async function nplBootstrapFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  NPL Bootstrap"));
+  console.log(noumena.textDim("  Ensures ServiceRegistry and ToolExecutionPolicy exist in NPL."));
+  console.log(noumena.textDim("  Also syncs enabled services from services.yaml."));
+  console.log();
+
+  const s = p.spinner();
+  s.start("Bootstrapping NPL...");
+
+  try {
+    const result = await bootstrapNpl();
+    s.stop(noumena.success("NPL bootstrapped"));
+
+    if (result.registryCreated) {
+      p.log.success("Created ServiceRegistry");
+    } else {
+      p.log.info("ServiceRegistry already exists");
+    }
+
+    if (result.policyCreated) {
+      p.log.success("Created ToolExecutionPolicy");
+    } else {
+      p.log.info("ToolExecutionPolicy already exists");
+    }
+
+    if (result.servicesEnabled.length > 0) {
+      p.log.info(`Enabled services: ${result.servicesEnabled.join(", ")}`);
+    } else {
+      p.log.info("No services enabled in services.yaml");
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Bootstrap failed"));
+    p.log.error(`${error}`);
+    p.log.info("Make sure the NPL Engine is running and Keycloak is provisioned.");
+  }
 }
 
 /**
@@ -144,6 +256,7 @@ async function mainMenu(): Promise<boolean> {
       ...serviceOptions,
       { value: "search" as const, label: noumena.purple("+ Search Docker Hub"), hint: "Find and add MCP servers" },
       { value: "custom" as const, label: noumena.purple("+ Add custom image"), hint: "Local or private registry" },
+      { value: "bootstrap" as const, label: noumena.purple("NPL Bootstrap"), hint: "Create/sync NPL protocol instances" },
       { value: "reload" as const, label: "Reload config", hint: "Reload services.yaml" },
       { value: "gateway" as const, label: "Reload Gateway", hint: "Tell Gateway to reload" },
       { value: "quit" as const, label: "Quit", hint: "" },
@@ -164,6 +277,8 @@ async function mainMenu(): Promise<boolean> {
     await searchDockerHubFlow();
   } else if (action === "custom") {
     await addCustomImageFlow();
+  } else if (action === "bootstrap") {
+    await nplBootstrapFlow();
   } else if (action === "reload") {
     loadConfig(); // Force reload
     p.log.success("Configuration reloaded from disk");
@@ -220,6 +335,9 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
   
   // Other actions
   options.push({ value: "tools", label: "Manage tools", hint: `${service.tools.length} tools` });
+  if (isDocker && hasImage) {
+    options.push({ value: "discover", label: noumena.purple("Discover tools"), hint: "Query container for available tools" });
+  }
   options.push({ value: "info", label: "View details" });
   options.push({ value: "delete", label: noumena.purpleDim("Delete service") });
 
@@ -307,6 +425,11 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
       console.log(noumena.textDim(logs || "(no logs)"));
     } catch {
       p.log.warn("Failed to get logs");
+    }
+  } else if (action === "discover" && imageName) {
+    const toolCount = await discoverAndSaveTools(service.name, imageName);
+    if (toolCount > 0) {
+      p.log.info("All discovered tools are disabled by default. Use 'Manage tools' to enable them.");
     }
   } else if (action === "tools") {
     await manageToolsForService(service);
@@ -499,6 +622,51 @@ async function viewServiceInfo(service: ServiceDefinition): Promise<void> {
 }
 
 /**
+ * Discover tools from an MCP container and save them to config.
+ * Returns the number of tools discovered.
+ */
+async function discoverAndSaveTools(serviceName: string, imageName: string): Promise<number> {
+  const s = p.spinner();
+  s.start(`Discovering tools from ${imageName}...`);
+
+  const result = discoverToolsFromContainer(imageName);
+
+  if (!result.success || result.tools.length === 0) {
+    s.stop(noumena.warning(
+      result.error
+        ? `Could not discover tools: ${result.error}`
+        : "No tools found (container may require credentials)"
+    ));
+    return 0;
+  }
+
+  // Convert discovered tools to config format (all disabled by default)
+  const toolDefs = discoveredToToolDefinitions(result.tools, false);
+
+  // Save to config
+  const saved = updateServiceTools(serviceName, toolDefs);
+  if (saved) {
+    const serverLabel = result.serverInfo
+      ? ` (${result.serverInfo.name} v${result.serverInfo.version})`
+      : "";
+    s.stop(noumena.success(`Discovered ${toolDefs.length} tool(s)${serverLabel}`));
+
+    // Show a summary of discovered tools
+    for (const tool of toolDefs) {
+      const desc = tool.description.length > 60 
+        ? tool.description.substring(0, 57) + "..." 
+        : tool.description;
+      console.log(noumena.textDim(`    ${noumena.grayDim("–")} ${tool.name}: ${desc}`));
+    }
+    console.log();
+  } else {
+    s.stop(noumena.warning("Failed to save discovered tools"));
+  }
+
+  return toolDefs.length;
+}
+
+/**
  * Search Docker Hub for MCP servers
  */
 async function searchDockerHubFlow(): Promise<void> {
@@ -597,7 +765,7 @@ async function searchDockerHubFlow(): Promise<void> {
     }
   }
 
-  // Create service definition
+  // Create service definition with placeholder tool (will be replaced by discovery)
   const newService: ServiceDefinition = {
     name: server.name,
     displayName: server.name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
@@ -607,32 +775,48 @@ async function searchDockerHubFlow(): Promise<void> {
     args: [],
     requiresCredentials: false,
     description: server.description,
-    tools: [
-      {
-        name: `${server.name}_default`,
-        description: `Default tool for ${server.name} - discover actual tools by running the container`,
-        inputSchema: {
-          type: "object",
-          properties: {},
-          required: [],
-        },
-        enabled: false,
-      },
-    ],
+    tools: [],
   };
 
   const success = addService(newService);
-  if (success) {
-    p.log.success(`Added: mcp/${server.name}`);
-    p.log.info("Service is disabled by default. Select it to enable and configure tools.");
-    
-    try {
-      await reloadGatewayConfig();
-    } catch {
-      // Ignore
+  if (!success) {
+    p.log.warn("Failed to add service");
+    return;
+  }
+
+  p.log.success(`Added: mcp/${server.name}`);
+
+  // Auto-discover tools from the container
+  const imagePulled = !p.isCancel(shouldPull) && shouldPull;
+  if (imagePulled || imageExists(`mcp/${server.name}`)) {
+    const toolCount = await discoverAndSaveTools(server.name, `mcp/${server.name}`);
+    if (toolCount === 0) {
+      // Add a default placeholder if discovery failed
+      const { addTool } = await import("./lib/config.js");
+      addTool(server.name, {
+        name: `${server.name}_default`,
+        description: `Default tool for ${server.name} - run 'Discover tools' to find actual tools`,
+        inputSchema: { type: "object", properties: {}, required: [] },
+        enabled: false,
+      });
     }
   } else {
-    p.log.warn("Failed to add service");
+    // Image not pulled - add placeholder
+    const { addTool } = await import("./lib/config.js");
+    addTool(server.name, {
+      name: `${server.name}_default`,
+      description: `Default tool for ${server.name} - pull image and run 'Discover tools'`,
+      inputSchema: { type: "object", properties: {}, required: [] },
+      enabled: false,
+    });
+  }
+
+  p.log.info("Service is disabled by default. Select it to enable and configure tools.");
+  
+  try {
+    await reloadGatewayConfig();
+  } catch {
+    // Ignore
   }
 }
 
@@ -774,32 +958,45 @@ async function addCustomImageFlow(): Promise<void> {
     args: [],
     requiresCredentials: false,
     description: String(description).trim(),
-    tools: [
-      {
-        name: `${serviceNameStr}_default`,
-        description: `Default tool for ${serviceNameStr} - discover actual tools by running the container`,
-        inputSchema: {
-          type: "object",
-          properties: {},
-          required: [],
-        },
-        enabled: false,
-      },
-    ],
+    tools: [],
   };
 
   const success = addService(newService);
-  if (success) {
-    p.log.success(`Added: ${displayName}`);
-    p.log.info("Service is disabled by default. Select it to enable and configure tools.");
-    
-    try {
-      await reloadGatewayConfig();
-    } catch {
-      // Ignore
+  if (!success) {
+    p.log.warn("Failed to add service");
+    return;
+  }
+
+  p.log.success(`Added: ${displayName}`);
+
+  // Auto-discover tools from the container
+  if (imageExists(imageNameStr)) {
+    const toolCount = await discoverAndSaveTools(serviceNameStr, imageNameStr);
+    if (toolCount === 0) {
+      const { addTool } = await import("./lib/config.js");
+      addTool(serviceNameStr, {
+        name: `${serviceNameStr}_default`,
+        description: `Default tool for ${serviceNameStr} - run 'Discover tools' to find actual tools`,
+        inputSchema: { type: "object", properties: {}, required: [] },
+        enabled: false,
+      });
     }
   } else {
-    p.log.warn("Failed to add service");
+    const { addTool } = await import("./lib/config.js");
+    addTool(serviceNameStr, {
+      name: `${serviceNameStr}_default`,
+      description: `Default tool for ${serviceNameStr} - pull image and run 'Discover tools'`,
+      inputSchema: { type: "object", properties: {}, required: [] },
+      enabled: false,
+    });
+  }
+
+  p.log.info("Service is disabled by default. Select it to enable and configure tools.");
+  
+  try {
+    await reloadGatewayConfig();
+  } catch {
+    // Ignore
   }
 }
 
@@ -826,7 +1023,14 @@ async function main() {
   
   p.intro(noumena.purple("◆ NOUMENA MCP Gateway Wizard"));
 
-  // Check Gateway connection
+  // Step 1: Admin login (credentials stored in memory only)
+  const loggedIn = await adminLogin();
+  if (!loggedIn) {
+    p.outro(noumena.purpleDim("Login required. Goodbye."));
+    return;
+  }
+
+  // Step 2: Check Gateway connection
   const s = p.spinner();
   s.start("Connecting to Gateway...");
   
@@ -835,6 +1039,18 @@ async function main() {
     s.stop(noumena.success("Gateway connected"));
   } else {
     s.stop(noumena.warning("Gateway not available (running in offline mode)"));
+  }
+
+  // Step 3: Check NPL bootstrap status
+  const bs = p.spinner();
+  bs.start("Checking NPL status...");
+  const bootstrapped = await isNplBootstrapped();
+  if (bootstrapped) {
+    bs.stop(noumena.success("NPL bootstrapped"));
+  } else {
+    bs.stop(noumena.warning("NPL not bootstrapped"));
+    p.log.warn("ServiceRegistry or ToolExecutionPolicy not found.");
+    p.log.info("Use 'NPL Bootstrap' from the menu to set up.");
   }
 
   // Main loop
