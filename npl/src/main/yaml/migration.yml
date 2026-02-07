@@ -7,9 +7,17 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
-  
+
   # V2: Added per-service ToolPolicy, transparent proxy architecture
   - name: mcp-2.0-tool-policy
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V3: Added per-user UserRegistry and UserToolAccess protocols
+  - name: mcp-3.0-user-access
     changes:
       - migrate:
           sources:

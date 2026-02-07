@@ -48,16 +48,46 @@ export interface ServiceDefinition {
 }
 
 /**
+ * User tool access definition
+ */
+export interface UserToolAccess {
+  userId: string;
+  keycloakId?: string;
+  displayName?: string;
+  createdAt?: string;
+  tools: Record<string, string[]>; // serviceName -> tool names (["*"] for all)
+  vaultPaths?: Record<string, string>; // serviceName -> vault path (future)
+}
+
+/**
+ * Default template for new users
+ */
+export interface DefaultToolTemplate {
+  enabled: boolean;
+  description: string;
+  tools: Record<string, string[]>; // serviceName -> tool names
+}
+
+/**
+ * User access control section
+ */
+export interface UserAccessConfig {
+  default_template?: DefaultToolTemplate;
+  users: UserToolAccess[];
+}
+
+/**
  * Root configuration structure
  */
 export interface ServicesConfig {
   services: ServiceDefinition[];
+  user_access?: UserAccessConfig;
 }
 
 /**
  * Get the absolute path to the config file
  */
-function getConfigPath(): string {
+export function getConfigPath(): string {
   const envPath = process.env.SERVICES_CONFIG_PATH;
   if (envPath && existsSync(envPath)) {
     return envPath;
@@ -280,5 +310,222 @@ export function removeTool(serviceName: string, toolName: string): boolean {
   }
   
   service.tools.splice(index, 1);
+  return saveConfig(config);
+}
+
+// ============================================================================
+// User Access Management
+// ============================================================================
+
+/**
+ * Get all users
+ */
+export function getAllUsers(): UserToolAccess[] {
+  const config = loadConfig();
+  return config.user_access?.users || [];
+}
+
+/**
+ * Get a specific user by userId
+ */
+export function getUser(userId: string): UserToolAccess | undefined {
+  const users = getAllUsers();
+  return users.find((u) => u.userId === userId);
+}
+
+/**
+ * Add a new user
+ */
+export function addUser(user: UserToolAccess): boolean {
+  const config = loadConfig();
+  
+  // Initialize user_access if it doesn't exist
+  if (!config.user_access) {
+    config.user_access = { users: [] };
+  }
+  
+  // Check if user already exists
+  if (config.user_access.users.some((u) => u.userId === user.userId)) {
+    console.error(`User already exists: ${user.userId}`);
+    return false;
+  }
+  
+  config.user_access.users.push(user);
+  return saveConfig(config);
+}
+
+/**
+ * Update an existing user
+ */
+export function updateUser(userId: string, updates: Partial<UserToolAccess>): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    console.error("No user_access section in config");
+    return false;
+  }
+  
+  const userIndex = config.user_access.users.findIndex((u) => u.userId === userId);
+  if (userIndex === -1) {
+    console.error(`User not found: ${userId}`);
+    return false;
+  }
+  
+  // Merge updates
+  config.user_access.users[userIndex] = {
+    ...config.user_access.users[userIndex],
+    ...updates,
+  };
+  
+  return saveConfig(config);
+}
+
+/**
+ * Remove a user
+ */
+export function removeUser(userId: string): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    console.error("No user_access section in config");
+    return false;
+  }
+  
+  const userIndex = config.user_access.users.findIndex((u) => u.userId === userId);
+  if (userIndex === -1) {
+    console.error(`User not found: ${userId}`);
+    return false;
+  }
+  
+  config.user_access.users.splice(userIndex, 1);
+  return saveConfig(config);
+}
+
+/**
+ * Grant a tool to a user
+ */
+export function grantToolToUser(userId: string, serviceName: string, toolName: string): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    console.error("No user_access section in config");
+    return false;
+  }
+  
+  const user = config.user_access.users.find((u) => u.userId === userId);
+  if (!user) {
+    console.error(`User not found: ${userId}`);
+    return false;
+  }
+  
+  // Initialize service tools if not exists
+  if (!user.tools[serviceName]) {
+    user.tools[serviceName] = [];
+  }
+  
+  // Add tool if not already present
+  if (!user.tools[serviceName].includes(toolName)) {
+    user.tools[serviceName].push(toolName);
+  }
+  
+  return saveConfig(config);
+}
+
+/**
+ * Revoke a tool from a user
+ */
+export function revokeToolFromUser(userId: string, serviceName: string, toolName: string): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    console.error("No user_access section in config");
+    return false;
+  }
+  
+  const user = config.user_access.users.find((u) => u.userId === userId);
+  if (!user) {
+    console.error(`User not found: ${userId}`);
+    return false;
+  }
+  
+  if (!user.tools[serviceName]) {
+    return true; // Nothing to revoke
+  }
+  
+  // Remove tool
+  user.tools[serviceName] = user.tools[serviceName].filter((t) => t !== toolName);
+  
+  // Remove service if no tools left
+  if (user.tools[serviceName].length === 0) {
+    delete user.tools[serviceName];
+  }
+  
+  return saveConfig(config);
+}
+
+/**
+ * Grant all tools for a service to a user
+ */
+export function grantAllToolsToUser(userId: string, serviceName: string): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    console.error("No user_access section in config");
+    return false;
+  }
+  
+  const user = config.user_access.users.find((u) => u.userId === userId);
+  if (!user) {
+    console.error(`User not found: ${userId}`);
+    return false;
+  }
+  
+  // Set wildcard
+  user.tools[serviceName] = ["*"];
+  
+  return saveConfig(config);
+}
+
+/**
+ * Revoke all access to a service for a user
+ */
+export function revokeServiceFromUser(userId: string, serviceName: string): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    console.error("No user_access section in config");
+    return false;
+  }
+  
+  const user = config.user_access.users.find((u) => u.userId === userId);
+  if (!user) {
+    console.error(`User not found: ${userId}`);
+    return false;
+  }
+  
+  delete user.tools[serviceName];
+  
+  return saveConfig(config);
+}
+
+/**
+ * Get default tool template
+ */
+export function getDefaultToolTemplate(): DefaultToolTemplate | undefined {
+  const config = loadConfig();
+  return config.user_access?.default_template;
+}
+
+/**
+ * Update default tool template
+ */
+export function updateDefaultToolTemplate(template: DefaultToolTemplate): boolean {
+  const config = loadConfig();
+  
+  if (!config.user_access) {
+    config.user_access = { users: [] };
+  }
+  
+  config.user_access.default_template = template;
   return saveConfig(config);
 }

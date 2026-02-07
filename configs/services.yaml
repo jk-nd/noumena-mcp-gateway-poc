@@ -6,14 +6,14 @@ services:
   - name: "notification-test"
     displayName: "Notification Test"
     type: "MCP_STDIO"
-    enabled: true
+    enabled: false
     command: "docker run -i --rm mcp-notification-test"
     args: []
     requiresCredentials: false
     description: "Test server for server-initiated MCP notifications. Provides tools to trigger notifications/tools/list_changed and logging notifications."
     tools:
       - name: "echo"
-        description: "Echo back the provided message (standard request-response baseline)"
+        description: "Echo back the provided message (standard request-response)"
         inputSchema:
           type: "object"
           properties:
@@ -24,7 +24,7 @@ services:
             - "message"
         enabled: true
       - name: "trigger_notification"
-        description: "Triggers a server-initiated notifications/tools/list_changed notification after responding. Tests the Gateway notification forwarding pipeline."
+        description: "Triggers a server-initiated notifications/tools/list_changed notification after responding. This tests the Gateway notification forwarding pipeline."
         inputSchema:
           type: "object"
           properties:
@@ -34,7 +34,7 @@ services:
           required: []
         enabled: true
       - name: "send_log"
-        description: "Sends a server-initiated notifications/message (logging) notification after responding. Tests forwarding of log-level notifications."
+        description: "Sends a server-initiated notifications/message (logging) notification after responding. This tests forwarding of log-level notifications."
         inputSchema:
           type: "object"
           properties:
@@ -43,13 +43,13 @@ services:
               description: "Log level: debug, info, warning, error (default: info)"
             log_message:
               type: "string"
-              description: "The log message to send"
+              description: "The log message to send (default: \"Hello from upstream MCP!\")"
           required: []
         enabled: true
   - name: "duckduckgo"
     displayName: "DuckDuckGo"
     type: "MCP_STDIO"
-    enabled: true
+    enabled: false
     command: "docker run -i --rm mcp/duckduckgo"
     args: []
     requiresCredentials: false
@@ -68,7 +68,7 @@ services:
               description: ""
           required:
             - "query"
-        enabled: false
+        enabled: true
       - name: "fetch_content"
         description: "Fetch and parse content from a webpage URL.      Args:         url: The webpage URL to fetch content from         ctx: MCP context for logging"
         inputSchema:
@@ -83,7 +83,7 @@ services:
   - name: "github"
     displayName: "Github"
     type: "MCP_STDIO"
-    enabled: true
+    enabled: false
     command: "docker run -i --rm mcp/github"
     args: []
     requiresCredentials: false
@@ -735,3 +735,57 @@ services:
             - "repo"
             - "pull_number"
         enabled: false
+  - name: "slack"
+    displayName: "Slack"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/slack"
+    args: []
+    requiresCredentials: false
+    description: "Interact with Slack Workspaces over the Slack API."
+    tools:
+      - name: "slack_default"
+        description: "Default tool for slack - run 'Discover tools' to find actual tools"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true
+user_access:
+  default_template:
+    enabled: true
+    description: "Default tool access for new users"
+    tools:
+      duckduckgo:
+        - "search"
+  users:
+    - userId: "admin@acme.com"
+      keycloakId: "aa0e467f-68b6-4a85-9057-4e809a66452c"
+      displayName: "Admin User"
+      createdAt: "2026-02-07T20:26:16.025Z"
+      tools: {}
+      vaultPaths: {}
+    - userId: "user@acme.com"
+      keycloakId: "4eb414c4-7a23-41e4-b803-61ab0caee153"
+      displayName: "Regular User"
+      createdAt: "2026-02-07T20:26:20.548Z"
+      tools: {}
+      vaultPaths: {}
+    - userId: "agent@acme.com"
+      keycloakId: "2bec753b-b5be-4a2c-9a68-1f9f5621993f"
+      displayName: "AI Agent"
+      createdAt: "2026-02-07T20:56:13.671Z"
+      tools:
+        slack:
+          - "*"
+      vaultPaths: {}
+    - userId: "charlie@acme.com"
+      keycloakId: "3c54ae83-107c-4531-9940-3b4e76d380d8"
+      displayName: "Charlie McDonald"
+      createdAt: "2026-02-07T21:41:17.408Z"
+      tools:
+        duckduckgo:
+          - "*"
+        github:
+          - "*"
+      vaultPaths: {}

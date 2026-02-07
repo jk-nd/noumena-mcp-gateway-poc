@@ -1,0 +1,72 @@
+package users
+
+/**
+ * UserRegistry - Master registry of users and agents with tool access.
+ * 
+ * This tracks all users/agents that have been granted access to tools.
+ * Admin creates user records here, then manages per-user tool access
+ * through UserToolAccess protocols.
+ * 
+ * Fields:
+ * - registeredUsers: Set of user identifiers (typically email addresses or agent IDs)
+ * 
+ * @party pAdmin - Organization administrator
+ */
+@api
+protocol[pAdmin] UserRegistry() {
+    initial state active;
+    
+    var registeredUsers: Set<Text> = setOf<Text>();
+    
+    /**
+     * Register a new user or agent.
+     * Creates the user in the registry so they can be granted tool access.
+     * @param userId The user identifier (e.g., "alice@acme.com" or "agent-001")
+     */
+    @api
+    permission[pAdmin] registerUser(userId: Text) | active {
+        require(!registeredUsers.contains(userId), "User already registered");
+        registeredUsers = registeredUsers.with(userId);
+        info("[UserRegistry] Registered user: " + userId);
+    };
+    
+    /**
+     * Remove a user or agent from the registry.
+     * This should be called before deleting their UserToolAccess protocol.
+     * @param userId The user identifier to remove
+     */
+    @api
+    permission[pAdmin] removeUser(userId: Text) | active {
+        require(registeredUsers.contains(userId), "User not found");
+        registeredUsers = registeredUsers.without(userId);
+        info("[UserRegistry] Removed user: " + userId);
+    };
+    
+    /**
+     * Check if a user is registered.
+     * @param userId The user identifier
+     * @return true if registered
+     */
+    @api
+    permission[pAdmin] isUserRegistered(userId: Text) returns Boolean | active {
+        return registeredUsers.contains(userId);
+    };
+    
+    /**
+     * Get all registered users.
+     * @return Set of registered user identifiers
+     */
+    @api
+    permission[pAdmin] getAllUsers() returns Set<Text> | active {
+        return registeredUsers;
+    };
+    
+    /**
+     * Get count of registered users.
+     * @return Number of users
+     */
+    @api
+    permission[pAdmin] getUserCount() returns Number | active {
+        return registeredUsers.size();
+    };
+}

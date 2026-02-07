@@ -63,11 +63,16 @@ All endpoints accept standard MCP JSON-RPC messages and return the same response
 - Lazy connection: upstream sessions created on first tool call
 - Fail-closed: all requests denied if NPL is unavailable
 
-### NPL Policy Enforcement
-- **ServiceRegistry** — controls which services are enabled/disabled
-- **ToolPolicy** (per service) — granular per-tool access control
-- Default-deny: tools must be explicitly enabled
-- Audit trail via NPL request counting
+### NPL Policy Enforcement (V3 - Per-User Access Control)
+- **ServiceRegistry** — controls which services are enabled/disabled org-wide
+- **ToolPolicy** (per service) — granular per-tool access control (service-level)
+- **UserRegistry** — tracks registered users/agents **[NEW]**
+- **UserToolAccess** (per user) — per-user tool access control **[NEW]**
+- Dual-layer enforcement: service-level + user-level checks
+- Default-deny: tools must be explicitly enabled AND granted to users
+- Wildcard support: `["*"]` grants all tools for a service
+- Audit trail via NPL request counting and access logs
+- See [docs/USER_ACCESS_CONTROL.md](docs/USER_ACCESS_CONTROL.md) for full details
 
 ### Authentication & OAuth 2.0
 - Keycloak OIDC with role-based access (admin, agent, user)

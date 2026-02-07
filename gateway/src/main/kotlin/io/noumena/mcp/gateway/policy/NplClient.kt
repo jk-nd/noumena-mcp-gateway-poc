@@ -17,17 +17,20 @@ private val logger = KotlinLogging.logger {}
 /**
  * Client for NPL Engine policy checks.
  *
- * V2 Architecture:
+ * V3 Architecture:
  *   - Gateway uses agent-level credentials to call per-service ToolPolicy instances
  *   - Each service has its own ToolPolicy instance (created via TUI bootstrap)
+ *   - Per-user UserToolAccess instances provide user-level access control - NEW
  *   - The Gateway never holds admin credentials
  *   - Fail-closed: if NPL is unavailable, requests are denied
  *
  * Policy check flow:
  *   1. Get agent token from Keycloak
- *   2. Find ToolPolicy instance for the service
- *   3. Call checkAccess permission
- *   4. Return allow/deny result
+ *   2. Find ToolPolicy instance for the service (service-level policy)
+ *   3. Call checkAccess permission on ToolPolicy
+ *   4. Find UserToolAccess instance for the user (user-level policy) - NEW
+ *   5. Call hasAccess permission on UserToolAccess - NEW
+ *   6. Return allow/deny result
  */
 class NplClient {
 
@@ -46,6 +49,9 @@ class NplClient {
 
     // Cached ToolPolicy instance IDs per service
     private val policyIds = mutableMapOf<String, String>()
+    
+    // Cached UserToolAccess instance IDs per user
+    private val userAccessIds = mutableMapOf<String, String>()
 
     /**
      * Check policy for a tool call.
@@ -70,26 +76,43 @@ class NplClient {
         return try {
             val agentToken = getAgentToken()
 
-            // Try per-service ToolPolicy first
+            // Step 1: Check service-level ToolPolicy
             val policyId = findToolPolicyForService(agentToken, service)
             if (policyId != null) {
-                return invokeCheckAccess(policyId, agentToken, service, operation, userId)
+                val policyResult = invokeCheckAccess(policyId, agentToken, service, operation, userId)
+                if (!policyResult.allowed) {
+                    return policyResult // Service-level policy denied
+                }
+                logger.info { "ToolPolicy check passed for $service.$operation" }
+            } else {
+                // Fallback: check ServiceRegistry directly
+                val registryAllowed = checkServiceRegistry(agentToken, service)
+                if (!registryAllowed) {
+                    return PolicyResponse(
+                        allowed = false,
+                        reason = "Service '$service' is not enabled in ServiceRegistry"
+                    )
+                }
+                logger.info { "No ToolPolicy for '$service' but service is enabled in registry" }
             }
 
-            // Fallback: check ServiceRegistry directly
-            val registryAllowed = checkServiceRegistry(agentToken, service)
-            if (!registryAllowed) {
-                return PolicyResponse(
-                    allowed = false,
-                    reason = "Service '$service' is not enabled in ServiceRegistry"
-                )
+            // Step 2: Check user-level UserToolAccess (NEW)
+            val userAccessId = findUserToolAccess(agentToken, userId)
+            if (userAccessId != null) {
+                val userAccessResult = invokeUserAccessCheck(userAccessId, agentToken, service, operation, userId)
+                if (!userAccessResult.allowed) {
+                    return userAccessResult // User-level access denied
+                }
+                logger.info { "UserToolAccess check passed for user $userId on $service.$operation" }
+            } else {
+                // No per-user access control configured - allow (backward compat)
+                logger.info { "No UserToolAccess configured for user '$userId' - allowing" }
             }
 
-            // Service is enabled in registry but no ToolPolicy exists - allow (backward compat)
-            logger.info { "No ToolPolicy for '$service' but service is enabled in registry - allowing" }
+            // Both checks passed (or were not configured)
             PolicyResponse(
                 allowed = true,
-                reason = "Service enabled (no per-service policy configured)"
+                reason = "Policy checks passed"
             )
         } catch (e: Exception) {
             logger.error(e) { "Policy check failed for $service.$operation" }
@@ -208,6 +231,88 @@ class NplClient {
     }
 
     /**
+     * Find a UserToolAccess instance for a specific user.
+     * Returns the instance ID, or null if no UserToolAccess exists for this user.
+     */
+    private suspend fun findUserToolAccess(agentToken: String, userId: String): String? {
+        // Check cache first
+        userAccessIds[userId]?.let { return it }
+
+        try {
+            val encodedUserId = java.net.URLEncoder.encode(userId, "UTF-8")
+            val listResponse = client.get("$nplUrl/npl/users/UserToolAccess/?userId=$encodedUserId") {
+                header("Authorization", "Bearer $agentToken")
+            }
+
+            if (!listResponse.status.isSuccess()) return null
+
+            val responseText = listResponse.bodyAsText()
+            val listBody = Json.parseToJsonElement(responseText).jsonObject
+            val items = listBody["items"]?.jsonArray ?: return null
+
+            // Should be exactly one UserToolAccess per userId
+            if (items.isNotEmpty()) {
+                val obj = items[0].jsonObject
+                val id = obj["@id"]?.jsonPrimitive?.content
+                if (id != null) {
+                    userAccessIds[userId] = id
+                    logger.info { "Found UserToolAccess for user '$userId': $id" }
+                    return id
+                }
+            }
+        } catch (e: Exception) {
+            logger.debug { "No UserToolAccess found for user '$userId': ${e.message}" }
+        }
+
+        return null
+    }
+
+    /**
+     * Invoke hasAccess permission on a UserToolAccess instance.
+     */
+    private suspend fun invokeUserAccessCheck(
+        accessId: String,
+        token: String,
+        service: String,
+        operation: String,
+        userId: String
+    ): PolicyResponse {
+        val requestBody = buildJsonObject {
+            put("serviceName", service)
+            put("toolName", operation)
+        }
+
+        logger.info { "NPL: POST /users/UserToolAccess/$accessId/hasAccess ($service.$operation for $userId)" }
+
+        val response = client.post("$nplUrl/npl/users/UserToolAccess/$accessId/hasAccess") {
+            header("Authorization", "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(requestBody.toString())
+        }
+
+        val responseBody = response.bodyAsText()
+
+        return if (response.status.isSuccess()) {
+            val allowed = responseBody.trim().removeSurrounding("\"").toBoolean()
+            PolicyResponse(
+                allowed = allowed,
+                reason = if (allowed) "User access approved" else "User does not have access to this tool"
+            )
+        } else {
+            val errorMessage = try {
+                val errorJson = Json.parseToJsonElement(responseBody).jsonObject
+                errorJson["message"]?.jsonPrimitive?.content ?: responseBody
+            } catch (e: Exception) {
+                responseBody
+            }
+            PolicyResponse(
+                allowed = false,
+                reason = "User access check failed: $errorMessage"
+            )
+        }
+    }
+
+    /**
      * Check if a service is enabled in the ServiceRegistry.
      * Fallback when no per-service ToolPolicy exists.
      */
@@ -251,9 +356,10 @@ class NplClient {
     }
 
     /**
-     * Clear the cached policy IDs (e.g., after NPL bootstrap).
+     * Clear the cached policy IDs and user access IDs (e.g., after NPL bootstrap).
      */
     fun clearCache() {
         policyIds.clear()
+        userAccessIds.clear()
     }
 }

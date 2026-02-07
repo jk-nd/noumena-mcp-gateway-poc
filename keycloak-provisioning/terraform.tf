@@ -202,13 +202,65 @@ resource "keycloak_user" "admin" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# Regular User - can delegate to agents, set company policies
-resource "keycloak_user" "user" {
+# ============================================================================
+# Realm Management — give admin user full realm-admin capabilities
+# so the admin's mcpgateway-realm token can call the Keycloak Admin API
+# (eliminates the need for a separate master-realm login)
+# ============================================================================
+
+data "keycloak_openid_client" "realm_management" {
+  realm_id  = keycloak_realm.mcpgateway.id
+  client_id = "realm-management"
+}
+
+data "keycloak_role" "realm_admin" {
+  realm_id  = keycloak_realm.mcpgateway.id
+  client_id = data.keycloak_openid_client.realm_management.id
+  name      = "realm-admin"
+}
+
+resource "keycloak_user_roles" "admin_realm_management" {
+  realm_id = keycloak_realm.mcpgateway.id
+  user_id  = keycloak_user.admin.id
+
+  role_ids = [
+    data.keycloak_role.realm_admin.id
+  ]
+}
+
+# AI Agent - can invoke tools within delegated permissions
+resource "keycloak_user" "agent" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "user"
-  email      = "user@acme.com"
-  first_name = "Regular"
-  last_name  = "User"
+  username   = "agent"
+  email      = "agent@acme.com"
+  first_name = "AI"
+  last_name  = "Agent"
+  enabled    = true
+
+  attributes = {
+    "role"         = "agent"
+    "organization" = "acme"
+  }
+
+  initial_password {
+    value     = var.default_password
+    temporary = false
+  }
+
+  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
+}
+
+# ============================================================================
+# Additional Users for Demo / Testing
+# ============================================================================
+
+# Alice - product manager, regular user
+resource "keycloak_user" "alice" {
+  realm_id   = keycloak_realm.mcpgateway.id
+  username   = "alice"
+  email      = "alice@acme.com"
+  first_name = "Alice"
+  last_name  = "Chen"
   enabled    = true
 
   attributes = {
@@ -224,12 +276,34 @@ resource "keycloak_user" "user" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# AI Agent - can invoke tools within delegated permissions
-resource "keycloak_user" "agent" {
+# Bob - engineer, regular user
+resource "keycloak_user" "bob" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "agent"
-  email      = "agent@acme.com"
-  first_name = "AI"
+  username   = "bob"
+  email      = "bob@acme.com"
+  first_name = "Bob"
+  last_name  = "Martinez"
+  enabled    = true
+
+  attributes = {
+    "role"         = "user"
+    "organization" = "acme"
+  }
+
+  initial_password {
+    value     = var.default_password
+    temporary = false
+  }
+
+  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
+}
+
+# Research Agent - autonomous AI agent for research tasks
+resource "keycloak_user" "research_agent" {
+  realm_id   = keycloak_realm.mcpgateway.id
+  username   = "research-agent"
+  email      = "research-agent@acme.com"
+  first_name = "Research"
   last_name  = "Agent"
   enabled    = true
 

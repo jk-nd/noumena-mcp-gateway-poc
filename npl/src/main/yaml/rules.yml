@@ -41,3 +41,38 @@ services.ToolPolicy:
         role:
           - agent
           - admin  # Admin can also act as agent
+
+# ============================================================================
+# USERS PACKAGE - Per-user Access Control (V3)
+# ============================================================================
+
+# UserRegistry — master list of registered users
+users.UserRegistry:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+
+# UserToolAccess — per-user/agent tool access control
+users.UserToolAccess:
+  # Admin creates instances and grants/revokes tools
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  # The user this protocol controls (all authenticated users can be pUser)
+  pUser:
+    set:
+      claims:
+        role:
+          - user
+          - admin  # Admin can also act as user for management
+  # Gateway checks access before routing tool calls
+  pGateway:
+    set:
+      claims:
+        role:
+          - agent
+          - admin  # Admin can also act as gateway for testing
