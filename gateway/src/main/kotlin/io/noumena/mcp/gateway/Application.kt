@@ -21,6 +21,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import io.ktor.http.auth.*
 import io.ktor.utils.io.*
+import io.noumena.mcp.gateway.notifications.NotificationBroadcaster
 import io.noumena.mcp.gateway.server.McpServerHandler
 import io.noumena.mcp.gateway.upstream.UpstreamSessionManager
 import io.noumena.mcp.gateway.upstream.UpstreamRouter
@@ -164,8 +165,9 @@ fun Application.configureGateway() {
     }
     
     // ─── Upstream infrastructure ─────────────────────────────────────────────
+    val notificationBroadcaster = NotificationBroadcaster()
     val upstreamRouter = UpstreamRouter()
-    val upstreamSessionManager = UpstreamSessionManager(upstreamRouter)
+    val upstreamSessionManager = UpstreamSessionManager(upstreamRouter, notificationBroadcaster)
     
     // Create MCP Server handler (transparent proxy)
     val mcpHandler = McpServerHandler(upstreamRouter = upstreamRouter, upstreamSessionManager = upstreamSessionManager)
@@ -418,10 +420,22 @@ fun Application.configureGateway() {
         webSocket("/mcp/ws") {
             val principal = call.principal<JWTPrincipal>()
             val user = principal?.payload?.subject ?: "unknown"
+            val wsId = UUID.randomUUID().toString()
             
             logger.info { "╔════════════════════════════════════════════════════════════════╗" }
             logger.info { "║ AGENT CONNECTED via WebSocket (user: $user)" }
             logger.info { "╚════════════════════════════════════════════════════════════════╝" }
+            
+            // Register for upstream notification forwarding.
+            // Notifications from upstream MCP services are sent as WebSocket text frames.
+            val wsSession = this
+            notificationBroadcaster.register("ws-$wsId") { notification ->
+                try {
+                    wsSession.send(Frame.Text(notification))
+                } catch (e: Exception) {
+                    logger.warn { "Failed to forward notification to WebSocket $wsId: ${e.message}" }
+                }
+            }
             
             try {
                 for (frame in incoming) {
@@ -439,6 +453,7 @@ fun Application.configureGateway() {
             } catch (e: Exception) {
                 logger.error(e) { "WebSocket error" }
             } finally {
+                notificationBroadcaster.unregister("ws-$wsId")
                 logger.info { "AGENT DISCONNECTED (user: $user)" }
             }
         }
@@ -459,6 +474,13 @@ fun Application.configureGateway() {
                 sseSessions[sessionId] = session
                 
                 logger.info { "SSE CLIENT CONNECTED (MCP Inspector) - Session: $sessionId, User: $user, Roles: $roles" }
+                
+                // Register this SSE session for upstream notification forwarding.
+                // When an upstream MCP service sends a notification (e.g., tools/list_changed),
+                // it will be pushed to this session's response channel and delivered via SSE.
+                notificationBroadcaster.register("sse-$sessionId") { notification ->
+                    session.responseChannel.trySend(notification)
+                }
                 
                 val host = call.request.host()
                 val port = call.request.port()
@@ -498,6 +520,7 @@ fun Application.configureGateway() {
                     } catch (e: Exception) {
                         logger.info { "SSE connection closed: ${e.message}" }
                     } finally {
+                        notificationBroadcaster.unregister("sse-$sessionId")
                         sseSessions.remove(sessionId)
                         session.responseChannel.close()
                         logger.info { "SSE session $sessionId cleaned up" }

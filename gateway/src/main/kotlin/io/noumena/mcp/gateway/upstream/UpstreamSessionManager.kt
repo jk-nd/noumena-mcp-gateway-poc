@@ -15,7 +15,10 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCNotification
+import io.modelcontextprotocol.kotlin.sdk.types.McpJson
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.noumena.mcp.gateway.notifications.NotificationBroadcaster
 import io.noumena.mcp.shared.config.ServiceDefinition
 import io.noumena.mcp.shared.config.ServicesConfig
 import kotlinx.coroutines.runBlocking
@@ -44,7 +47,8 @@ private val logger = KotlinLogging.logger {}
  *   - No `supergateway` wrapper needed — the Gateway natively speaks STDIO/WS/HTTP.
  */
 class UpstreamSessionManager(
-    private val router: UpstreamRouter
+    private val router: UpstreamRouter,
+    private val notificationBroadcaster: NotificationBroadcaster = NotificationBroadcaster()
 ) {
     /** Active upstream sessions keyed by service name. */
     private val sessions = ConcurrentHashMap<String, ManagedSession>()
@@ -170,6 +174,42 @@ class UpstreamSessionManager(
         }
     }
 
+    // ─── Notification forwarding ────────────────────────────────────────────
+
+    /**
+     * Register a fallback notification handler on an MCP SDK Client to forward
+     * server-initiated notifications from upstream to connected agents.
+     *
+     * The MCP protocol allows servers to send notifications at any time:
+     *   - notifications/tools/list_changed
+     *   - notifications/resources/list_changed
+     *   - notifications/resources/updated
+     *   - notifications/message (logging)
+     *
+     * Progress notifications (notifications/progress) are already handled
+     * per-request by the SDK and are NOT forwarded through this path.
+     */
+    private fun registerNotificationForwarding(client: Client, serviceName: String) {
+        client.fallbackNotificationHandler = { notification ->
+            logger.info { "╔══════════════════════════════════════════════════════════════╗" }
+            logger.info { "║ UPSTREAM NOTIFICATION from '$serviceName'" }
+            logger.info { "║ Method: ${notification.method}" }
+            logger.info { "╚══════════════════════════════════════════════════════════════╝" }
+
+            try {
+                // Re-serialize to JSON-RPC format for forwarding
+                val notificationJson = McpJson.encodeToString(
+                    JSONRPCNotification.serializer(),
+                    notification
+                )
+                notificationBroadcaster.broadcast(notificationJson)
+            } catch (e: Exception) {
+                logger.error(e) { "Failed to forward notification from '$serviceName'" }
+            }
+        }
+        logger.info { "Registered notification forwarding for '$serviceName'" }
+    }
+
     // ─── Transport-specific session factories ────────────────────────────────
 
     /**
@@ -195,6 +235,7 @@ class UpstreamSessionManager(
 
         val client = Client(clientInfo, ClientOptions())
         client.connect(transport)
+        registerNotificationForwarding(client, service.name)
 
         logger.info { "STDIO session '${service.name}' connected (PID: ${process.pid()})" }
         return ManagedSession(
@@ -218,6 +259,7 @@ class UpstreamSessionManager(
         val transport = StreamableHttpClientTransport(httpClient, endpoint)
         val client = Client(clientInfo, ClientOptions())
         client.connect(transport)
+        registerNotificationForwarding(client, service.name)
 
         logger.info { "HTTP session '${service.name}' connected" }
         return ManagedSession(
@@ -240,6 +282,7 @@ class UpstreamSessionManager(
         val transport = WebSocketClientTransport(httpClient, endpoint)
         val client = Client(clientInfo, ClientOptions())
         client.connect(transport)
+        registerNotificationForwarding(client, service.name)
 
         logger.info { "WebSocket session '${service.name}' connected" }
         return ManagedSession(
