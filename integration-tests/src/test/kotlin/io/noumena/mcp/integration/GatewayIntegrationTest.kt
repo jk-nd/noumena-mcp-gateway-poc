@@ -13,25 +13,33 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 
 /**
- * Integration tests for the MCP Gateway.
+ * Integration tests for the MCP Gateway — V2 Transparent Proxy.
+ * 
+ * Tests Gateway endpoints and proxy behavior:
+ * - Health check
+ * - Admin services endpoint (namespaced tools)
+ * - MCP HTTP POST endpoint
+ * - MCP WebSocket endpoint availability
+ * - OAuth discovery endpoints
  * 
  * Prerequisites:
  * - Docker stack must be running: docker compose -f deployments/docker-compose.yml up -d
  * - Gateway must be built and running
  * 
- * Run with: ./gradlew :integration-tests:test
+ * Run with: ./gradlew :integration-tests:test --tests "*GatewayIntegrationTest*"
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation::class)
 class GatewayIntegrationTest {
     
     private lateinit var token: String
+    private lateinit var adminToken: String
     private lateinit var client: HttpClient
     
     @BeforeAll
     fun setup() = runBlocking {
         println("╔════════════════════════════════════════════════════════════════╗")
-        println("║ GATEWAY INTEGRATION TESTS - Setup                              ║")
+        println("║ GATEWAY INTEGRATION TESTS (V2 Proxy) - Setup                  ║")
         println("╠════════════════════════════════════════════════════════════════╣")
         println("║ Gateway URL:  ${TestConfig.gatewayUrl}")
         println("║ NPL URL:      ${TestConfig.nplUrl}")
@@ -55,8 +63,9 @@ class GatewayIntegrationTest {
             "Gateway is not running. Build and start with docker compose."
         }
         
-        // Get authentication token
+        // Get authentication tokens
         token = KeycloakAuth.getToken()
+        adminToken = KeycloakAuth.getToken("admin", "Welcome123")
         println("    ✓ Authentication successful")
     }
     
@@ -84,54 +93,57 @@ class GatewayIntegrationTest {
     
     @Test
     @Order(2)
-    fun `context store operations`() = runBlocking {
+    fun `admin services endpoint returns namespaced tools`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Context Store Operations                             │")
+        println("│ TEST: Admin Services Endpoint                              │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        // Try to fetch a non-existent context
-        val response = client.get("${TestConfig.gatewayUrl}/context/non-existent-id")
+        val response = client.get("${TestConfig.gatewayUrl}/admin/services") {
+            header("Authorization", "Bearer $adminToken")
+        }
         
-        println("    Fetching non-existent context...")
         println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(300)}")
         
-        // Should return 404 or empty response
-        assertTrue(
-            response.status == HttpStatusCode.NotFound || 
-            response.status == HttpStatusCode.OK,
-            "Should handle non-existent context gracefully"
-        )
+        assertTrue(response.status.isSuccess(), "Admin services endpoint should succeed")
         
-        println("    ✓ Context store handles missing contexts correctly")
+        val json = TestClient.json.parseToJsonElement(body).jsonObject
+        val services = json["services"]?.jsonArray
+        assertNotNull(services, "Should have services array")
+        
+        // V2: tools should be namespaced
+        services?.forEach { svc ->
+            val svcName = svc.jsonObject["name"]?.jsonPrimitive?.content ?: ""
+            val tools = svc.jsonObject["tools"]?.jsonArray
+            tools?.forEach { tool ->
+                val toolName = tool.jsonObject["name"]?.jsonPrimitive?.content ?: ""
+                assertTrue(toolName.startsWith("$svcName."),
+                    "Tool '$toolName' should be namespaced with service '$svcName'")
+            }
+        }
+        
+        println("    ✓ Admin services endpoint returns namespaced tools")
     }
     
     @Test
     @Order(3)
-    fun `callback endpoint exists`() = runBlocking {
+    fun `MCP HTTP POST endpoint requires authentication`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Callback Endpoint Exists                             │")
+        println("│ TEST: MCP HTTP POST Requires Auth                          │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        // Send a test callback (will fail validation but endpoint should exist)
-        val callbackBody = """
-            {
-                "requestId": "test-callback-123",
-                "success": true,
-                "data": {"test": "data"}
-            }
-        """.trimIndent()
-        
-        val response = client.post("${TestConfig.gatewayUrl}/callback") {
+        // Request without token should be rejected
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             contentType(ContentType.Application.Json)
-            setBody(callbackBody)
+            setBody("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}""")
         }
         
-        println("    Status: ${response.status}")
+        println("    Status (no token): ${response.status}")
+        assertEquals(HttpStatusCode.Unauthorized, response.status,
+            "MCP endpoint should require authentication")
         
-        // Endpoint should exist (may return error for unknown requestId, but not 404)
-        assertNotEquals(HttpStatusCode.NotFound, response.status, "Callback endpoint should exist")
-        
-        println("    ✓ Callback endpoint is available")
+        println("    ✓ MCP endpoint correctly requires authentication")
     }
     
     @Test
@@ -147,7 +159,6 @@ class GatewayIntegrationTest {
         println("    Status: ${response.status}")
         
         // WebSocket endpoint should reject plain HTTP (upgrade required)
-        // This confirms the endpoint exists
         assertTrue(
             response.status == HttpStatusCode.BadRequest ||
             response.status == HttpStatusCode.UpgradeRequired ||
@@ -158,10 +169,30 @@ class GatewayIntegrationTest {
         println("    ✓ MCP WebSocket endpoint is configured")
     }
     
+    @Test
+    @Order(5)
+    fun `OAuth discovery endpoints available`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: OAuth Discovery Endpoints                            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+        
+        // Protected Resource Metadata (RFC 9728)
+        val prmResponse = client.get("${TestConfig.gatewayUrl}/.well-known/oauth-protected-resource")
+        println("    Protected Resource Metadata: ${prmResponse.status}")
+        assertTrue(prmResponse.status.isSuccess(), "PRM endpoint should be available")
+        
+        // Authorization Server Metadata (RFC 8414)
+        val asmResponse = client.get("${TestConfig.gatewayUrl}/.well-known/oauth-authorization-server")
+        println("    Auth Server Metadata: ${asmResponse.status}")
+        assertTrue(asmResponse.status.isSuccess(), "ASM endpoint should be available")
+        
+        println("    ✓ OAuth discovery endpoints are available")
+    }
+    
     @AfterAll
     fun teardown() {
         println("\n╔════════════════════════════════════════════════════════════════╗")
-        println("║ GATEWAY INTEGRATION TESTS - Complete                           ║")
+        println("║ GATEWAY INTEGRATION TESTS (V2) - Complete                     ║")
         println("╚════════════════════════════════════════════════════════════════╝")
         if (::client.isInitialized) {
             client.close()

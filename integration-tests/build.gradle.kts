@@ -34,5 +34,5 @@ tasks.test {
     environment("NPL_URL", System.getenv("NPL_URL") ?: "http://localhost:12000")
     environment("KEYCLOAK_URL", System.getenv("KEYCLOAK_URL") ?: "http://localhost:11000")
     environment("GATEWAY_URL", System.getenv("GATEWAY_URL") ?: "http://localhost:8000")
-    environment("RABBITMQ_HOST", System.getenv("RABBITMQ_HOST") ?: "localhost")
+    // RabbitMQ removed in V2 architecture
 }

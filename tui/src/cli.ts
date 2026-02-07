@@ -23,9 +23,6 @@ import {
   reloadGatewayConfig, 
   syncServiceWithNpl,
   discoverMcpServers,
-  getContainerStatus,
-  startContainer,
-  stopContainer,
   imageExists,
   discoverToolsFromContainer,
   discoveredToToolDefinitions,
@@ -121,13 +118,17 @@ async function adminLogin(): Promise<boolean> {
 }
 
 /**
- * NPL Bootstrap flow - creates ServiceRegistry and ToolExecutionPolicy if needed.
+ * NPL Bootstrap flow - creates ServiceRegistry and per-service ToolPolicy instances.
+ *
+ * V2 Architecture:
+ *   1. ServiceRegistry — tracks which services are enabled
+ *   2. ToolPolicy (per service) — per-tool access control
  */
 async function nplBootstrapFlow(): Promise<void> {
   console.log();
   console.log(noumena.purple("  NPL Bootstrap"));
-  console.log(noumena.textDim("  Ensures ServiceRegistry and ToolExecutionPolicy exist in NPL."));
-  console.log(noumena.textDim("  Also syncs enabled services from services.yaml."));
+  console.log(noumena.textDim("  Ensures ServiceRegistry and per-service ToolPolicy instances exist."));
+  console.log(noumena.textDim("  Also syncs enabled services and tools from services.yaml."));
   console.log();
 
   const s = p.spinner();
@@ -143,10 +144,10 @@ async function nplBootstrapFlow(): Promise<void> {
       p.log.info("ServiceRegistry already exists");
     }
 
-    if (result.policyCreated) {
-      p.log.success("Created ToolExecutionPolicy");
+    if (result.policiesCreated.length > 0) {
+      p.log.success(`Created ToolPolicy for: ${result.policiesCreated.join(", ")}`);
     } else {
-      p.log.info("ToolExecutionPolicy already exists");
+      p.log.info("All ToolPolicy instances already exist");
     }
 
     if (result.servicesEnabled.length > 0) {
@@ -179,6 +180,109 @@ function getDockerImageName(service: ServiceDefinition): string | null {
   }
   
   return null;
+}
+
+/**
+ * Check if a container for this service is running
+ */
+function isContainerRunning(imageName: string): boolean {
+  try {
+    const result = execSync(`docker ps --filter ancestor=${imageName} --format "{{.ID}}"`, { 
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "ignore"] 
+    });
+    return result.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get container ID for a running container with this image
+ */
+function getContainerId(imageName: string): string | null {
+  try {
+    const result = execSync(`docker ps --filter ancestor=${imageName} --format "{{.ID}}"`, { 
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "ignore"] 
+    });
+    const id = result.trim().split("\n")[0];
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start a container for this service
+ */
+function startContainer(service: ServiceDefinition): { success: boolean; error?: string; command?: string } {
+  try {
+    const imageName = getDockerImageName(service);
+    if (!imageName) return { success: false, error: "Not a Docker service" };
+    
+    // Start container in detached mode with a name
+    const containerName = `mcp-${service.name}`;
+    
+    // First check if container with this name already exists
+    try {
+      const existing = execSync(`docker ps -a --filter name=^${containerName}$ --format "{{.ID}}"`, { 
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "ignore"]
+      });
+      
+      if (existing.trim()) {
+        // Container exists - remove it first
+        execSync(`docker rm -f ${containerName}`, { stdio: "pipe" });
+      }
+    } catch (e) {
+      // Ignore - container doesn't exist or cleanup failed
+    }
+    
+    // Create and start new container in detached mode
+    const runCmd = `docker run -d --name ${containerName} ${imageName}`;
+    try {
+      const result = execSync(runCmd, { encoding: "utf-8", stdio: "pipe" });
+      return { success: true, command: runCmd };
+    } catch (err: any) {
+      let errorMsg = "Unknown error";
+      
+      if (err.stderr) {
+        errorMsg = err.stderr.toString().trim();
+      } else if (err.stdout) {
+        errorMsg = err.stdout.toString().trim();
+      } else if (err.message) {
+        errorMsg = err.message;
+      }
+      
+      return { success: false, error: errorMsg, command: runCmd };
+    }
+  } catch (err: any) {
+    let errorMsg = "Unknown error";
+    
+    if (err.stderr) {
+      errorMsg = err.stderr.toString().trim();
+    } else if (err.stdout) {
+      errorMsg = err.stdout.toString().trim();
+    } else if (err.message) {
+      errorMsg = err.message;
+    }
+    
+    return { success: false, error: errorMsg };
+  }
+}
+
+/**
+ * Stop a running container
+ */
+function stopContainer(containerId: string): boolean {
+  try {
+    execSync(`docker stop ${containerId}`, { stdio: "pipe" });
+    execSync(`docker rm ${containerId}`, { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -215,10 +319,10 @@ async function mainMenu(): Promise<boolean> {
     noumena.textDim("  Gateway: ") + gatewayStatus + 
     noumena.textDim("  |  Services: ") + noumena.text(`${enabledCount}/${services.length}`) +
     noumena.textDim("  |  ") +
-    noumena.success("✓") + noumena.textDim(" on  ") +
-    noumena.grayDim("–") + noumena.textDim(" off  ") +
-    noumena.success("▶") + noumena.textDim(" running  ") +
-    noumena.warning("■") + noumena.textDim(" stopped")
+    noumena.success("✓") + noumena.textDim(" enabled  ") +
+    noumena.grayDim("–") + noumena.textDim(" disabled  ") +
+    noumena.warning("■") + noumena.textDim(" image ready  ") +
+    noumena.grayDim("·") + noumena.textDim(" not pulled")
   );
   console.log();
   
@@ -232,13 +336,25 @@ async function mainMenu(): Promise<boolean> {
     const imageName = getDockerImageName(service);
     let containerIcon = "";
     if (imageName) {
-      const status = getContainerStatus(imageName);
-      if (status.running) {
-        containerIcon = noumena.success(" ▶");
-      } else if (imageExists(imageName)) {
-        containerIcon = noumena.warning(" ■");
+      const pulled = imageExists(imageName);
+      
+      // Only check running status for HTTP services (STDIO services are ephemeral)
+      if (service.type !== "MCP_STDIO") {
+        const running = isContainerRunning(imageName);
+        if (running) {
+          containerIcon = noumena.success(" ▶"); // Container running
+        } else if (pulled) {
+          containerIcon = noumena.warning(" ■"); // Image ready (not running)
+        } else {
+          containerIcon = noumena.grayDim(" ·"); // Image not pulled
+        }
       } else {
-        containerIcon = noumena.grayDim(" ·");
+        // For STDIO services, just show if image is pulled
+        if (pulled) {
+          containerIcon = noumena.warning(" ■"); // Image ready
+        } else {
+          containerIcon = noumena.grayDim(" ·"); // Image not pulled
+        }
       }
     }
     const enabledTools = service.tools.filter(t => t.enabled !== false).length;
@@ -295,8 +411,8 @@ async function mainMenu(): Promise<boolean> {
 async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
   const imageName = getDockerImageName(service);
   const isDocker = imageName !== null;
-  const containerStatus = isDocker ? getContainerStatus(imageName) : null;
   const hasImage = isDocker ? imageExists(imageName) : false;
+  const containerRunning = isDocker && hasImage ? isContainerRunning(imageName) : false;
   
   // Show service info header
   console.log();
@@ -304,8 +420,17 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
   console.log(noumena.textDim(`  Type: ${getTypeLabel(service.type)}`));
   console.log(noumena.textDim(`  Status: `) + (service.enabled ? noumena.success("Enabled") : noumena.grayDim("Disabled")));
   if (isDocker) {
-    console.log(noumena.textDim(`  Image: ${imageName}`));
-    console.log(noumena.textDim(`  Container: `) + (containerStatus?.running ? noumena.success("Running") : hasImage ? noumena.warning("Stopped") : noumena.grayDim("Not pulled")));
+    console.log(noumena.textDim(`  Image: ${imageName}`) + (hasImage ? noumena.success(" (pulled)") : noumena.grayDim(" (not pulled)")));
+    if (service.type === "MCP_STDIO") {
+      console.log(noumena.textDim(`  Transport: `) + noumena.text("STDIN/STDOUT (ephemeral containers)"));
+      console.log(noumena.textDim(`  Note: `) + noumena.textDim("Gateway spawns containers on-demand when tools are called"));
+    } else if (service.type === "MCP_HTTP") {
+      if (hasImage && containerRunning) {
+        console.log(noumena.textDim(`  Container: `) + noumena.success("Running"));
+      } else if (hasImage) {
+        console.log(noumena.textDim(`  Container: `) + noumena.grayDim("Stopped"));
+      }
+    }
   }
   console.log();
 
@@ -321,16 +446,19 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
     options.push({ value: "enable", label: noumena.success("Enable service"), hint: "Start accepting requests" });
   }
   
-  // Container actions (only for Docker-based services)
-  if (isDocker) {
-    if (!hasImage) {
-      options.push({ value: "pull", label: "Pull image", hint: `docker pull ${imageName}` });
-    } else if (containerStatus?.running) {
-      options.push({ value: "stop", label: "Stop container" });
-      options.push({ value: "logs", label: "View logs" });
+  // Container start/stop (only for non-STDIO services with image available)
+  // STDIO services can't stay running in detached mode - they need stdin/stdout
+  if (isDocker && hasImage && service.type !== "MCP_STDIO") {
+    if (containerRunning) {
+      options.push({ value: "stop", label: "Stop container", hint: "Stop the running Docker container" });
     } else {
-      options.push({ value: "start", label: noumena.success("Start container") });
+      options.push({ value: "start", label: "Start container", hint: "Start a Docker container" });
     }
+  }
+  
+  // Image pull (only if image not available)
+  if (isDocker && !hasImage) {
+    options.push({ value: "pull", label: "Pull image", hint: `docker pull ${imageName}` });
   }
   
   // Other actions
@@ -390,41 +518,96 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
     } else {
       s.stop(noumena.purpleDim("Failed"));
     }
-  } else if (action === "pull" && imageName) {
-    s.start(`Pulling ${imageName}...`);
-    try {
-      execSync(`docker pull ${imageName}`, { stdio: "pipe" });
-      s.stop(noumena.success("Image pulled"));
-    } catch {
-      s.stop(noumena.purpleDim("Failed to pull"));
-    }
-  } else if (action === "start" && imageName) {
-    const containerName = `mcp-${service.name}`;
-    s.start("Starting container...");
-    const result = startContainer(imageName, containerName);
-    if (result.success) {
-      s.stop(noumena.success("Container started"));
-    } else {
-      s.stop(noumena.purpleDim(`Failed: ${result.error}`));
-    }
-  } else if (action === "stop") {
-    const containerName = `mcp-${service.name}`;
-    s.start("Stopping container...");
-    const result = stopContainer(containerName);
-    if (result.success) {
-      s.stop(noumena.success("Container stopped"));
-    } else {
-      s.stop(noumena.purpleDim(`Failed: ${result.error}`));
-    }
-  } else if (action === "logs") {
-    const containerName = `mcp-${service.name}`;
-    try {
-      const logs = execSync(`docker logs --tail 30 ${containerName}`, { encoding: "utf-8" });
+  } else if (action === "start") {
+    // Note: STDIO services may exit immediately when started in detached mode
+    // as they expect stdin/stdout communication. Gateway spawns them on-demand.
+    console.log();
+    if (service.type === "MCP_STDIO") {
+      p.log.info("Note: STDIO services expect stdin/stdout and may exit immediately.");
+      p.log.info("The Gateway will spawn containers on-demand when tools are called.");
       console.log();
-      console.log(noumena.purple("  Last 30 log lines:"));
-      console.log(noumena.textDim(logs || "(no logs)"));
+      
+      const shouldContinue = await p.confirm({
+        message: "Start container anyway for testing?",
+        initialValue: false,
+      });
+      
+      if (p.isCancel(shouldContinue) || !shouldContinue) {
+        return;
+      }
+    }
+    
+    s.start("Starting container...");
+    const result = startContainer(service);
+    if (result.success) {
+      s.stop(noumena.success("Container created"));
+      
+      if (result.command) {
+        p.log.info(noumena.textDim(`Command: ${result.command}`));
+      }
+      
+      // Give it a moment to start, then check status
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      if (imageName && isContainerRunning(imageName)) {
+        p.log.success("Container is running");
+      } else {
+        p.log.warn("Container exited (expected for STDIO services without stdin/stdout connection)");
+        // Show container logs to help diagnose issues
+        if (imageName) {
+          try {
+            const containerName = `mcp-${service.name}`;
+            const logs = execSync(`docker logs ${containerName} 2>&1 | tail -10`, { 
+              encoding: "utf-8",
+              stdio: ["pipe", "pipe", "ignore"]
+            });
+            if (logs.trim()) {
+              console.log(noumena.textDim("  Last container output:"));
+              logs.trim().split("\n").forEach(line => {
+                console.log(noumena.textDim(`    ${line}`));
+              });
+            }
+          } catch {
+            // Ignore log fetch errors
+          }
+        }
+      }
+    } else {
+      s.stop(noumena.purpleDim("Failed to start container"));
+      if (result.command) {
+        console.log();
+        console.log(noumena.textDim("  Command: ") + result.command);
+      }
+      if (result.error) {
+        console.log();
+        console.log(noumena.textDim("  Error:"));
+        result.error.split("\n").forEach(line => {
+          console.log(noumena.textDim(`    ${line}`));
+        });
+      }
+    }
+  } else if (action === "stop" && imageName) {
+    const containerId = getContainerId(imageName);
+    if (containerId) {
+      s.start("Stopping container...");
+      const success = stopContainer(containerId);
+      if (success) {
+        s.stop(noumena.success("Container stopped"));
+      } else {
+        s.stop(noumena.purpleDim("Failed to stop container"));
+      }
+    }
+  } else if (action === "pull" && imageName) {
+    console.log();
+    console.log(noumena.purple(`  Pulling ${imageName}...`));
+    console.log();
+    try {
+      execSync(`docker pull ${imageName}`, { stdio: "inherit" });
+      console.log();
+      p.log.success("Image pulled successfully");
     } catch {
-      p.log.warn("Failed to get logs");
+      console.log();
+      p.log.error("Failed to pull image");
     }
   } else if (action === "discover" && imageName) {
     const toolCount = await discoverAndSaveTools(service.name, imageName);
@@ -443,23 +626,8 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
 
     if (!p.isCancel(confirmed) && confirmed) {
       const deleteSpinner = p.spinner();
-      
-      // Step 1: Stop container if running (for Docker-based services)
-      if (isDocker && imageName) {
-        const containerName = `mcp-${service.name}`;
-        const status = getContainerStatus(imageName);
-        if (status.running) {
-          deleteSpinner.start("Stopping container...");
-          const result = stopContainer(containerName);
-          if (result.success) {
-            deleteSpinner.stop(noumena.success("Container stopped"));
-          } else {
-            deleteSpinner.stop(noumena.warning("Could not stop container (may already be stopped)"));
-          }
-        }
-      }
 
-      // Step 2: Disable in NPL (remove from allowed services)
+      // Step 1: Disable in NPL (remove from allowed services)
       deleteSpinner.start("Removing from NPL policy...");
       try {
         await syncServiceWithNpl(service.name, false);
@@ -533,7 +701,13 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, true);
       }
-      p.log.success("All tools enabled");
+      try {
+        await reloadGatewayConfig();
+        p.log.success("All tools enabled (Gateway reloaded)");
+      } catch {
+        p.log.success("All tools enabled");
+        p.log.warn("Gateway reload failed — restart Gateway to apply");
+      }
       continue;
     }
 
@@ -541,7 +715,13 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, false);
       }
-      p.log.success("All tools disabled");
+      try {
+        await reloadGatewayConfig();
+        p.log.success("All tools disabled (Gateway reloaded)");
+      } catch {
+        p.log.success("All tools disabled");
+        p.log.warn("Gateway reload failed — restart Gateway to apply");
+      }
       continue;
     }
 
@@ -582,7 +762,13 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
       setToolEnabled(freshService.name, toolName, newEnabled);
     }
     
-    p.log.success(`${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"}`);
+    try {
+      await reloadGatewayConfig();
+      p.log.success(`${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"} (Gateway reloaded)`);
+    } catch {
+      p.log.success(`${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"}`);
+      p.log.warn("Gateway reload failed — restart Gateway to apply");
+    }
   }
 }
 
@@ -609,11 +795,13 @@ async function viewServiceInfo(service: ServiceDefinition): Promise<void> {
 
   console.log();
   console.log(noumena.purple(`  Tools (${enabledTools}/${service.tools.length} enabled):`));
+  console.log(noumena.textDim(`  Namespaced as: ${service.name}.{tool}`));
   
   for (const tool of service.tools) {
     const enabled = tool.enabled !== false;
     const status = enabled ? noumena.success("✓") : noumena.grayDim("–");
-    console.log(`    ${status} ${tool.name}`);
+    const namespacedName = `${service.name}.${tool.name}`;
+    console.log(`    ${status} ${namespacedName}`);
     console.log(noumena.textDim(`      ${tool.description.substring(0, 60)}...`));
   }
   console.log();
@@ -755,13 +943,16 @@ async function searchDockerHubFlow(): Promise<void> {
   });
 
   if (!p.isCancel(shouldPull) && shouldPull) {
-    const s = p.spinner();
-    s.start(`Pulling mcp/${server.name}...`);
+    console.log();
+    console.log(noumena.purple(`  Pulling mcp/${server.name}...`));
+    console.log();
     try {
-      execSync(`docker pull mcp/${server.name}`, { stdio: "pipe" });
-      s.stop(noumena.success("Image pulled successfully"));
+      execSync(`docker pull mcp/${server.name}`, { stdio: "inherit" });
+      console.log();
+      p.log.success("Image pulled successfully");
     } catch {
-      s.stop(noumena.purpleDim("Failed to pull image - you can pull manually later"));
+      console.log();
+      p.log.warn("Failed to pull image - you can pull manually later");
     }
   }
 
@@ -925,13 +1116,16 @@ async function addCustomImageFlow(): Promise<void> {
     });
 
     if (!p.isCancel(shouldPull) && shouldPull) {
-      const s = p.spinner();
-      s.start(`Pulling ${imageNameStr}...`);
+      console.log();
+      console.log(noumena.purple(`  Pulling ${imageNameStr}...`));
+      console.log();
       try {
-        execSync(`docker pull ${imageNameStr}`, { stdio: "pipe" });
-        s.stop(noumena.success("Image pulled successfully"));
+        execSync(`docker pull ${imageNameStr}`, { stdio: "inherit" });
+        console.log();
+        p.log.success("Image pulled successfully");
       } catch (err) {
-        s.stop(noumena.purpleDim("Failed to pull image"));
+        console.log();
+        p.log.error("Failed to pull image");
         
         const continueAnyway = await p.confirm({
           message: "Continue adding service anyway? (image must be available when used)",
@@ -1049,8 +1243,8 @@ async function main() {
     bs.stop(noumena.success("NPL bootstrapped"));
   } else {
     bs.stop(noumena.warning("NPL not bootstrapped"));
-    p.log.warn("ServiceRegistry or ToolExecutionPolicy not found.");
-    p.log.info("Use 'NPL Bootstrap' from the menu to set up.");
+    p.log.warn("ServiceRegistry not found.");
+    p.log.info("Use 'NPL Bootstrap' from the menu to set up ServiceRegistry and ToolPolicy instances.");
   }
 
   // Main loop

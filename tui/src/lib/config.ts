@@ -117,7 +117,7 @@ export function saveConfig(config: ServicesConfig): boolean {
     // Add header comment
     const header = `# Dynamic MCP Service Configuration
 # This file defines all upstream services and their tools.
-# Both Gateway (for tool listing) and Executor (for routing) read this config.
+# The Gateway reads this config for tool listing and upstream routing.
 
 `;
     

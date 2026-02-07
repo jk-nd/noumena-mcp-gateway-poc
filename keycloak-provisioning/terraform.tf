@@ -245,25 +245,3 @@ resource "keycloak_user" "agent" {
 
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
-
-# Executor - system user for NPL validation and completion reporting
-resource "keycloak_user" "executor" {
-  realm_id   = keycloak_realm.mcpgateway.id
-  username   = "executor"
-  email      = "executor@acme.com"
-  first_name = "Executor"
-  last_name  = "Service"
-  enabled    = true
-
-  attributes = {
-    "role"         = "executor"
-    "organization" = "acme"
-  }
-
-  initial_password {
-    value     = var.default_password
-    temporary = false
-  }
-
-  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
-}

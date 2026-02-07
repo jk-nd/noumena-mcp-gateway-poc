@@ -1,5 +1,11 @@
 /**
- * API client for interacting with the MCP Gateway and NPL Engine
+ * API client for interacting with the MCP Gateway and NPL Engine.
+ *
+ * V2 Architecture:
+ *   - ServiceRegistry: tracks which services exist
+ *   - ToolPolicy (per-service): governs tool-level access
+ *   - No more ToolExecutionPolicy (legacy, kept for migration)
+ *   - No more executor references
  */
 
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://localhost:8000";
@@ -39,7 +45,6 @@ export interface ServicesResponse {
 
 /**
  * Build authorization headers using the cached admin token.
- * Falls back to empty headers if not logged in (for health check etc.).
  */
 async function authHeaders(): Promise<Record<string, string>> {
   try {
@@ -99,7 +104,7 @@ export async function checkGatewayHealth(): Promise<boolean> {
 }
 
 /**
- * Call an MCP tool via the Gateway
+ * Call an MCP tool via the Gateway (using namespaced tool names)
  */
 export async function callTool(
   toolName: string,
@@ -129,12 +134,10 @@ export async function callTool(
 
 /**
  * Set admin credentials for the TUI session (stored in memory only).
- * Must be called before any NPL operations.
  */
 export function setAdminCredentials(username: string, password: string): void {
   adminUsername = username;
   adminPassword = password;
-  // Invalidate cached token so next call uses new credentials
   cachedToken = null;
   tokenExpiry = 0;
 }
@@ -148,14 +151,12 @@ export function hasAdminCredentials(): boolean {
 
 /**
  * Get access token from Keycloak using stored admin credentials.
- * Credentials must be set via setAdminCredentials() first (i.e., after login).
  */
 export async function getKeycloakToken(): Promise<string> {
   if (!adminUsername || !adminPassword) {
     throw new Error("Admin credentials not set. Please log in first.");
   }
 
-  // Return cached token if still valid (with 60s buffer)
   if (cachedToken && Date.now() < tokenExpiry - 60000) {
     return cachedToken;
   }
@@ -188,7 +189,6 @@ export async function getKeycloakToken(): Promise<string> {
 
 /**
  * Validate admin credentials by attempting to get a token.
- * Returns true if the credentials are valid.
  */
 export async function validateCredentials(
   username: string,
@@ -217,12 +217,11 @@ export async function validateCredentials(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NPL Engine API (admin operations - credentials required)
+// NPL Engine API (admin operations)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Find ServiceRegistry protocol instance in NPL.
- * Uses the correct Noumena engine API path: /npl/{package}/{Protocol}/
  */
 async function findServiceRegistry(token: string): Promise<string | null> {
   try {
@@ -236,12 +235,9 @@ async function findServiceRegistry(token: string): Promise<string | null> {
       }
     );
 
-    if (!response.ok) {
-      return null;
-    }
+    if (!response.ok) return null;
 
     const text = await response.text();
-    // NPL engine may include control characters - strip them
     const clean = text.replace(/[\x00-\x1f]/g, "");
     const data = JSON.parse(clean);
     if (data.items && data.items.length > 0) {
@@ -255,54 +251,138 @@ async function findServiceRegistry(token: string): Promise<string | null> {
 }
 
 /**
- * Find ToolExecutionPolicy protocol instance in NPL.
+ * Find ToolPolicy instance for a specific service.
  */
-async function findToolExecutionPolicy(token: string): Promise<string | null> {
+async function findToolPolicyForService(
+  token: string,
+  serviceName: string
+): Promise<string | null> {
   try {
-    const response = await fetch(
-      `${NPL_URL}/npl/services/ToolExecutionPolicy/`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json",
-        },
-      }
-    );
+    const response = await fetch(`${NPL_URL}/npl/services/ToolPolicy/`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+    });
 
-    if (!response.ok) {
-      return null;
-    }
+    if (!response.ok) return null;
 
     const text = await response.text();
     const clean = text.replace(/[\x00-\x1f]/g, "");
     const data = JSON.parse(clean);
-    if (data.items && data.items.length > 0) {
-      return data.items[0]["@id"] || null;
+    if (data.items) {
+      for (const item of data.items) {
+        if (item.policyServiceName === serviceName) {
+          return item["@id"] || null;
+        }
+      }
     }
   } catch {
-    // ToolExecutionPolicy may not exist
+    // ToolPolicy may not exist
   }
 
   return null;
 }
 
 /**
- * Bootstrap NPL: ensure ServiceRegistry and ToolExecutionPolicy exist,
- * and sync enabled services from services.yaml.
- * 
- * This is an admin operation - requires admin credentials.
- * Returns a summary of what was created/found.
+ * Create a ToolPolicy instance for a service.
+ */
+async function createToolPolicy(
+  token: string,
+  serviceName: string
+): Promise<string | null> {
+  const createPayload = {
+    "@parties": {},
+    policyServiceName: serviceName,
+  };
+
+  const response = await fetch(`${NPL_URL}/npl/services/ToolPolicy/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(createPayload),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to create ToolPolicy for '${serviceName}': ${error}`);
+  }
+
+  const data = await response.json();
+  return data["@id"] || null;
+}
+
+/**
+ * Enable a tool in a ToolPolicy instance.
+ */
+async function enableToolInPolicy(
+  token: string,
+  policyId: string,
+  toolName: string
+): Promise<void> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/enableTool`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toolName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to enable tool '${toolName}': ${error}`);
+  }
+}
+
+/**
+ * Enable all tools in a ToolPolicy instance.
+ */
+async function enableAllToolsInPolicy(
+  token: string,
+  policyId: string,
+  toolNames: string[]
+): Promise<void> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/enableAllTools`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toolNames }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to enable tools: ${error}`);
+  }
+}
+
+/**
+ * Bootstrap NPL: ensure ServiceRegistry and per-service ToolPolicy instances exist.
+ *
+ * V2 Architecture:
+ *   1. Create ServiceRegistry (if needed)
+ *   2. Sync enabled services from services.yaml
+ *   3. Create ToolPolicy instances per enabled service (if needed)
+ *   4. Enable tools in each ToolPolicy based on services.yaml
  */
 export async function bootstrapNpl(): Promise<{
   registryCreated: boolean;
-  policyCreated: boolean;
+  policiesCreated: string[];
   registryId: string;
-  policyId: string;
   servicesEnabled: string[];
 }> {
   const token = await getKeycloakToken();
-  const gatewayUrl = process.env.GATEWAY_URL || "http://gateway:8080";
-  
+
   // 1. Ensure ServiceRegistry exists
   let registryId = await findServiceRegistry(token);
   let registryCreated = false;
@@ -337,9 +417,10 @@ export async function bootstrapNpl(): Promise<{
   // 2. Sync enabled services from services.yaml into ServiceRegistry
   const { loadConfig } = await import("./config.js");
   const config = loadConfig();
-  const enabledServices = config.services.filter(s => s.enabled).map(s => s.name);
-  
-  for (const serviceName of enabledServices) {
+  const enabledServices = config.services.filter((s) => s.enabled);
+  const enabledServiceNames = enabledServices.map((s) => s.name);
+
+  for (const serviceName of enabledServiceNames) {
     try {
       await fetch(
         `${NPL_URL}/npl/registry/ServiceRegistry/${registryId}/enableService`,
@@ -353,66 +434,62 @@ export async function bootstrapNpl(): Promise<{
         }
       );
     } catch {
-      // Service may already be enabled - ignore
+      // Service may already be enabled
     }
   }
 
-  // 3. Ensure ToolExecutionPolicy exists
-  let policyId = await findToolExecutionPolicy(token);
-  let policyCreated = false;
+  // 3. Create ToolPolicy instances per enabled service
+  const policiesCreated: string[] = [];
 
-  if (!policyId) {
-    const createPayload = {
-      "@parties": {},  // Let rules.yml handle party assignment
-      registry: registryId,
-      policyTenantId: "default",
-      policyGatewayUrl: gatewayUrl,
-    };
+  for (const service of enabledServices) {
+    let policyId = await findToolPolicyForService(token, service.name);
 
-    const createResponse = await fetch(
-      `${NPL_URL}/npl/services/ToolExecutionPolicy/`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(createPayload),
+    if (!policyId) {
+      policyId = await createToolPolicy(token, service.name);
+      if (policyId) {
+        policiesCreated.push(service.name);
       }
-    );
-
-    if (!createResponse.ok) {
-      const error = await createResponse.text();
-      throw new Error(`Failed to create ToolExecutionPolicy: ${error}`);
     }
 
-    const createData = await createResponse.json();
-    policyId = createData["@id"];
-    policyCreated = true;
-  }
+    // 4. Enable tools based on services.yaml
+    if (policyId) {
+      const enabledTools = service.tools
+        .filter((t) => t.enabled)
+        .map((t) => t.name);
 
-  if (!policyId) {
-    throw new Error("Failed to obtain ToolExecutionPolicy ID");
+      if (enabledTools.length > 0) {
+        try {
+          await enableAllToolsInPolicy(token, policyId, enabledTools);
+        } catch {
+          // Try one by one as fallback
+          for (const toolName of enabledTools) {
+            try {
+              await enableToolInPolicy(token, policyId, toolName);
+            } catch {
+              // Tool may already be enabled
+            }
+          }
+        }
+      }
+    }
   }
 
   return {
     registryCreated,
-    policyCreated,
+    policiesCreated,
     registryId,
-    policyId,
-    servicesEnabled: enabledServices,
+    servicesEnabled: enabledServiceNames,
   };
 }
 
 /**
- * Check if NPL has been bootstrapped (ServiceRegistry + ToolExecutionPolicy exist).
+ * Check if NPL has been bootstrapped (ServiceRegistry exists).
  */
 export async function isNplBootstrapped(): Promise<boolean> {
   try {
     const token = await getKeycloakToken();
     const registryId = await findServiceRegistry(token);
-    const policyId = await findToolExecutionPolicy(token);
-    return registryId !== null && policyId !== null;
+    return registryId !== null;
   } catch {
     return false;
   }
@@ -515,11 +592,13 @@ export async function discoverMcpServers(
   const response = await fetch(
     `https://hub.docker.com/v2/repositories/mcp/?page_size=${limit}`
   );
-  
+
   if (!response.ok) {
-    throw new Error(`Docker Hub API error: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Docker Hub API error: ${response.status} ${response.statusText}`
+    );
   }
-  
+
   const data = await response.json();
   let servers: McpServerInfo[] = (data.results || []).map((repo: any) => ({
     name: repo.name,
@@ -528,8 +607,7 @@ export async function discoverMcpServers(
     pullCount: repo.pull_count || 0,
     lastUpdated: repo.last_updated || "",
   }));
-  
-  // Filter by query if provided
+
   if (query) {
     const q = query.toLowerCase();
     servers = servers.filter(
@@ -538,10 +616,9 @@ export async function discoverMcpServers(
         s.description.toLowerCase().includes(q)
     );
   }
-  
-  // Sort by pull count (popularity)
+
   servers.sort((a, b) => b.pullCount - a.pullCount);
-  
+
   return servers;
 }
 
@@ -555,11 +632,11 @@ export async function getMcpServerDetails(
     const response = await fetch(
       `https://hub.docker.com/v2/repositories/mcp/${serverName}/`
     );
-    
+
     if (!response.ok) {
       return null;
     }
-    
+
     const repo = await response.json();
     return {
       name: repo.name,
@@ -595,12 +672,11 @@ export interface ContainerStatus {
  */
 export function getContainerStatus(imageName: string): ContainerStatus {
   try {
-    // Check for running containers with this image
     const output = execSync(
       `docker ps --filter "ancestor=${imageName}" --format "{{.ID}}|{{.Names}}|{{.Status}}"`,
       { encoding: "utf-8", timeout: 5000 }
     ).trim();
-    
+
     if (output) {
       const [id, name, status] = output.split("|");
       return {
@@ -610,7 +686,7 @@ export function getContainerStatus(imageName: string): ContainerStatus {
         status: status,
       };
     }
-    
+
     return { running: false };
   } catch (error) {
     return { running: false };
@@ -619,7 +695,6 @@ export function getContainerStatus(imageName: string): ContainerStatus {
 
 /**
  * Start a Docker container for an MCP service
- * Returns the container ID if successful
  */
 export function startContainer(
   imageName: string,
@@ -627,55 +702,69 @@ export function startContainer(
   options: { env?: Record<string, string>; ports?: string[] } = {}
 ): { success: boolean; containerId?: string; error?: string } {
   try {
-    // Remove any existing stopped container with the same name
     try {
-      execSync(`docker rm ${containerName} 2>/dev/null`, { encoding: "utf-8", timeout: 5000 });
+      execSync(`docker rm ${containerName} 2>/dev/null`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
     } catch {
-      // Container doesn't exist or is running - that's fine
+      // Container doesn't exist or is running
     }
 
-    // Build docker run command
-    // MCP STDIO servers need -i for stdin
     let cmd = `docker run -d -i --name ${containerName} --restart unless-stopped`;
-    
-    // Add environment variables
+
     if (options.env) {
       for (const [key, value] of Object.entries(options.env)) {
         cmd += ` -e ${key}="${value}"`;
       }
     }
-    
-    // Add port mappings
+
     if (options.ports) {
       for (const port of options.ports) {
         cmd += ` -p ${port}`;
       }
     }
-    
+
     cmd += ` ${imageName}`;
-    
-    const containerId = execSync(cmd, { encoding: "utf-8", timeout: 30000 }).trim();
-    
+
+    const containerId = execSync(cmd, {
+      encoding: "utf-8",
+      timeout: 30000,
+    }).trim();
+
     return { success: true, containerId };
   } catch (error: any) {
-    // Check if container already exists and is running
     if (error.message?.includes("is already in use")) {
       return { success: false, error: "Container is already running." };
     }
-    return { success: false, error: error.message || "Failed to start container" };
+    return {
+      success: false,
+      error: error.message || "Failed to start container",
+    };
   }
 }
 
 /**
  * Stop a running Docker container
  */
-export function stopContainer(containerIdOrName: string): { success: boolean; error?: string } {
+export function stopContainer(
+  containerIdOrName: string
+): { success: boolean; error?: string } {
   try {
-    execSync(`docker stop ${containerIdOrName}`, { encoding: "utf-8", timeout: 30000 });
-    execSync(`docker rm ${containerIdOrName}`, { encoding: "utf-8", timeout: 10000 });
+    execSync(`docker stop ${containerIdOrName}`, {
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+    execSync(`docker rm ${containerIdOrName}`, {
+      encoding: "utf-8",
+      timeout: 10000,
+    });
     return { success: true };
   } catch (error: any) {
-    return { success: false, error: error.message || "Failed to stop container" };
+    return {
+      success: false,
+      error: error.message || "Failed to stop container",
+    };
   }
 }
 
@@ -684,7 +773,10 @@ export function stopContainer(containerIdOrName: string): { success: boolean; er
  */
 export function imageExists(imageName: string): boolean {
   try {
-    const output = execSync(`docker images -q ${imageName}`, { encoding: "utf-8", timeout: 5000 }).trim();
+    const output = execSync(`docker images -q ${imageName}`, {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
     return output.length > 0;
   } catch (error) {
     return false;
@@ -694,9 +786,15 @@ export function imageExists(imageName: string): boolean {
 /**
  * Pull a Docker image
  */
-export function pullImage(imageName: string): { success: boolean; error?: string } {
+export function pullImage(
+  imageName: string
+): { success: boolean; error?: string } {
   try {
-    execSync(`docker pull ${imageName}`, { encoding: "utf-8", stdio: "inherit", timeout: 300000 });
+    execSync(`docker pull ${imageName}`, {
+      encoding: "utf-8",
+      stdio: "inherit",
+      timeout: 300000,
+    });
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message || "Failed to pull image" };
@@ -722,7 +820,6 @@ export interface DiscoveredTool {
 
 /**
  * Discover tools from an MCP container by running it and querying via STDIO.
- * Sends initialize + notifications/initialized + tools/list, then parses the response.
  */
 export function discoverToolsFromContainer(imageName: string): {
   success: boolean;
@@ -731,7 +828,6 @@ export function discoverToolsFromContainer(imageName: string): {
   error?: string;
 } {
   try {
-    // Build the MCP JSON-RPC messages to send via stdin
     const initMsg = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
@@ -755,8 +851,6 @@ export function discoverToolsFromContainer(imageName: string): {
       params: {},
     });
 
-    // Use a shell script to send the messages with small delays
-    // The container reads from stdin and writes responses to stdout
     const script = `(echo '${initMsg}'; sleep 1; echo '${initializedMsg}'; sleep 0.5; echo '${toolsListMsg}') | docker run -i --rm ${imageName} 2>/dev/null`;
 
     const output = execSync(script, {
@@ -769,7 +863,6 @@ export function discoverToolsFromContainer(imageName: string): {
       return { success: false, tools: [], error: "No output from container" };
     }
 
-    // Parse the output - each line is a JSON-RPC response
     const lines = output.split("\n").filter((l) => l.trim().length > 0);
 
     let serverInfo: { name: string; version: string } | undefined;
@@ -779,7 +872,6 @@ export function discoverToolsFromContainer(imageName: string): {
       try {
         const response = JSON.parse(line);
 
-        // Check for initialize response (id: 1)
         if (response.id === 1 && response.result?.serverInfo) {
           serverInfo = {
             name: response.result.serverInfo.name || "unknown",
@@ -787,7 +879,6 @@ export function discoverToolsFromContainer(imageName: string): {
           };
         }
 
-        // Check for tools/list response (id: 2)
         if (response.id === 2 && response.result?.tools) {
           tools = response.result.tools.map((tool: any) => ({
             name: tool.name,
@@ -800,7 +891,6 @@ export function discoverToolsFromContainer(imageName: string): {
           }));
         }
       } catch {
-        // Skip lines that aren't valid JSON
         continue;
       }
     }
@@ -809,7 +899,11 @@ export function discoverToolsFromContainer(imageName: string): {
   } catch (error: any) {
     const msg = error.message || "Unknown error";
     if (msg.includes("timed out")) {
-      return { success: false, tools: [], error: "Container timed out (30s)" };
+      return {
+        success: false,
+        tools: [],
+        error: "Container timed out (30s)",
+      };
     }
     return { success: false, tools: [], error: msg.substring(0, 200) };
   }
@@ -823,7 +917,6 @@ export function discoveredToToolDefinitions(
   enabled: boolean = false
 ): ToolDefinition[] {
   return discovered.map((tool) => {
-    // Convert properties to PropertySchema format
     const properties: Record<string, PropertySchema> = {};
     if (tool.inputSchema?.properties) {
       for (const [key, value] of Object.entries(tool.inputSchema.properties)) {

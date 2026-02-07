@@ -1,7 +1,8 @@
-# MCP Servers
+# Upstream MCP Servers
 # Start with: docker compose -p mcp -f docker-compose.mcp.yml up -d
 #
-# This creates a separate "mcp" folder in Docker Desktop for all MCP servers.
+# V2: These containers connect to the Gateway's backend-net.
+# Agents cannot reach them directly — only the Gateway can.
 
 name: mcp
 
@@ -15,12 +16,11 @@ services:
     tty: true
     restart: unless-stopped
     environment:
-      # Configure via environment variables or mount config
       - ATLASSIAN_URL=${ATLASSIAN_URL:-}
       - ATLASSIAN_USERNAME=${ATLASSIAN_USERNAME:-}
       - ATLASSIAN_API_TOKEN=${ATLASSIAN_API_TOKEN:-}
     networks:
-      - mcp-network
+      - backend-net
 
   # ─────────────────────────────────────────────────────────────────────────
   # Fetch MCP (HTTP requests)
@@ -31,7 +31,7 @@ services:
     tty: true
     restart: unless-stopped
     networks:
-      - mcp-network
+      - backend-net
 
   # ─────────────────────────────────────────────────────────────────────────
   # Add more MCP servers here as needed
@@ -46,8 +46,10 @@ services:
   #   environment:
   #     - GITHUB_TOKEN=${GITHUB_TOKEN:-}
   #   networks:
-  #     - mcp-network
+  #     - backend-net
 
 networks:
-  mcp-network:
-    driver: bridge
+  backend-net:
+    # Connect to the Gateway stack's backend network
+    external: true
+    name: gateway_backend-net

@@ -1,6 +1,6 @@
 # Dynamic MCP Service Configuration
 # This file defines all upstream services and their tools.
-# Both Gateway (for tool listing) and Executor (for routing) read this config.
+# The Gateway reads this config for tool listing and upstream routing.
 
 services:
   - name: "duckduckgo"
@@ -25,7 +25,7 @@ services:
               description: ""
           required:
             - "query"
-        enabled: true
+        enabled: false
       - name: "fetch_content"
         description: "Fetch and parse content from a webpage URL.      Args:         url: The webpage URL to fetch content from         ctx: MCP context for logging"
         inputSchema:

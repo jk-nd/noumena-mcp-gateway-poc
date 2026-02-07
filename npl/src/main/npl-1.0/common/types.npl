@@ -1,26 +1,4 @@
 package common
 
-/**
- * Notification sent to HTTP Bridge to execute an external tool call.
- * @param requestId Unique identifier for correlation and audit
- * @param serviceName The target service (e.g., "google_gmail", "slack")
- * @param operation The operation to perform (e.g., "send_email")
- * @param params JSON-encoded parameters
- * @param callbackUrl URL for result delivery
- */
-notification ExecuteToolNotification(
-    requestId: Text,
-    serviceName: Text,
-    operation: Text,
-    params: Text,
-    callbackUrl: Text
-) returns Unit;
-
-/**
- * Result of a policy check.
- */
-enum PolicyResult {
-    allowed,
-    denied,
-    pending_approval
-};
+// Common types for the MCP Gateway NPL protocols.
+// V2: Executor-specific types (ExecuteToolNotification, PolicyResult) removed.

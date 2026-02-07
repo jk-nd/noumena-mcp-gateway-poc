@@ -5,8 +5,7 @@
 #
 # Hierarchy:
 # - pAdmin: Organization administrators (full control)
-# - pUser: End users (tool ownership)
-# - pAgent: AI agents (tool invocation)
+# - pAgent: AI agents / Gateway (tool invocation, policy checks)
 #
 # Note: Gateway uses built-in NPL 'observers' mechanism for read access.
 # Admin adds Gateway as observer via addObserver permission.
@@ -27,24 +26,18 @@ registry.ServiceRegistry:
 # SERVICES PACKAGE - Tool Governance
 # ============================================================================
 
-services.ToolExecutionPolicy:
-  # Admin has override control on all tools
+# Per-service ToolPolicy (V2 architecture)
+services.ToolPolicy:
+  # Admin creates instances, enables/disables tools
   pAdmin:
     set:
       claims:
         role:
           - admin
-  # Agent invokes the tool (checkAndApprove)
+  # Agent checks access before forwarding to upstream
   pAgent:
     set:
       claims:
         role:
           - agent
-          - admin  # Admin can act as agent
-  # Executor validates and reports completion
-  pExecutor:
-    set:
-      claims:
-        role:
-          - executor
-          - admin  # Admin can act as executor
+          - admin  # Admin can also act as agent

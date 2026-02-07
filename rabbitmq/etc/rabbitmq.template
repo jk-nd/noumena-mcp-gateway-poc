@@ -1,3 +1,0 @@
-management.load_definitions = /etc/rabbitmq/definitions.json
-default_user = ${AMQP_USERNAME}
-default_vhost = /

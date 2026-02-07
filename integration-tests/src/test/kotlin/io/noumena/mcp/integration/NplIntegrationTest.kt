@@ -13,19 +13,19 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 
 /**
- * Integration tests for NPL Engine.
+ * Integration tests for NPL Engine — V2 Architecture.
  * 
- * Tests the full policy flow:
+ * Tests the V2 policy flow:
  * 1. Create ServiceRegistry and enable services
- * 2. Create ToolExecutionPolicy
- * 3. checkAndApprove - policy check returns request ID
- * 4. validateForExecution - defense-in-depth validation
- * 5. reportCompletion - audit trail
- * 6. Disabled service rejection
+ * 2. Create per-service ToolPolicy instances
+ * 3. Enable tools within ToolPolicy
+ * 4. checkAccess — Gateway checks if a tool call is allowed
+ * 5. Disabled tool rejection
+ * 6. Suspended policy rejection
  * 
  * Prerequisites:
  * - Docker stack must be running: docker compose -f deployments/docker-compose.yml up -d
- * - Keycloak must be provisioned with test users
+ * - Keycloak must be provisioned with test users (admin, agent)
  * 
  * Run with: ./gradlew :integration-tests:test --tests "*NplIntegrationTest*"
  */
@@ -34,17 +34,15 @@ import org.junit.jupiter.api.Assertions.*
 class NplIntegrationTest {
     
     private lateinit var adminToken: String      // For setup/admin operations (pAdmin)
-    private lateinit var agentToken: String      // For checkAndApprove (pAgent)
-    private lateinit var executorToken: String   // For validateForExecution/reportCompletion (pExecutor)
+    private lateinit var agentToken: String      // For checkAccess (pAgent)
     private lateinit var client: HttpClient
     private var serviceRegistryId: String? = null
-    private var policyId: String? = null
-    private var approvedRequestId: String? = null
+    private var toolPolicyId: String? = null
     
     @BeforeAll
     fun setup() = runBlocking {
         println("╔════════════════════════════════════════════════════════════════╗")
-        println("║ NPL INTEGRATION TESTS - Setup                                   ║")
+        println("║ NPL INTEGRATION TESTS (V2 ToolPolicy) - Setup                ║")
         println("╠════════════════════════════════════════════════════════════════╣")
         println("║ NPL URL:      ${TestConfig.nplUrl}")
         println("║ Keycloak URL: ${TestConfig.keycloakUrl}")
@@ -63,13 +61,11 @@ class NplIntegrationTest {
         }
         
         // Get authentication tokens for different parties
-        println("    Getting tokens for admin, agent, and executor...")
+        println("    Getting tokens for admin and agent...")
         adminToken = KeycloakAuth.getToken("admin", "Welcome123")
         println("    ✓ Admin token obtained")
         agentToken = KeycloakAuth.getToken("agent", "Welcome123")
         println("    ✓ Agent token obtained")
-        executorToken = KeycloakAuth.getToken("executor", "Welcome123")
-        println("    ✓ Executor token obtained")
     }
     
     @Test
@@ -93,7 +89,7 @@ class NplIntegrationTest {
         println("│ TEST: Create ServiceRegistry Instance                      │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        // Check if ServiceRegistry already exists using the /npl/ API
+        // Check if ServiceRegistry already exists
         val listResponse = client.get("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/") {
             header("Authorization", "Bearer $adminToken")
         }
@@ -136,9 +132,9 @@ class NplIntegrationTest {
     
     @Test
     @Order(3)
-    fun `enable google_gmail service in ServiceRegistry`() = runBlocking {
+    fun `enable duckduckgo service in ServiceRegistry`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Enable google_gmail Service                          │")
+        println("│ TEST: Enable duckduckgo Service                            │")
         println("└─────────────────────────────────────────────────────────────┘")
         
         if (serviceRegistryId == null) {
@@ -147,9 +143,9 @@ class NplIntegrationTest {
             return@runBlocking
         }
         
-        val enableBody = """{"serviceName": "google_gmail"}"""
+        val enableBody = """{"serviceName": "duckduckgo"}"""
         
-        println("    Enabling google_gmail service...")
+        println("    Enabling duckduckgo service...")
         
         val response = client.post(
             "${TestConfig.nplUrl}/npl/registry/ServiceRegistry/$serviceRegistryId/enableService"
@@ -161,25 +157,23 @@ class NplIntegrationTest {
         
         println("    Response status: ${response.status}")
         
-        // May return 200 or 4xx if already enabled or permission issue
         if (response.status.isSuccess()) {
-            println("    ✓ google_gmail service enabled")
+            println("    ✓ duckduckgo service enabled")
         } else {
             val body = response.bodyAsText()
             println("    Response: $body")
-            // Don't fail - service might already be enabled
         }
     }
     
     @Test
     @Order(4)
-    fun `create ToolExecutionPolicy protocol instance`() = runBlocking {
+    fun `create ToolPolicy instance for duckduckgo`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Create ToolExecutionPolicy Instance                  │")
+        println("│ TEST: Create ToolPolicy Instance for duckduckgo            │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        // Check if ToolExecutionPolicy already exists
-        val listResponse = client.get("${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/") {
+        // Check if ToolPolicy already exists for duckduckgo
+        val listResponse = client.get("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
             header("Authorization", "Bearer $adminToken")
         }
         
@@ -187,33 +181,28 @@ class NplIntegrationTest {
             val listBody = listResponse.bodyAsText()
             val listJson = TestClient.json.parseToJsonElement(listBody).jsonObject
             val items = listJson["items"]?.jsonArray
-            if (items != null && items.isNotEmpty()) {
-                policyId = items[0].jsonObject["@id"]?.jsonPrimitive?.content
-                println("    ToolExecutionPolicy already exists: $policyId")
-                println("    ✓ Using existing instance")
-                return@runBlocking
+            if (items != null) {
+                for (item in items) {
+                    val serviceName = item.jsonObject["policyServiceName"]?.jsonPrimitive?.content
+                    if (serviceName == "duckduckgo") {
+                        toolPolicyId = item.jsonObject["@id"]?.jsonPrimitive?.content
+                        println("    ToolPolicy for duckduckgo already exists: $toolPolicyId")
+                        println("    ✓ Using existing instance")
+                        return@runBlocking
+                    }
+                }
             }
         }
         
-        // Need a ServiceRegistry first
-        if (serviceRegistryId == null) {
-            println("    ⚠ No ServiceRegistry available, skipping")
-            return@runBlocking
-        }
-        
-        // Create with empty @parties - let rules.yml handle party assignment
-        // Party assignment is based on JWT 'role' claims in each user's token
+        // Create new ToolPolicy for duckduckgo
         val createBody = buildJsonObject {
-            putJsonObject("@parties") {} // Empty - party assignment via rules.yml
-            put("registry", serviceRegistryId!!)
-            put("policyTenantId", "test-tenant")
-            put("policyGatewayUrl", "http://gateway:8080")
+            putJsonObject("@parties") {}
+            put("policyServiceName", "duckduckgo")
         }
         
-        println("    Creating ToolExecutionPolicy (party assignment via rules.yml)")
-        println("    Body: $createBody")
+        println("    Creating ToolPolicy for duckduckgo (party assignment via rules.yml)")
         
-        val response = client.post("${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/") {
+        val response = client.post("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
             setBody(createBody.toString())
@@ -225,216 +214,72 @@ class NplIntegrationTest {
         
         if (response.status.isSuccess()) {
             val json = TestClient.json.parseToJsonElement(responseBody).jsonObject
-            policyId = json["@id"]?.jsonPrimitive?.content
-            println("    ✓ ToolExecutionPolicy created: $policyId")
+            toolPolicyId = json["@id"]?.jsonPrimitive?.content
+            println("    ✓ ToolPolicy created: $toolPolicyId")
         } else {
-            println("    ⚠ Could not create ToolExecutionPolicy: ${response.status}")
+            println("    ⚠ Could not create ToolPolicy: ${response.status}")
         }
     }
     
     @Test
     @Order(5)
-    fun `checkAndApprove returns request ID for enabled service`() = runBlocking {
+    fun `enable search tool in ToolPolicy`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: checkAndApprove Returns Request ID                   │")
+        println("│ TEST: Enable 'search' Tool in ToolPolicy                   │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        if (policyId == null) {
-            println("    ⚠ No ToolExecutionPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolExecutionPolicy not created")
+        if (toolPolicyId == null) {
+            println("    ⚠ No ToolPolicy available, skipping")
+            Assumptions.assumeTrue(false, "ToolPolicy not created")
             return@runBlocking
         }
         
-        val invokeBody = buildJsonObject {
-            put("serviceName", "google_gmail")
-            put("operationName", "send_email")
-            put("requestMetadata", """{"recipient_domain":"example.com"}""")
-            put("gatewayCallbackUrl", "http://gateway:8080/callback")
-        }
+        val enableBody = """{"toolName": "search"}"""
         
-        println("    Invoking checkAndApprove on policy: $policyId")
-        println("    Using agent token (pAgent party)")
+        println("    Enabling 'search' tool...")
+        println("    Using admin token (pAdmin party)")
         
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/checkAndApprove"
+            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/enableTool"
         ) {
-            header("Authorization", "Bearer $agentToken")
+            header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody(invokeBody.toString())
+            setBody(enableBody)
         }
         
         println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
         
         if (response.status.isSuccess()) {
-            approvedRequestId = responseBody.trim().removeSurrounding("\"")
-            println("    ✓ Request approved with ID: $approvedRequestId")
-            assertNotNull(approvedRequestId, "Should return a request ID")
-            // Request ID format is "{tenantId}-{counter}" - accept any tenant ID
-            assertTrue(approvedRequestId!!.contains("-"), "Request ID should contain tenant-counter format")
+            println("    ✓ 'search' tool enabled")
         } else {
-            fail("checkAndApprove should succeed for enabled service: ${response.status}")
+            val body = response.bodyAsText()
+            println("    Response: $body")
         }
     }
     
     @Test
     @Order(6)
-    fun `validateForExecution returns true for approved request`() = runBlocking {
+    fun `checkAccess returns true for enabled tool`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: validateForExecution Returns True                    │")
+        println("│ TEST: checkAccess Returns True for Enabled Tool            │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        if (policyId == null || approvedRequestId == null) {
-            println("    ⚠ No approved request available, skipping")
-            Assumptions.assumeTrue(false, "No approved request")
+        if (toolPolicyId == null) {
+            println("    ⚠ No ToolPolicy available, skipping")
+            Assumptions.assumeTrue(false, "ToolPolicy not created")
             return@runBlocking
         }
         
         val invokeBody = buildJsonObject {
-            put("reqId", approvedRequestId!!)
-            put("expectedService", "google_gmail")
-            put("expectedOperation", "send_email")
+            put("toolName", "search")
+            put("callerIdentity", "test-agent")
         }
         
-        println("    Validating request: $approvedRequestId")
-        println("    Using executor token (pExecutor party)")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/validateForExecution"
-        ) {
-            header("Authorization", "Bearer $executorToken")
-            contentType(ContentType.Application.Json)
-            setBody(invokeBody.toString())
-        }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
-        
-        assertTrue(response.status.isSuccess(), "validateForExecution should succeed")
-        
-        val isValid = responseBody.trim().removeSurrounding("\"").toBooleanStrictOrNull() ?: false
-        assertTrue(isValid, "validateForExecution should return true for approved request")
-        println("    ✓ Request validated successfully")
-    }
-    
-    @Test
-    @Order(7)
-    fun `getRequestStatus returns validated after validation`() = runBlocking {
-        println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: getRequestStatus Returns 'validated'                 │")
-        println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (policyId == null || approvedRequestId == null) {
-            println("    ⚠ No approved request available, skipping")
-            Assumptions.assumeTrue(false, "No approved request")
-            return@runBlocking
-        }
-        
-        val invokeBody = buildJsonObject {
-            put("reqId", approvedRequestId!!)
-        }
-        
-        println("    Getting status for request: $approvedRequestId")
-        println("    Using executor token (pExecutor party)")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/getRequestStatus"
-        ) {
-            header("Authorization", "Bearer $executorToken")
-            contentType(ContentType.Application.Json)
-            setBody(invokeBody.toString())
-        }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
-        
-        assertTrue(response.status.isSuccess(), "getRequestStatus should succeed")
-        
-        val status = responseBody.trim().removeSurrounding("\"")
-        assertEquals("validated", status, "Status should be 'validated' after validateForExecution")
-        println("    ✓ Status is 'validated'")
-    }
-    
-    @Test
-    @Order(8)
-    fun `reportCompletion updates status to completed`() = runBlocking {
-        println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: reportCompletion Updates Status                      │")
-        println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (policyId == null || approvedRequestId == null) {
-            println("    ⚠ No approved request available, skipping")
-            Assumptions.assumeTrue(false, "No approved request")
-            return@runBlocking
-        }
-        
-        val invokeBody = buildJsonObject {
-            put("reqId", approvedRequestId!!)
-            put("wasSuccessful", true)
-            put("failureMessage", "")
-            put("execDurationMs", 150)
-        }
-        
-        println("    Reporting completion for request: $approvedRequestId")
-        println("    Using executor token (pExecutor party)")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/reportCompletion"
-        ) {
-            header("Authorization", "Bearer $executorToken")
-            contentType(ContentType.Application.Json)
-            setBody(invokeBody.toString())
-        }
-        
-        println("    Response status: ${response.status}")
-        
-        assertTrue(response.status.isSuccess(), "reportCompletion should succeed")
-        println("    ✓ Completion reported successfully")
-        
-        // Verify status changed to completed
-        val statusBody = buildJsonObject { put("reqId", approvedRequestId!!) }
-        val statusResponse = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/getRequestStatus"
-        ) {
-            header("Authorization", "Bearer $executorToken")
-            contentType(ContentType.Application.Json)
-            setBody(statusBody.toString())
-        }
-        
-        val status = statusResponse.bodyAsText().trim().removeSurrounding("\"")
-        assertEquals("completed", status, "Status should be 'completed' after reportCompletion")
-        println("    ✓ Status is 'completed'")
-    }
-    
-    @Test
-    @Order(9)
-    fun `checkAndApprove fails for disabled service`() = runBlocking {
-        println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: checkAndApprove Fails for Disabled Service           │")
-        println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (policyId == null) {
-            println("    ⚠ No ToolExecutionPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolExecutionPolicy not created")
-            return@runBlocking
-        }
-        
-        // Try to approve a service that is not enabled
-        val invokeBody = buildJsonObject {
-            put("serviceName", "disabled_service")
-            put("operationName", "some_operation")
-            put("requestMetadata", "{}")
-            put("gatewayCallbackUrl", "http://gateway:8080/callback")
-        }
-        
-        println("    Invoking checkAndApprove for disabled_service...")
+        println("    Checking access for 'search' tool...")
         println("    Using agent token (pAgent party)")
         
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/checkAndApprove"
+            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/checkAccess"
         ) {
             header("Authorization", "Bearer $agentToken")
             contentType(ContentType.Application.Json)
@@ -445,41 +290,38 @@ class NplIntegrationTest {
         val responseBody = response.bodyAsText()
         println("    Response body: $responseBody")
         
-        // Should fail with error (4xx status)
-        assertFalse(response.status.isSuccess(), "checkAndApprove should fail for disabled service")
-        assertTrue(
-            responseBody.contains("disabled") || responseBody.contains("Service"),
-            "Error should mention service is disabled"
-        )
-        println("    ✓ Request correctly rejected for disabled service")
+        assertTrue(response.status.isSuccess(), "checkAccess should succeed")
+        
+        val allowed = responseBody.trim().removeSurrounding("\"").toBooleanStrictOrNull() ?: false
+        assertTrue(allowed, "checkAccess should return true for enabled tool")
+        println("    ✓ Access allowed for enabled tool")
     }
     
     @Test
-    @Order(10)
-    fun `validateForExecution returns false for unknown request`() = runBlocking {
+    @Order(7)
+    fun `checkAccess returns false for disabled tool`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: validateForExecution Returns False for Unknown       │")
+        println("│ TEST: checkAccess Returns False for Disabled Tool           │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        if (policyId == null) {
-            println("    ⚠ No ToolExecutionPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolExecutionPolicy not created")
+        if (toolPolicyId == null) {
+            println("    ⚠ No ToolPolicy available, skipping")
+            Assumptions.assumeTrue(false, "ToolPolicy not created")
             return@runBlocking
         }
         
         val invokeBody = buildJsonObject {
-            put("reqId", "unknown-request-id-12345")
-            put("expectedService", "google_gmail")
-            put("expectedOperation", "send_email")
+            put("toolName", "nonexistent_tool")
+            put("callerIdentity", "test-agent")
         }
         
-        println("    Validating unknown request...")
-        println("    Using executor token (pExecutor party)")
+        println("    Checking access for 'nonexistent_tool'...")
+        println("    Using agent token (pAgent party)")
         
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/validateForExecution"
+            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/checkAccess"
         ) {
-            header("Authorization", "Bearer $executorToken")
+            header("Authorization", "Bearer $agentToken")
             contentType(ContentType.Application.Json)
             setBody(invokeBody.toString())
         }
@@ -490,28 +332,60 @@ class NplIntegrationTest {
         
         assertTrue(response.status.isSuccess(), "API call should succeed")
         
-        val isValid = responseBody.trim().removeSurrounding("\"").toBooleanStrictOrNull() ?: true
-        assertFalse(isValid, "validateForExecution should return false for unknown request")
-        println("    ✓ Unknown request correctly rejected")
+        val allowed = responseBody.trim().removeSurrounding("\"").toBooleanStrictOrNull() ?: true
+        assertFalse(allowed, "checkAccess should return false for disabled tool")
+        println("    ✓ Access correctly denied for disabled tool")
     }
     
     @Test
-    @Order(11)
-    fun `getRequestCount returns number of processed requests`() = runBlocking {
+    @Order(8)
+    fun `getEnabledTools returns enabled tool set`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: getRequestCount Returns Processed Count              │")
+        println("│ TEST: getEnabledTools Returns Tool Set                      │")
         println("└─────────────────────────────────────────────────────────────┘")
         
-        if (policyId == null) {
-            println("    ⚠ No ToolExecutionPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolExecutionPolicy not created")
+        if (toolPolicyId == null) {
+            println("    ⚠ No ToolPolicy available, skipping")
+            Assumptions.assumeTrue(false, "ToolPolicy not created")
             return@runBlocking
         }
         
         println("    Using admin token (pAdmin party)")
         
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/$policyId/getRequestCount"
+            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/getEnabledTools"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("{}")
+        }
+        
+        println("    Response status: ${response.status}")
+        val responseBody = response.bodyAsText()
+        println("    Response body: $responseBody")
+        
+        assertTrue(response.status.isSuccess(), "getEnabledTools should succeed")
+        assertTrue(responseBody.contains("search"), "Enabled tools should contain 'search'")
+        println("    ✓ Enabled tools retrieved")
+    }
+    
+    @Test
+    @Order(9)
+    fun `getRequestCount returns number of policy checks`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: getRequestCount Returns Policy Check Count           │")
+        println("└─────────────────────────────────────────────────────────────┘")
+        
+        if (toolPolicyId == null) {
+            println("    ⚠ No ToolPolicy available, skipping")
+            Assumptions.assumeTrue(false, "ToolPolicy not created")
+            return@runBlocking
+        }
+        
+        println("    Using admin token (pAdmin party)")
+        
+        val response = client.post(
+            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/getRequestCount"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -525,12 +399,12 @@ class NplIntegrationTest {
         assertTrue(response.status.isSuccess(), "getRequestCount should succeed")
         
         val count = responseBody.trim().toIntOrNull() ?: -1
-        assertTrue(count >= 1, "Should have processed at least 1 request")
-        println("    ✓ Request count: $count")
+        assertTrue(count >= 2, "Should have processed at least 2 policy checks (allowed + denied)")
+        println("    ✓ Policy check count: $count")
     }
     
     @Test
-    @Order(12)
+    @Order(10)
     fun `list protocol instances`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
         println("│ TEST: List Protocol Instances                              │")
@@ -553,12 +427,12 @@ class NplIntegrationTest {
             }
         }
         
-        // List ToolExecutionPolicy instances
-        val policyResponse = client.get("${TestConfig.nplUrl}/npl/services/ToolExecutionPolicy/") {
+        // List ToolPolicy instances (V2)
+        val policyResponse = client.get("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
             header("Authorization", "Bearer $adminToken")
         }
         
-        println("    ToolExecutionPolicy instances:")
+        println("    ToolPolicy instances:")
         if (policyResponse.status.isSuccess()) {
             val body = policyResponse.bodyAsText()
             val json = TestClient.json.parseToJsonElement(body).jsonObject
@@ -566,7 +440,8 @@ class NplIntegrationTest {
             println("      Count: ${items?.size ?: 0}")
             items?.forEach { instance ->
                 val id = instance.jsonObject["@id"]?.jsonPrimitive?.content
-                println("      - $id")
+                val serviceName = instance.jsonObject["policyServiceName"]?.jsonPrimitive?.content
+                println("      - $id (service: $serviceName)")
             }
         }
         
@@ -576,7 +451,7 @@ class NplIntegrationTest {
     @AfterAll
     fun teardown() {
         println("\n╔════════════════════════════════════════════════════════════════╗")
-        println("║ NPL INTEGRATION TESTS - Complete                               ║")
+        println("║ NPL INTEGRATION TESTS (V2) - Complete                         ║")
         println("╚════════════════════════════════════════════════════════════════╝")
         if (::client.isInitialized) {
             client.close()
