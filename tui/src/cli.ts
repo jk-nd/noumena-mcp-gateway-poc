@@ -276,251 +276,8 @@ async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<vo
   }
 }
 
-/**
- * Reset to Defaults - factory reset for the Gateway.
- * 
- * This will:
- * 1. Re-provision Keycloak (runs Terraform, clears Keycloak DB)
- * 2. Query Keycloak for actual user IDs
- * 3. Restore default services.yaml with actual IDs
- * 4. Reset NPL database (clears all policies and users)
- * 5. Import services.yaml to NPL
- * 6. Reload Gateway
- */
-async function resetToDefaultsFlow(): Promise<void> {
-  console.log();
-  console.log(noumena.purple("  Reset to Defaults (Factory Reset)"));
-  console.log();
-  console.log(noumena.textDim("  🔄 Re-provisions Keycloak (Terraform)"));
-  console.log(noumena.textDim("  🔍 Queries Keycloak for user IDs"));
-  console.log(noumena.textDim("  📄 Restores default services.yaml"));
-  console.log(noumena.textDim("  🗄️  Resets NPL database"));
-  console.log(noumena.textDim("  📥 Imports services.yaml to NPL"));
-  console.log(noumena.textDim("  🔄 Reloads Gateway"));
-  console.log();
-  console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will delete all users and configurations!"));
-  console.log(noumena.warning("  ⚠  Default users: admin, gateway, jarvis, alice, bob"));
-  console.log();
-
-  const confirm = await p.confirm({
-    message: "Proceed with factory reset? This cannot be undone.",
-    initialValue: false,
-  });
-
-  if (p.isCancel(confirm) || !confirm) {
-    p.log.info("Reset cancelled");
-    return;
-  }
-
-  // Step 1: Re-provision Keycloak via Docker Compose
-  const kcSpinner = p.spinner();
-  kcSpinner.start("Re-provisioning Keycloak (Terraform)...");
-  
-  try {
-    const deploymentsDir = path.join(process.cwd(), "../deployments");
-    
-    // Stop and remove Keycloak containers
-    execSync(
-      "docker compose stop keycloak keycloak-db keycloak-provisioning",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    execSync(
-      "docker compose rm -f keycloak keycloak-db keycloak-provisioning",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    // Remove Keycloak database and provisioning volumes
-    execSync(
-      "docker volume rm gateway_keycloak-db gateway_keycloak-provisioning 2>/dev/null || true",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    // Re-run Keycloak services (this will re-apply Terraform with env vars from docker-compose.yml)
-    execSync(
-      "docker compose up -d keycloak-db keycloak && sleep 5 && docker compose up keycloak-provisioning --abort-on-container-exit",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    kcSpinner.stop(noumena.success("Keycloak re-provisioned"));
-  } catch (err: any) {
-    kcSpinner.stop(noumena.purpleDim("Keycloak provisioning failed"));
-    p.log.error(`Error: ${err.message || err}`);
-    p.log.info("Try: cd deployments && docker compose down keycloak keycloak-db && docker volume rm gateway_keycloak-db gateway_keycloak-provisioning && docker compose up -d keycloak-db keycloak && docker compose up keycloak-provisioning");
-    console.log();
-    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-    return;
-  }
-
-  // Step 2: Query Keycloak for actual user IDs
-  const userIdSpinner = p.spinner();
-  userIdSpinner.start("Querying Keycloak for user IDs...");
-  
-  let userIdMap: Record<string, string> = {};
-  try {
-    const kcUsers = await listKeycloakUsers();
-    
-    // Map username -> keycloakId
-    for (const user of kcUsers) {
-      if (user.username && user.id) {
-        userIdMap[user.username] = user.id;
-      }
-    }
-    
-    userIdSpinner.stop(noumena.success("User IDs fetched"));
-    p.log.info(`Found: jarvis=${userIdMap['jarvis']?.substring(0, 8)}..., alice=${userIdMap['alice']?.substring(0, 8)}..., bob=${userIdMap['bob']?.substring(0, 8)}...`);
-  } catch (err: any) {
-    userIdSpinner.stop(noumena.purpleDim("Failed to query Keycloak"));
-    p.log.error(`Error: ${err.message || err}`);
-    p.log.info("You may need to wait for Keycloak to fully start, then retry.");
-    console.log();
-    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-    return;
-  }
-
-  // Step 3: Restore default services.yaml with actual IDs
-  const yamlSpinner = p.spinner();
-  yamlSpinner.start("Restoring default services.yaml...");
-  
-  try {
-    const configPath = getConfigPath();
-    const defaultConfigPath = configPath.replace("services.yaml", "services.yaml.default");
-    
-    // Read default config
-    let defaultYaml = readFileSync(defaultConfigPath, "utf-8");
-    
-    // Replace placeholder IDs with actual Keycloak IDs
-    if (userIdMap['jarvis']) {
-      defaultYaml = defaultYaml.replace(/PLACEHOLDER_JARVIS_ID/g, userIdMap['jarvis']);
-    }
-    if (userIdMap['alice']) {
-      defaultYaml = defaultYaml.replace(/PLACEHOLDER_ALICE_ID/g, userIdMap['alice']);
-    }
-    if (userIdMap['bob']) {
-      defaultYaml = defaultYaml.replace(/PLACEHOLDER_BOB_ID/g, userIdMap['bob']);
-    }
-    
-    // Write to services.yaml
-    const fs = await import("fs/promises");
-    await fs.writeFile(configPath, defaultYaml, "utf-8");
-    
-    yamlSpinner.stop(noumena.success("Default services.yaml restored with actual user IDs"));
-  } catch (err: any) {
-    yamlSpinner.stop(noumena.purpleDim("Failed to restore default services.yaml"));
-    p.log.error(`Error: ${err.message || err}`);
-    console.log();
-    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-    return;
-  }
-
-  // Step 4: Reset NPL database
-  const nplDbSpinner = p.spinner();
-  nplDbSpinner.start("Resetting NPL database...");
-  
-  try {
-    const deploymentsDir = path.join(process.cwd(), "../deployments");
-    
-    // Stop NPL engine and database
-    execSync(
-      "docker compose stop npl-engine engine-db",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    execSync(
-      "docker compose rm -f npl-engine engine-db",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    // Remove NPL database volume
-    execSync(
-      "docker volume rm gateway_engine-db 2>/dev/null || true",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    // Restart NPL services
-    execSync(
-      "docker compose up -d engine-db npl-engine",
-      { 
-        encoding: "utf-8",
-        cwd: deploymentsDir,
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    
-    // Wait for NPL to be healthy
-    await new Promise(resolve => setTimeout(resolve, 10000));
-    
-    nplDbSpinner.stop(noumena.success("NPL database reset"));
-  } catch (err: any) {
-    nplDbSpinner.stop(noumena.purpleDim("NPL reset failed"));
-    p.log.error(`Error: ${err.message || err}`);
-    console.log();
-    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-    return;
-  }
-  
-  // Step 5: Import services.yaml to NPL
-  const nplSpinner = p.spinner();
-  nplSpinner.start("Importing default config to NPL...");
-  
-  try {
-    const result = await bootstrapNpl();
-    nplSpinner.stop(noumena.success("NPL imported"));
-    
-    p.log.success(`✓ Synced ${result.usersSynced.length} default user(s): ${result.usersSynced.join(", ")}`);
-  } catch (err: any) {
-    nplSpinner.stop(noumena.purpleDim("NPL import failed"));
-    p.log.error(`Error: ${err.message || err}`);
-    p.log.info("You can retry import from the System menu.");
-  }
-
-  // Step 6: Reload Gateway
-  nplSpinner.start("Reloading Gateway...");
-  try {
-    await reloadGatewayConfig();
-    nplSpinner.stop(noumena.success("Gateway reloaded"));
-    configDirty = false;
-  } catch (err: any) {
-    nplSpinner.stop(noumena.purpleDim("Gateway reload failed"));
-    p.log.warn("You may need to restart Gateway manually");
-    configDirty = true;
-  }
-
-  // Done!
-  console.log();
-  console.log(noumena.success("  ✓ Factory reset complete!"));
-  console.log(noumena.textDim("  Default users: jarvis, alice, bob"));
-  console.log(noumena.textDim("  Default password: admin (change in Keycloak)"));
-  console.log();
-  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-}
+// Factory reset removed - use docker compose down -v && docker compose up -d for clean state
+// The auto-sync script (sync-user-ids.sh) ensures services.yaml is always consistent with Keycloak
 
 /**
  * Configuration Manager - centralized import/export/backup management
@@ -565,8 +322,6 @@ async function configurationManagerFlow(): Promise<void> {
         { value: "---hdr-backups", label: noumena.purple("── Backups ──"), hint: "" },
         { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore" },
         { value: "view-factory", label: `  View factory defaults  ${hasFactory ? "" : noumena.grayDim("(n/a)")}`, hint: "services.yaml.default" },
-        { value: "---hdr-reset", label: noumena.purple("── Reset ──"), hint: "" },
-        { value: "reset", label: "  Reset to Factory Defaults", hint: "Full reset: Keycloak + NPL + Config" },
       ],
     });
 
@@ -592,8 +347,6 @@ async function configurationManagerFlow(): Promise<void> {
       } else {
         await browseBackupsFlow(backupFiles.filter(f => f.endsWith(".backup")));
       }
-    } else if (action === "reset") {
-      await resetToDefaultsFlow();
     }
   }
 }
@@ -777,8 +530,8 @@ async function restoreFactoryConfigFlow(): Promise<void> {
   console.log(noumena.warning("  ⚠  DESTRUCTIVE: Current services.yaml will be replaced!"));
   console.log(noumena.warning("  ⚠  All custom services and users will be lost!"));
   console.log();
-  console.log(noumena.textDim("  Note: This only restores the config file."));
-  console.log(noumena.textDim("  For full reset (Keycloak + NPL), use 'Reset to Factory Defaults'."));
+  console.log(noumena.textDim("  Note: This only restores the services.yaml file to factory defaults."));
+  console.log(noumena.textDim("  After restore, you should import it to NPL."));
   console.log();
 
   const confirm = await p.confirm({
@@ -2624,7 +2377,6 @@ async function editConfigFlow(): Promise<void> {
  * Gateway automatically reloads after:
  * - Import from YAML
  * - Edit and Apply
- * - Reset to Factory Defaults
  * 
  * Use this only when:
  * - Auto-reload failed
