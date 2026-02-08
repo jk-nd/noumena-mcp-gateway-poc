@@ -174,26 +174,28 @@ async function adminLogin(): Promise<boolean> {
  *   3. UserRegistry — tracks registered users/agents
  *   4. UserToolAccess (per user) — per-user tool access control
  */
-async function importFromYamlFlow(): Promise<void> {
-  console.log();
-  console.log(noumena.purple("  Import from YAML → NPL"));
-  console.log();
-  console.log(noumena.textDim("  📄 services.yaml defines the desired state"));
-  console.log(noumena.textDim("  ✅ Adds services/tools/users from YAML to NPL"));
-  console.log(noumena.textDim("  🧹 Removes services/tools/users from NPL not in YAML"));
-  console.log();
-  console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will overwrite NPL state with YAML!"));
-  console.log(noumena.warning("  ⚠  DOES NOT touch Keycloak - only syncs NPL permissions!"));
-  console.log();
+async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<void> {
+  if (!skipConfirmation) {
+    console.log();
+    console.log(noumena.purple("  Import from YAML → NPL"));
+    console.log();
+    console.log(noumena.textDim("  📄 services.yaml defines the desired state"));
+    console.log(noumena.textDim("  ✅ Adds services/tools/users from YAML to NPL"));
+    console.log(noumena.textDim("  🧹 Removes services/tools/users from NPL not in YAML"));
+    console.log();
+    console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will overwrite NPL state with YAML!"));
+    console.log(noumena.warning("  ⚠  DOES NOT touch Keycloak - only syncs NPL permissions!"));
+    console.log();
 
-  const confirm = await p.confirm({
-    message: "Proceed with import? This will make NPL match services.yaml.",
-    initialValue: false,
-  });
+    const confirm = await p.confirm({
+      message: "Proceed with import? This will make NPL match services.yaml.",
+      initialValue: false,
+    });
 
-  if (p.isCancel(confirm) || !confirm) {
-    p.log.info("Import cancelled");
-    return;
+    if (p.isCancel(confirm) || !confirm) {
+      p.log.info("Import cancelled");
+      return;
+    }
   }
 
   const s = p.spinner();
@@ -247,30 +249,6 @@ async function importFromYamlFlow(): Promise<void> {
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   }
-}
-
-/**
- * Export to YAML - save current NPL state to services.yaml.
- * 
- * This is the inverse of Import:
- * - Queries NPL for current state (enabled services, tools, users)
- * - Writes this state to services.yaml
- * - Useful for saving manual changes made through TUI
- */
-async function exportToYamlFlow(): Promise<void> {
-  console.log();
-  console.log(noumena.purple("  Export to YAML (NPL → services.yaml)"));
-  console.log();
-  console.log(noumena.textDim("  📄 Queries NPL for current state"));
-  console.log(noumena.textDim("  💾 Saves state to services.yaml"));
-  console.log(noumena.textDim("  ✅ Preserves manual TUI changes"));
-  console.log();
-  p.log.warn("⚠  NOT YET IMPLEMENTED - Coming soon!");
-  console.log();
-  p.log.info("For now, use TUI flows to manage services and users.");
-  p.log.info("Changes are automatically saved to services.yaml.");
-  console.log();
-  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
 }
 
 /**
@@ -411,6 +389,381 @@ async function resetToDefaultsFlow(): Promise<void> {
   console.log(noumena.textDim("  Default password: admin (change in Keycloak)"));
   console.log();
   await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Configuration Manager - centralized import/export/backup management
+ */
+async function configurationManagerFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+  const configDir = path.dirname(configPath);
+  const nplReady = await isNplBootstrapped();
+
+  while (true) {
+    console.log();
+    console.log(noumena.purple("  Configuration Manager"));
+    console.log(noumena.textDim("  Manage services.yaml: Import, Export, Backups, Restore"));
+    console.log();
+
+    // List available backups
+    let backupFiles: string[] = [];
+    try {
+      const files = await fs.readdir(configDir);
+      backupFiles = files
+        .filter(f => f.startsWith("services.yaml.") && (f.endsWith(".backup") || f === "services.yaml.default"))
+        .sort()
+        .reverse();
+    } catch {
+      // Ignore errors
+    }
+
+    const backupCount = backupFiles.filter(f => f.endsWith(".backup")).length;
+    const hasFactory = backupFiles.includes("services.yaml.default");
+
+    const action = await p.select({
+      message: "Select action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "---hdr-import", label: noumena.purple("── Import ──"), hint: "" },
+        { value: "import-current", label: `  Import from services.yaml  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "YAML → NPL (current file)" },
+        { value: "import-file", label: "  Import from file...", hint: "Choose a YAML file to import" },
+        { value: "---hdr-export", label: noumena.purple("── Export ──"), hint: "" },
+        { value: "export", label: "  Export current config", hint: "Save as timestamped backup" },
+        { value: "---hdr-view", label: noumena.purple("── View ──"), hint: "" },
+        { value: "view-current", label: "  View services.yaml", hint: "Current configuration" },
+        { value: "view-factory", label: `  View factory defaults  ${hasFactory ? "" : noumena.grayDim("(n/a)")}`, hint: "services.yaml.default" },
+        { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore" },
+        { value: "---hdr-reset", label: noumena.purple("── Reset ──"), hint: "" },
+        { value: "reset", label: "  Reset to Factory Defaults", hint: "Full reset: Keycloak + NPL + Config" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") {
+      return;
+    }
+
+    if (typeof action === "string" && action.startsWith("---")) {
+      continue;
+    }
+
+    if (action === "import-current") {
+      await importFromYamlFlow();
+    } else if (action === "import-file") {
+      await importFromFileFlow();
+    } else if (action === "export") {
+      await exportToYamlFlow();
+    } else if (action === "view-current") {
+      await viewConfigFlow();
+    } else if (action === "view-factory" && hasFactory) {
+      await viewFactoryDefaultsFlow();
+    } else if (action === "view-backups") {
+      if (backupCount === 0) {
+        p.log.info("No backups found. Use 'Export current config' to create backups.");
+      } else {
+        await browseBackupsFlow(backupFiles.filter(f => f.endsWith(".backup")));
+      }
+    } else if (action === "reset") {
+      await resetToDefaultsFlow();
+    }
+  }
+}
+
+/**
+ * Import from a specific file (file picker)
+ */
+async function importFromFileFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Import from File"));
+  console.log();
+
+  const filePath = await p.text({
+    message: "Enter path to YAML file:",
+    placeholder: "/path/to/services.yaml or ./backup.yaml",
+    validate: (v) => {
+      if (!v || v.trim().length === 0) return "Path is required";
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(filePath)) {
+    return;
+  }
+
+  const fs = await import("fs/promises");
+  const path = await import("path");
+
+  // Resolve path (support relative paths)
+  const resolvedPath = path.resolve(String(filePath).trim());
+
+  // Check if file exists
+  try {
+    await fs.access(resolvedPath);
+  } catch {
+    p.log.error(`File not found: ${resolvedPath}`);
+    return;
+  }
+
+  console.log();
+  console.log(noumena.textDim(`  Source: ${resolvedPath}`));
+  console.log(noumena.textDim(`  Target: ${getConfigPath()}`));
+  console.log();
+  console.log(noumena.warning("  ⚠  This will overwrite services.yaml and sync to NPL!"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Proceed with import?",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Import cancelled");
+    return;
+  }
+
+  const s = p.spinner();
+  s.start("Copying file...");
+
+  try {
+    // Read source file
+    const content = await fs.readFile(resolvedPath, "utf-8");
+    
+    // Write to services.yaml
+    await fs.writeFile(getConfigPath(), content, "utf-8");
+    
+    s.stop(noumena.success("File copied"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Copy failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    return;
+  }
+
+  // Now import to NPL (skip confirmation since already confirmed above)
+  p.log.info("Importing to NPL...");
+  await importFromYamlFlow(true);
+}
+
+/**
+ * Export to YAML with versioning
+ */
+async function exportToYamlFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+
+  console.log();
+  console.log(noumena.purple("  Export Configuration"));
+  console.log();
+  console.log(noumena.textDim("  Creates a timestamped backup of services.yaml"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Create backup of current configuration?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Export cancelled");
+    return;
+  }
+
+  const s = p.spinner();
+  s.start("Creating backup...");
+
+  try {
+    const configPath = getConfigPath();
+    const configDir = path.dirname(configPath);
+    
+    // Create timestamp
+    const now = new Date();
+    const timestamp = now.toISOString().replace(/:/g, "-").replace(/\..+/, "").replace("T", "_");
+    const backupPath = path.join(configDir, `services.yaml.${timestamp}.backup`);
+    
+    // Read current config
+    const content = await fs.readFile(configPath, "utf-8");
+    
+    // Write backup
+    await fs.writeFile(backupPath, content, "utf-8");
+    
+    s.stop(noumena.success("Backup created"));
+    p.log.info(`Saved to: ${path.basename(backupPath)}`);
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Backup failed"));
+    p.log.error(`Error: ${err.message || err}`);
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * View factory defaults
+ */
+async function viewFactoryDefaultsFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+
+  console.log();
+  console.log(noumena.purple("  Factory Defaults (services.yaml.default)"));
+  console.log();
+
+  try {
+    const configPath = getConfigPath();
+    const defaultPath = configPath.replace("services.yaml", "services.yaml.default");
+    const content = await fs.readFile(defaultPath, "utf-8");
+    
+    console.log(noumena.textDim("  ─".repeat(40)));
+    console.log(content);
+    console.log(noumena.textDim("  ─".repeat(40)));
+  } catch (err: any) {
+    p.log.error(`Error reading factory defaults: ${err.message || err}`);
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Browse and restore from backups
+ */
+async function browseBackupsFlow(backupFiles: string[]): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+  const configDir = path.dirname(configPath);
+
+  while (true) {
+    console.log();
+    console.log(noumena.purple("  Backup Browser"));
+    console.log(noumena.textDim(`  ${backupFiles.length} backup(s) available`));
+    console.log();
+
+    // Build options with file stats
+    const options: { value: string; label: string; hint: string }[] = [
+      { value: "back", label: noumena.textDim("← Back"), hint: "" },
+    ];
+
+    for (const file of backupFiles) {
+      try {
+        const filePath = path.join(configDir, file);
+        const stats = await fs.stat(filePath);
+        const size = `${Math.round(stats.size / 1024)}KB`;
+        const date = stats.mtime.toLocaleString();
+        
+        options.push({
+          value: file,
+          label: `  ${file.replace("services.yaml.", "").replace(".backup", "")}`,
+          hint: `${size} | ${date}`,
+        });
+      } catch {
+        options.push({
+          value: file,
+          label: `  ${file}`,
+          hint: "",
+        });
+      }
+    }
+
+    const selected = await p.select({
+      message: "Select backup to view/restore:",
+      options,
+    });
+
+    if (p.isCancel(selected) || selected === "back") {
+      return;
+    }
+
+    await backupActionsFlow(selected);
+  }
+}
+
+/**
+ * Actions for a specific backup file
+ */
+async function backupActionsFlow(backupFile: string): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+  const configDir = path.dirname(configPath);
+  const backupPath = path.join(configDir, backupFile);
+
+  console.log();
+  console.log(noumena.purple(`  Backup: ${backupFile}`));
+  console.log();
+
+  const action = await p.select({
+    message: "Action:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "view", label: "View contents", hint: "Display YAML contents" },
+      { value: "restore", label: noumena.warning("Restore this backup"), hint: "Replace services.yaml and import to NPL" },
+      { value: "delete", label: noumena.purpleDim("Delete backup"), hint: "Remove backup file" },
+    ],
+  });
+
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+
+  if (action === "view") {
+    console.log();
+    console.log(noumena.textDim("  ─".repeat(40)));
+    try {
+      const content = await fs.readFile(backupPath, "utf-8");
+      console.log(content);
+    } catch (err: any) {
+      p.log.error(`Error: ${err.message || err}`);
+    }
+    console.log(noumena.textDim("  ─".repeat(40)));
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+  } else if (action === "restore") {
+    console.log();
+    console.log(noumena.warning("  ⚠  This will overwrite services.yaml and sync to NPL!"));
+    console.log();
+
+    const confirm = await p.confirm({
+      message: `Restore from ${backupFile}?`,
+      initialValue: false,
+    });
+
+    if (p.isCancel(confirm) || !confirm) {
+      p.log.info("Restore cancelled");
+      return;
+    }
+
+    const s = p.spinner();
+    s.start("Restoring backup...");
+
+    try {
+      const content = await fs.readFile(backupPath, "utf-8");
+      await fs.writeFile(configPath, content, "utf-8");
+      s.stop(noumena.success("Backup restored"));
+      
+      // Import to NPL (skip confirmation since already confirmed above)
+      p.log.info("Importing to NPL...");
+      await importFromYamlFlow(true);
+    } catch (err: any) {
+      s.stop(noumena.purpleDim("Restore failed"));
+      p.log.error(`Error: ${err.message || err}`);
+    }
+  } else if (action === "delete") {
+    const confirm = await p.confirm({
+      message: `Delete ${backupFile}?`,
+      initialValue: false,
+    });
+
+    if (p.isCancel(confirm) || !confirm) {
+      return;
+    }
+
+    try {
+      await fs.unlink(backupPath);
+      p.log.success("Backup deleted");
+    } catch (err: any) {
+      p.log.error(`Error: ${err.message || err}`);
+    }
+  }
 }
 
 /**
@@ -639,11 +992,9 @@ async function mainMenu(): Promise<boolean> {
     // System section
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
+    { value: "config", label: "  Configuration Manager", hint: "Import/Export, Backups, Factory Defaults" },
     { value: "viewconfig", label: "  View services.yaml", hint: "Show current configuration" },
     { value: "editconfig", label: "  Edit services.yaml", hint: `Opens ${process.env.EDITOR || "nano"}` },
-    { value: "import", label: `  Import from YAML  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "YAML → NPL (destructive, warns before overwriting)" },
-    { value: "export", label: "  Export to YAML", hint: "NPL → YAML (saves current NPL state)" },
-    { value: "reset", label: "  Reset to Defaults", hint: "Restore factory defaults (Keycloak + services.yaml + NPL)" },
     { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Config changed — reload needed" : "Up to date" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
@@ -676,22 +1027,18 @@ async function mainMenu(): Promise<boolean> {
     await userManagementFlow();
   } else if (action === "credentials") {
     await credentialManagementFlow();
+  } else if (action === "config") {
+    await configurationManagerFlow();
   } else if (action === "viewconfig") {
     await viewConfigFlow();
   } else if (action === "editconfig") {
     await editConfigFlow();
-  } else if (action === "import") {
-    await importFromYamlFlow();
-  } else if (action === "export") {
-    await exportToYamlFlow();
-  } else if (action === "reset") {
-    await resetToDefaultsFlow();
   } else if (action === "gateway") {
     await reloadGatewayFlow();
   }
 
   // Mark config as potentially dirty after config-modifying flows
-  if (typeof action === "string" && !["viewconfig", "import", "export", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
+  if (typeof action === "string" && !["viewconfig", "config", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
     configDirty = true;
   }
 
