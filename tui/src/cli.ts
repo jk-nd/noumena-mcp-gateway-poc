@@ -426,15 +426,14 @@ async function configurationManagerFlow(): Promise<void> {
       message: "Select action:",
       options: [
         { value: "back", label: noumena.textDim("← Back") },
+        { value: "---hdr-current", label: noumena.purple("── Current Configuration ──"), hint: "" },
+        { value: "manage-current", label: "  Manage services.yaml", hint: "View, Edit, Export, Apply" },
         { value: "---hdr-import", label: noumena.purple("── Import ──"), hint: "" },
-        { value: "import-current", label: `  Import from services.yaml  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "YAML → NPL (current file)" },
+        { value: "import-current", label: `  Import from services.yaml  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "YAML → NPL (sync current file)" },
         { value: "import-file", label: "  Import from file...", hint: "Choose a YAML file to import" },
-        { value: "---hdr-export", label: noumena.purple("── Export ──"), hint: "" },
-        { value: "export", label: "  Export current config", hint: "Save as timestamped backup" },
-        { value: "---hdr-view", label: noumena.purple("── View ──"), hint: "" },
-        { value: "view-current", label: "  View services.yaml", hint: "Current configuration" },
-        { value: "view-factory", label: `  View factory defaults  ${hasFactory ? "" : noumena.grayDim("(n/a)")}`, hint: "services.yaml.default" },
+        { value: "---hdr-backups", label: noumena.purple("── Backups ──"), hint: "" },
         { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore" },
+        { value: "view-factory", label: `  View factory defaults  ${hasFactory ? "" : noumena.grayDim("(n/a)")}`, hint: "services.yaml.default" },
         { value: "---hdr-reset", label: noumena.purple("── Reset ──"), hint: "" },
         { value: "reset", label: "  Reset to Factory Defaults", hint: "Full reset: Keycloak + NPL + Config" },
       ],
@@ -448,14 +447,12 @@ async function configurationManagerFlow(): Promise<void> {
       continue;
     }
 
-    if (action === "import-current") {
+    if (action === "manage-current") {
+      await manageCurrentConfigFlow();
+    } else if (action === "import-current") {
       await importFromYamlFlow();
     } else if (action === "import-file") {
       await importFromFileFlow();
-    } else if (action === "export") {
-      await exportToYamlFlow();
-    } else if (action === "view-current") {
-      await viewConfigFlow();
     } else if (action === "view-factory" && hasFactory) {
       await viewFactoryDefaultsFlow();
     } else if (action === "view-backups") {
@@ -468,6 +465,274 @@ async function configurationManagerFlow(): Promise<void> {
       await resetToDefaultsFlow();
     }
   }
+}
+
+/**
+ * Manage Current Configuration (services.yaml) - consolidated operations
+ */
+async function manageCurrentConfigFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+
+  while (true) {
+    console.log();
+    console.log(noumena.purple("  Manage services.yaml"));
+    console.log(noumena.textDim("  View, Edit, Export, and Apply changes to current configuration"));
+    console.log();
+
+    // Check file stats
+    let fileSize = "unknown";
+    let lastModified = "unknown";
+    try {
+      const stats = await fs.stat(configPath);
+      fileSize = `${Math.round(stats.size / 1024)}KB`;
+      lastModified = stats.mtime.toLocaleString();
+    } catch {
+      // Ignore
+    }
+
+    console.log(noumena.textDim(`  File: ${path.basename(configPath)}`));
+    console.log(noumena.textDim(`  Size: ${fileSize}`));
+    console.log(noumena.textDim(`  Last modified: ${lastModified}`));
+    console.log();
+
+    const action = await p.select({
+      message: "Select action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "view", label: "  View current config", hint: "Display services.yaml contents" },
+        { value: "export", label: "  Export (create backup)", hint: "Save timestamped backup" },
+        { value: "edit", label: noumena.warning("  Edit and apply"), hint: "Edit in $EDITOR, confirm, then apply to NPL + Gateway" },
+        { value: "restore-factory", label: noumena.purpleDim("  Restore to factory defaults"), hint: "Reset to services.yaml.default" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") {
+      return;
+    }
+
+    if (action === "view") {
+      await viewConfigFlow();
+    } else if (action === "export") {
+      await exportToYamlFlow();
+    } else if (action === "edit") {
+      await editAndApplyConfigFlow();
+    } else if (action === "restore-factory") {
+      await restoreFactoryConfigFlow();
+    }
+  }
+}
+
+/**
+ * Edit services.yaml and apply changes with confirmation
+ */
+async function editAndApplyConfigFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const configPath = getConfigPath();
+
+  console.log();
+  console.log(noumena.purple("  Edit and Apply Configuration"));
+  console.log();
+  console.log(noumena.textDim("  This will:"));
+  console.log(noumena.textDim("    1. Open services.yaml in your editor"));
+  console.log(noumena.textDim("    2. Ask for confirmation after editing"));
+  console.log(noumena.textDim("    3. Import changes to NPL"));
+  console.log(noumena.textDim("    4. Reload Gateway to apply"));
+  console.log();
+  console.log(noumena.warning("  ⚠  Changes will affect NPL and Gateway state!"));
+  console.log();
+
+  const proceed = await p.confirm({
+    message: "Open editor?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(proceed) || !proceed) {
+    p.log.info("Edit cancelled");
+    return;
+  }
+
+  // Create backup before editing
+  try {
+    const backupPath = configPath + ".pre-edit.backup";
+    const content = await fs.readFile(configPath, "utf-8");
+    await fs.writeFile(backupPath, content, "utf-8");
+    p.log.info(`Backup created: ${backupPath}`);
+  } catch {
+    p.log.warn("Could not create pre-edit backup");
+  }
+
+  // Open editor
+  const editor = process.env.EDITOR || process.env.VISUAL || "nano";
+  console.log();
+  console.log(noumena.textDim(`  Opening ${editor}...`));
+  console.log();
+
+  try {
+    execSync(`${editor} ${configPath}`, { stdio: "inherit" });
+  } catch {
+    p.log.error("Editor failed or was cancelled");
+    return;
+  }
+
+  // Confirm changes
+  console.log();
+  console.log(noumena.warning("  ⚠  Apply changes to NPL and Gateway?"));
+  console.log(noumena.textDim("  This will:"));
+  console.log(noumena.textDim("    • Import services.yaml → NPL (declarative sync)"));
+  console.log(noumena.textDim("    • Reload Gateway configuration"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Apply changes?",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Changes saved to file but NOT applied to NPL/Gateway");
+    p.log.info("Use 'Import from services.yaml' to apply later");
+    return;
+  }
+
+  // Apply changes
+  const s = p.spinner();
+  s.start("Importing to NPL...");
+
+  try {
+    await bootstrapNpl();
+    s.stop(noumena.success("NPL updated"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("NPL import failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    return;
+  }
+
+  // Reload Gateway
+  s.start("Reloading Gateway...");
+  try {
+    await reloadGatewayConfig();
+    s.stop(noumena.success("Gateway reloaded"));
+    configDirty = false;
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Gateway reload failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("Changes applied to NPL but Gateway may need manual restart");
+    return;
+  }
+
+  console.log();
+  console.log(noumena.success("  ✓ Configuration applied successfully!"));
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Restore to factory defaults (services.yaml.default)
+ */
+async function restoreFactoryConfigFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const configPath = getConfigPath();
+  const defaultPath = configPath.replace("services.yaml", "services.yaml.default");
+
+  console.log();
+  console.log(noumena.purple("  Restore to Factory Defaults"));
+  console.log();
+  console.log(noumena.textDim("  This will:"));
+  console.log(noumena.textDim("    1. Replace services.yaml with services.yaml.default"));
+  console.log(noumena.textDim("    2. Import to NPL (Jarvis, Alice, Bob)"));
+  console.log(noumena.textDim("    3. Reload Gateway"));
+  console.log();
+  console.log(noumena.warning("  ⚠  DESTRUCTIVE: Current services.yaml will be replaced!"));
+  console.log(noumena.warning("  ⚠  All custom services and users will be lost!"));
+  console.log();
+  console.log(noumena.textDim("  Note: This only restores the config file."));
+  console.log(noumena.textDim("  For full reset (Keycloak + NPL), use 'Reset to Factory Defaults'."));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Restore factory defaults?",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Restore cancelled");
+    return;
+  }
+
+  // Query Keycloak for user IDs (same as full reset)
+  const userIdSpinner = p.spinner();
+  userIdSpinner.start("Querying Keycloak for user IDs...");
+  
+  let userIdMap: Record<string, string> = {};
+  try {
+    const kcUsers = await listKeycloakUsers();
+    
+    for (const user of kcUsers) {
+      if (user.username && user.id) {
+        userIdMap[user.username] = user.id;
+      }
+    }
+    
+    userIdSpinner.stop(noumena.success("User IDs fetched"));
+  } catch (err: any) {
+    userIdSpinner.stop(noumena.purpleDim("Failed to query Keycloak"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.warn("Proceeding with placeholder IDs - you may need to update manually");
+  }
+
+  // Restore default config
+  const s = p.spinner();
+  s.start("Restoring factory defaults...");
+
+  try {
+    let defaultYaml = await fs.readFile(defaultPath, "utf-8");
+    
+    // Replace placeholder IDs with actual Keycloak IDs
+    if (userIdMap['jarvis']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_JARVIS_ID/g, userIdMap['jarvis']);
+    }
+    if (userIdMap['alice']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_ALICE_ID/g, userIdMap['alice']);
+    }
+    if (userIdMap['bob']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_BOB_ID/g, userIdMap['bob']);
+    }
+    
+    await fs.writeFile(configPath, defaultYaml, "utf-8");
+    s.stop(noumena.success("Factory defaults restored"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Restore failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    return;
+  }
+
+  // Import to NPL
+  s.start("Importing to NPL...");
+  try {
+    await bootstrapNpl();
+    s.stop(noumena.success("NPL updated"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("NPL import failed"));
+    p.log.error(`Error: ${err.message || err}`);
+  }
+
+  // Reload Gateway
+  s.start("Reloading Gateway...");
+  try {
+    await reloadGatewayConfig();
+    s.stop(noumena.success("Gateway reloaded"));
+    configDirty = false;
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Gateway reload failed"));
+    p.log.error(`Error: ${err.message || err}`);
+  }
+
+  console.log();
+  console.log(noumena.success("  ✓ Factory defaults restored!"));
+  console.log(noumena.textDim("  Default users: jarvis, alice, bob"));
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
 }
 
 /**
@@ -992,9 +1257,7 @@ async function mainMenu(): Promise<boolean> {
     // System section
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
-    { value: "config", label: "  Configuration Manager", hint: "Import/Export, Backups, Factory Defaults" },
-    { value: "viewconfig", label: "  View services.yaml", hint: "Show current configuration" },
-    { value: "editconfig", label: "  Edit services.yaml", hint: `Opens ${process.env.EDITOR || "nano"}` },
+    { value: "config", label: "  Configuration Manager", hint: "Manage services.yaml, Import/Export, Backups" },
     { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Config changed — reload needed" : "Up to date" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
@@ -1029,16 +1292,12 @@ async function mainMenu(): Promise<boolean> {
     await credentialManagementFlow();
   } else if (action === "config") {
     await configurationManagerFlow();
-  } else if (action === "viewconfig") {
-    await viewConfigFlow();
-  } else if (action === "editconfig") {
-    await editConfigFlow();
   } else if (action === "gateway") {
     await reloadGatewayFlow();
   }
 
   // Mark config as potentially dirty after config-modifying flows
-  if (typeof action === "string" && !["viewconfig", "config", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
+  if (typeof action === "string" && !["config", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
     configDirty = true;
   }
 
