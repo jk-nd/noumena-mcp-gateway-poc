@@ -1,5 +1,6 @@
 package io.noumena.mcp.gateway.server
 
+import io.noumena.mcp.gateway.credentials.UserContext
 import io.noumena.mcp.gateway.policy.NplClient
 import io.noumena.mcp.gateway.upstream.UpstreamRouter
 import io.noumena.mcp.gateway.upstream.UpstreamSessionManager
@@ -163,8 +164,9 @@ class McpServerHandler(
             )
         }
 
-        // Step 3: Forward to upstream MCP service
-        val upstreamResult = upstreamSessionManager.forwardToolCall(resolved, arguments)
+        // Step 3: Forward to upstream MCP service with user context for credentials
+        val userContext = UserContext(userId = userId, tenantId = "default")
+        val upstreamResult = upstreamSessionManager.forwardToolCall(resolved, arguments, userContext)
         val durationMs = System.currentTimeMillis() - startTime
 
         // Step 4: Build response

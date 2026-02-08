@@ -18,6 +18,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCNotification
 import io.modelcontextprotocol.kotlin.sdk.types.McpJson
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.noumena.mcp.gateway.credentials.CredentialProxyClient
+import io.noumena.mcp.gateway.credentials.UserContext
 import io.noumena.mcp.gateway.notifications.NotificationBroadcaster
 import io.noumena.mcp.shared.config.ServiceDefinition
 import io.noumena.mcp.shared.config.ServicesConfig
@@ -48,7 +50,8 @@ private val logger = KotlinLogging.logger {}
  */
 class UpstreamSessionManager(
     private val router: UpstreamRouter,
-    private val notificationBroadcaster: NotificationBroadcaster = NotificationBroadcaster()
+    private val notificationBroadcaster: NotificationBroadcaster = NotificationBroadcaster(),
+    private val credentialProxyClient: CredentialProxyClient = CredentialProxyClient()
 ) {
     /** Active upstream sessions keyed by service name. */
     private val sessions = ConcurrentHashMap<String, ManagedSession>()
@@ -82,9 +85,10 @@ class UpstreamSessionManager(
      */
     suspend fun forwardToolCall(
         resolved: ResolvedTool,
-        arguments: JsonObject
+        arguments: JsonObject,
+        userContext: UserContext
     ): UpstreamResult {
-        val session = getOrCreateSession(resolved.service)
+        val session = getOrCreateSession(resolved.service, userContext)
 
         return try {
             // Use CallToolRequest directly to avoid lossy JsonObject → Map round-trip
@@ -112,8 +116,8 @@ class UpstreamSessionManager(
      * Discover tools from an upstream MCP service.
      * Creates a session if needed and sends tools/list via the SDK.
      */
-    suspend fun discoverTools(service: ServiceDefinition): List<JsonObject> {
-        val session = getOrCreateSession(service)
+    suspend fun discoverTools(service: ServiceDefinition, userContext: UserContext): List<JsonObject> {
+        val session = getOrCreateSession(service, userContext)
         return try {
             val listResult = session.client.listTools()
             listResult.tools.map { tool ->
@@ -142,13 +146,13 @@ class UpstreamSessionManager(
      * Get or create an upstream session for a service.
      * Sessions are lazily initialized and cached by service name.
      */
-    private suspend fun getOrCreateSession(service: ServiceDefinition): ManagedSession {
+    private suspend fun getOrCreateSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
         // Fast path: return existing session
         sessions[service.name]?.let { return it }
 
         // Slow path: create new session
         logger.info { "Creating upstream session for '${service.name}' (type=${service.type})" }
-        val managed = createSession(service)
+        val managed = createSession(service, userContext)
 
         // Atomically store, or return existing if another coroutine won the race
         val existing = sessions.putIfAbsent(service.name, managed)
@@ -162,9 +166,9 @@ class UpstreamSessionManager(
     /**
      * Create a new MCP SDK Client session with the appropriate transport.
      */
-    private suspend fun createSession(service: ServiceDefinition): ManagedSession {
+    private suspend fun createSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
         return when (service.type) {
-            "MCP_STDIO" -> createStdioSession(service)
+            "MCP_STDIO" -> createStdioSession(service, userContext)
             "MCP_HTTP" -> createHttpSession(service)
             "MCP_WS" -> createWebSocketSession(service)
             else -> throw IllegalArgumentException(
@@ -215,17 +219,43 @@ class UpstreamSessionManager(
     /**
      * Create a STDIO session by spawning a child process.
      * The process communicates via stdin/stdout JSON-RPC (MCP STDIO transport).
+     *
+     * Credentials are injected as environment variables via the Credential Proxy.
      */
-    private suspend fun createStdioSession(service: ServiceDefinition): ManagedSession {
+    private suspend fun createStdioSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
         val command = service.command
             ?: throw IllegalArgumentException("MCP_STDIO service '${service.name}' has no command configured")
 
         val parts = command.split(" ") + service.args
         logger.info { "Spawning STDIO process for '${service.name}': $parts" }
 
-        val process = ProcessBuilder(parts)
+        // Step 1: Get credentials from Credential Proxy
+        val credentials = try {
+            credentialProxyClient.getCredentials(
+                service = service.name,
+                operation = "connect",
+                tenantId = userContext.tenantId,
+                userId = userContext.userId
+            )
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to get credentials for '${service.name}', proceeding without credentials" }
+            emptyMap()
+        }
+
+        // Step 2: Spawn process with injected credentials
+        val processBuilder = ProcessBuilder(parts)
             .redirectErrorStream(false)
-            .start()
+
+        if (credentials.isNotEmpty()) {
+            val env = processBuilder.environment()
+            credentials.forEach { (key, value) ->
+                env[key] = value
+                logger.debug { "Injected credential env var: $key" }
+            }
+            logger.info { "Injected ${credentials.size} credential fields for '${service.name}'" }
+        }
+
+        val process = processBuilder.start()
 
         val transport = StdioClientTransport(
             input = process.inputStream.asSource().buffered(),
@@ -237,7 +267,7 @@ class UpstreamSessionManager(
         client.connect(transport)
         registerNotificationForwarding(client, service.name)
 
-        logger.info { "STDIO session '${service.name}' connected (PID: ${process.pid()})" }
+        logger.info { "STDIO session '${service.name}' connected with credentials (PID: ${process.pid()})" }
         return ManagedSession(
             client = client,
             process = process,
