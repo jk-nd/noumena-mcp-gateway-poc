@@ -1286,22 +1286,29 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
       return;
     }
 
-    s.start(`${newEnabled ? "Enabling" : "Disabling"}...`);
+    // Backup current state for rollback
+    const originalEnabled = service.enabled;
+    
+    s.start(`${newEnabled ? "Enabling" : "Disabling"} and syncing to NPL...`);
+    
+    // Apply change to services.yaml
     const success = setServiceEnabled(service.name, newEnabled);
     
     if (success) {
       try {
+        // First sync to NPL
         await reloadGatewayConfig();
-        s.stop(noumena.success(`${service.displayName}: ${newEnabled ? "Enabled" : "Disabled"}`));
-      } catch {
-        s.stop(noumena.success(`${service.displayName}: ${newEnabled ? "Enabled" : "Disabled"}`));
-      }
-
-      try {
         await syncServiceWithNpl(service.name, newEnabled);
-        p.log.success("NPL policy updated");
-      } catch {
-        p.log.warn("NPL sync failed - policy may not reflect this change");
+        s.stop(noumena.success(`✓ ${service.displayName} ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        setServiceEnabled(service.name, originalEnabled);
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${error}`);
+        return; // Exit early - don't proceed to tool selection
       }
 
       // After enabling, go to tool selection
@@ -1492,29 +1499,65 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
     }
 
     if (action === "enable_all") {
+      // Backup current state for rollback
+      const originalStates = new Map(
+        freshService.tools.map(t => [t.name, t.enabled !== false])
+      );
+      
+      // Apply changes to services.yaml
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, true);
       }
+      
+      // Try to sync to NPL via Gateway reload
+      const s = p.spinner();
+      s.start("Syncing to NPL...");
+      
       try {
         await reloadGatewayConfig();
-        p.log.success("All tools enabled (Gateway reloaded)");
-      } catch {
-        p.log.success("All tools enabled");
-        p.log.warn("Gateway reload failed — restart Gateway to apply");
+        s.stop(noumena.success("✓ All tools enabled and synced to NPL"));
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        for (const tool of freshService.tools) {
+          setToolEnabled(freshService.name, tool.name, originalStates.get(tool.name) || false);
+        }
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${error}`);
       }
       continue;
     }
 
     if (action === "disable_all") {
+      // Backup current state for rollback
+      const originalStates = new Map(
+        freshService.tools.map(t => [t.name, t.enabled !== false])
+      );
+      
+      // Apply changes to services.yaml
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, false);
       }
+      
+      // Try to sync to NPL via Gateway reload
+      const s = p.spinner();
+      s.start("Syncing to NPL...");
+      
       try {
         await reloadGatewayConfig();
-        p.log.success("All tools disabled (Gateway reloaded)");
-      } catch {
-        p.log.success("All tools disabled");
-        p.log.warn("Gateway reload failed — restart Gateway to apply");
+        s.stop(noumena.success("✓ All tools disabled and synced to NPL"));
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        for (const tool of freshService.tools) {
+          setToolEnabled(freshService.name, tool.name, originalStates.get(tool.name) || false);
+        }
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${error}`);
       }
       continue;
     }
@@ -1550,18 +1593,37 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
       continue;
     }
 
-    // Apply changes
+    // Backup current state for rollback
+    const originalStates = new Map(
+      selectedTools.map(toolName => {
+        const tool = freshService?.tools.find(t => t.name === toolName);
+        return [toolName, tool ? (tool.enabled !== false) : false];
+      })
+    );
+    
+    // Apply changes to services.yaml
     const newEnabled = action === "enable";
     for (const toolName of selectedTools) {
       setToolEnabled(freshService.name, toolName, newEnabled);
     }
     
+    // Try to sync to NPL via Gateway reload
+    const s = p.spinner();
+    s.start("Syncing to NPL...");
+    
     try {
       await reloadGatewayConfig();
-      p.log.success(`${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"} (Gateway reloaded)`);
-    } catch {
-      p.log.success(`${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"}`);
-      p.log.warn("Gateway reload failed — restart Gateway to apply");
+      s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
+    } catch (error) {
+      s.stop(noumena.error("✗ NPL sync failed"));
+      
+      // ROLLBACK: Restore original state
+      for (const toolName of selectedTools) {
+        setToolEnabled(freshService.name, toolName, originalStates.get(toolName) || false);
+      }
+      
+      p.log.error("Failed to sync to NPL - changes rolled back");
+      p.log.error(`${error}`);
     }
   }
 }
