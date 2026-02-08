@@ -10,6 +10,7 @@ import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { execSync, spawnSync } from "child_process";
 import { readFileSync } from "fs";
+import * as path from "path";
 import { 
   loadConfig, 
   setServiceEnabled, 
@@ -307,16 +308,27 @@ async function resetToDefaultsFlow(): Promise<void> {
     return;
   }
 
-  // Step 1: Re-provision Keycloak
+  // Step 1: Re-provision Keycloak via Docker Compose
   const kcSpinner = p.spinner();
-  kcSpinner.start("Re-provisioning Keycloak...");
+  kcSpinner.start("Re-provisioning Keycloak (Terraform)...");
   
   try {
-    const kcResult = execSync(
-      "cd ../keycloak-provisioning && ./local.sh",
+    // Remove existing keycloak-provisioning container and volume
+    execSync(
+      "docker compose rm -sf keycloak-provisioning && docker volume rm gateway_keycloak-provisioning 2>/dev/null || true",
       { 
         encoding: "utf-8",
-        cwd: process.cwd(),
+        cwd: path.join(process.cwd(), "../deployments"),
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    // Re-run provisioning service (this will re-apply Terraform with env vars from docker-compose.yml)
+    execSync(
+      "docker compose up keycloak-provisioning --abort-on-container-exit",
+      { 
+        encoding: "utf-8",
+        cwd: path.join(process.cwd(), "../deployments"),
         stdio: ["pipe", "pipe", "pipe"]
       }
     );
@@ -324,7 +336,7 @@ async function resetToDefaultsFlow(): Promise<void> {
   } catch (err: any) {
     kcSpinner.stop(noumena.purpleDim("Keycloak provisioning failed"));
     p.log.error(`Error: ${err.message || err}`);
-    p.log.info("You may need to run './local.sh' manually in keycloak-provisioning/");
+    p.log.info("Try: cd deployments && docker compose up keycloak-provisioning");
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
     return;
