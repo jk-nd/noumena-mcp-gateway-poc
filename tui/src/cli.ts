@@ -431,7 +431,7 @@ async function mainMenu(): Promise<boolean> {
     { value: "---hdr-gw", label: noumena.purple("── Gateway Settings ──"), hint: "" },
     ...serviceOptions,
     { value: "search", label: noumena.purple("  + Search Docker Hub"), hint: "Find and add MCP servers" },
-    { value: "custom", label: noumena.purple("  + Add custom image"), hint: "Local or private registry" },
+    { value: "custom", label: noumena.purple("  + Add MCP service"), hint: "Templates, NPM, or Docker" },
 
     // User Management section
     { value: "---hdr-users", label: noumena.purple("── User Management ──"), hint: "" },
@@ -1099,12 +1099,368 @@ async function searchDockerHubFlow(): Promise<void> {
   }
 }
 
+// Service templates for common MCP servers
+const SERVICE_TEMPLATES: Record<string, {
+  displayName: string;
+  description: string;
+  command: string;
+  args: string[];
+  requiresCredentials: boolean;
+  credentialName?: string;
+  setupGuide: string;
+}> = {
+  gemini: {
+    displayName: "Google Gemini",
+    description: "Google Gemini AI API for text generation and chat",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-google-gemini"],
+    requiresCredentials: true,
+    credentialName: "gemini",
+    setupGuide: "You'll need a Gemini API key from https://aistudio.google.com/apikey",
+  },
+  github: {
+    displayName: "GitHub",
+    description: "GitHub API for repository management and code operations",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github"],
+    requiresCredentials: true,
+    credentialName: "github",
+    setupGuide: "You'll need a GitHub Personal Access Token from https://github.com/settings/tokens",
+  },
+  filesystem: {
+    displayName: "Filesystem",
+    description: "Local filesystem access for reading and writing files",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem"],
+    requiresCredentials: false,
+    setupGuide: "Provides safe filesystem operations within configured directories",
+  },
+  memory: {
+    displayName: "Memory",
+    description: "Persistent memory/knowledge graph storage",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-memory"],
+    requiresCredentials: false,
+    setupGuide: "Stores and retrieves information across sessions",
+  },
+  brave_search: {
+    displayName: "Brave Search",
+    description: "Web search via Brave Search API",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-brave-search"],
+    requiresCredentials: true,
+    credentialName: "brave_search",
+    setupGuide: "You'll need a Brave Search API key from https://brave.com/search/api/",
+  },
+};
+
 /**
  * Add a custom Docker image (local or private registry)
  */
 async function addCustomImageFlow(): Promise<void> {
   console.log();
-  console.log(noumena.purple("  Add Custom MCP Service"));
+  console.log(noumena.purple("  Add MCP Service"));
+  console.log(noumena.textDim("  Choose how you want to add a service"));
+  console.log();
+
+  const serviceType = await p.select({
+    message: "Service type:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "template", label: noumena.purple("  Quick Start (Common Services)"), hint: "Pre-configured templates" },
+      { value: "npm", label: noumena.purple("  NPM Package"), hint: "Run via npx (most MCP servers)" },
+      { value: "docker", label: noumena.purple("  Docker Image"), hint: "Local or registry image" },
+    ],
+  });
+
+  if (p.isCancel(serviceType) || serviceType === "back") {
+    return;
+  }
+
+  if (serviceType === "template") {
+    await addTemplateServiceFlow();
+  } else if (serviceType === "npm") {
+    await addNpmServiceFlow();
+  } else if (serviceType === "docker") {
+    await addDockerServiceFlow();
+  }
+}
+
+/**
+ * Add a service from a template
+ */
+async function addTemplateServiceFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Quick Start: Common Services"));
+  console.log();
+
+  const templateName = await p.select({
+    message: "Select service:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...Object.entries(SERVICE_TEMPLATES).map(([key, template]) => ({
+        value: key,
+        label: template.displayName,
+        hint: template.requiresCredentials ? "🔐 requires credentials" : "no credentials needed",
+      })),
+    ],
+  });
+
+  if (p.isCancel(templateName) || templateName === "back") {
+    return;
+  }
+
+  const template = SERVICE_TEMPLATES[String(templateName)];
+  
+  console.log();
+  console.log(noumena.success(`  ✓ Selected: ${template.displayName}`));
+  console.log(noumena.textDim(`  ${template.description}`));
+  console.log();
+  console.log(noumena.textDim(`  💡 ${template.setupGuide}`));
+  console.log();
+
+  // Check if service already exists
+  const config = loadConfig();
+  if (config.services.some(s => s.name === templateName)) {
+    p.log.warn(`Service '${templateName}' already exists`);
+    return;
+  }
+
+  // Confirm
+  const confirmed = await p.confirm({
+    message: `Add ${template.displayName}?`,
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  // Create service definition
+  const newService: ServiceDefinition = {
+    name: String(templateName),
+    displayName: template.displayName,
+    type: "MCP_STDIO",
+    enabled: true,  // Enable by default for templates
+    command: template.command,
+    args: template.args,
+    requiresCredentials: template.requiresCredentials,
+    description: template.description,
+    tools: [],
+  };
+
+  const success = addService(newService);
+  if (!success) {
+    p.log.warn("Failed to add service");
+    return;
+  }
+
+  p.log.success(`✓ Added: ${template.displayName}`);
+
+  // Add placeholder tool
+  const { addTool } = await import("./lib/config.js");
+  addTool(String(templateName), {
+    name: `${templateName}_default`,
+    description: `Default tool for ${templateName} - run 'Discover tools' to find actual tools`,
+    inputSchema: { type: "object", properties: {}, required: [] },
+    enabled: true,
+  });
+
+  try {
+    await reloadGatewayConfig();
+  } catch {
+    // Ignore
+  }
+
+  // If requires credentials, prompt to set them up now
+  if (template.requiresCredentials) {
+    console.log();
+    console.log(noumena.warning("  ⚠️  This service requires credentials"));
+    console.log();
+
+    const setupCreds = await p.confirm({
+      message: "Set up credentials now?",
+      initialValue: true,
+    });
+
+    if (!p.isCancel(setupCreds) && setupCreds) {
+      // Check if credential already exists
+      const credConfig = loadCredentialsConfig();
+      const credName = template.credentialName || String(templateName);
+      
+      if (!credConfig.credentials[credName]) {
+        console.log();
+        p.log.info(`Creating credential: ${credName}`);
+        await addCredentialFlow();
+      } else {
+        p.log.success(`Credential '${credName}' already exists`);
+      }
+
+      // Configure service to use the credential
+      console.log();
+      const linkCred = await p.confirm({
+        message: `Link ${template.displayName} to '${credName}' credential?`,
+        initialValue: true,
+      });
+
+      if (!p.isCancel(linkCred) && linkCred) {
+        setServiceCredential(String(templateName), credName);
+        p.log.success(`✓ ${template.displayName} will use '${credName}' credentials`);
+      }
+    }
+  }
+
+  console.log();
+  p.log.info("✨ Service added! Don't forget to grant user access via 'User Management'");
+}
+
+/**
+ * Add an NPM-based MCP server
+ */
+async function addNpmServiceFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Add NPM-based MCP Service"));
+  console.log(noumena.textDim("  For services installed via 'npx' or 'npm'"));
+  console.log();
+  console.log(noumena.textDim("  Examples:"));
+  console.log(noumena.textDim("    • @modelcontextprotocol/server-github"));
+  console.log(noumena.textDim("    • @modelcontextprotocol/server-google-gemini"));
+  console.log(noumena.textDim("    • my-custom-mcp-server"));
+  console.log();
+
+  const packageName = await p.text({
+    message: "NPM package name:",
+    placeholder: "e.g., @modelcontextprotocol/server-github",
+    validate: (value) => {
+      if (!value || value.trim().length === 0) {
+        return "Package name is required";
+      }
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(packageName)) {
+    return;
+  }
+
+  const packageNameStr = String(packageName).trim();
+
+  // Suggest service name from package
+  const extractServiceName = (pkg: string): string => {
+    const parts = pkg.split("/");
+    const last = parts[parts.length - 1];
+    return last.replace("server-", "").replace(/@/g, "");
+  };
+
+  const suggestedName = extractServiceName(packageNameStr);
+
+  const serviceName = await p.text({
+    message: "Service name:",
+    initialValue: suggestedName,
+    placeholder: "e.g., github, gemini",
+    validate: (value) => {
+      if (!value || value.trim().length === 0) {
+        return "Service name is required";
+      }
+      if (!/^[a-z0-9_-]+$/.test(value)) {
+        return "Use lowercase letters, numbers, hyphens, and underscores only";
+      }
+      // Check if already exists
+      const config = loadConfig();
+      if (config.services.some(s => s.name === value)) {
+        return `A service named '${value}' already exists`;
+      }
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(serviceName)) {
+    return;
+  }
+
+  const serviceNameStr = String(serviceName).trim();
+
+  const displayName = await p.text({
+    message: "Display name:",
+    initialValue: serviceNameStr.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+    placeholder: "Human-readable name for the service",
+  });
+
+  if (p.isCancel(displayName)) {
+    return;
+  }
+
+  const description = await p.text({
+    message: "Description:",
+    placeholder: "Brief description of what this MCP service does",
+    initialValue: `MCP service: ${displayName}`,
+  });
+
+  if (p.isCancel(description)) {
+    return;
+  }
+
+  const requiresCreds = await p.confirm({
+    message: "Does this service require credentials?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(requiresCreds)) {
+    return;
+  }
+
+  // Create service definition
+  const newService: ServiceDefinition = {
+    name: serviceNameStr,
+    displayName: String(displayName).trim(),
+    type: "MCP_STDIO",
+    enabled: true,  // Enable by default
+    command: "npx",
+    args: ["-y", packageNameStr],
+    requiresCredentials: Boolean(requiresCreds),
+    description: String(description).trim(),
+    tools: [],
+  };
+
+  const success = addService(newService);
+  if (!success) {
+    p.log.warn("Failed to add service");
+    return;
+  }
+
+  p.log.success(`✓ Added: ${displayName}`);
+
+  // Add placeholder tool
+  const { addTool } = await import("./lib/config.js");
+  addTool(serviceNameStr, {
+    name: `${serviceNameStr}_default`,
+    description: `Default tool for ${serviceNameStr} - run 'Discover tools' to find actual tools`,
+    inputSchema: { type: "object", properties: {}, required: [] },
+    enabled: true,
+  });
+
+  try {
+    await reloadGatewayConfig();
+  } catch {
+    // Ignore
+  }
+
+  if (requiresCreds) {
+    console.log();
+    console.log(noumena.warning("  ⚠️  Don't forget to set up credentials!"));
+    console.log(noumena.textDim("     Go to: System > Manage credentials"));
+  }
+
+  console.log();
+  p.log.info("✨ Service added! Don't forget to grant user access via 'User Management'");
+}
+
+/**
+ * Add a Docker-based MCP service
+ */
+async function addDockerServiceFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Add Docker-based MCP Service"));
   console.log(noumena.textDim("  Add a Docker-based MCP server from:"));
   console.log(noumena.textDim("  • Local image (my-mcp-server)"));
   console.log(noumena.textDim("  • Private registry (ghcr.io/org/mcp-server)"));
