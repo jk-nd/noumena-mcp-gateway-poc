@@ -67,16 +67,26 @@ import {
   testCredentialInjection,
 } from "./lib/api.js";
 
-// Noumena color palette
+// Noumena color palette - optimized for dark terminal backgrounds
 const noumena = {
-  purple: chalk.hex("#7C3AED"),      // Primary purple
-  purpleDim: chalk.hex("#6B21A8"),   // Darker purple
-  gray: chalk.hex("#6B7280"),
-  grayDim: chalk.hex("#4B5563"),
-  success: chalk.hex("#10B981"),     // Green for success
-  warning: chalk.hex("#F59E0B"),     // Amber for warnings
-  text: chalk.hex("#E5E7EB"),
-  textDim: chalk.hex("#9CA3AF"),
+  // Brand colors (section headers only)
+  purple: chalk.hex("#A78BFA"),      // Lighter purple for better readability
+  purpleDim: chalk.hex("#8B5CF6"),   // Medium purple
+  
+  // Interactive elements
+  accent: chalk.hex("#60A5FA"),      // Blue for actionable items (+ Add buttons)
+  accentBright: chalk.hex("#93C5FD"), // Brighter blue for emphasis
+  
+  // Status colors
+  success: chalk.hex("#34D399"),     // Brighter green for success
+  warning: chalk.hex("#FBBF24"),     // Brighter amber for warnings
+  error: chalk.hex("#F87171"),       // Red for errors
+  
+  // Text colors
+  text: chalk.hex("#F3F4F6"),        // Brighter white for main text
+  textDim: chalk.hex("#D1D5DB"),     // Lighter gray for secondary text
+  gray: chalk.hex("#9CA3AF"),        // Medium gray
+  grayDim: chalk.hex("#6B7280"),     // Darker gray for disabled items
 };
 
 // Track whether services.yaml has been modified since last Gateway reload
@@ -1273,8 +1283,8 @@ async function mainMenu(): Promise<boolean> {
     // Gateway Settings section
     { value: "---hdr-gw", label: noumena.purple("── Gateway Settings ──"), hint: "" },
     ...serviceOptions,
-    { value: "search", label: noumena.purple("  + Search Docker Hub"), hint: "Find and add MCP servers" },
-    { value: "custom", label: noumena.purple("  + Add MCP service"), hint: "Templates, NPM, or Docker" },
+    { value: "search", label: noumena.accent("  + Search Docker Hub"), hint: "Find and add MCP servers" },
+    { value: "custom", label: noumena.accent("  + Add MCP service"), hint: "Templates, NPM, or Docker" },
 
     // User Management section
     { value: "---hdr-users", label: noumena.purple("── User Management ──"), hint: "" },
@@ -2004,9 +2014,9 @@ async function addCustomImageFlow(): Promise<void> {
     message: "Service type:",
     options: [
       { value: "back", label: noumena.textDim("← Back") },
-      { value: "template", label: noumena.purple("  Quick Start (Common Services)"), hint: "Pre-configured templates" },
-      { value: "npm", label: noumena.purple("  NPM Package"), hint: "Run via npx (most MCP servers)" },
-      { value: "docker", label: noumena.purple("  Docker Image"), hint: "Local or registry image" },
+      { value: "template", label: "  Quick Start (Common Services)", hint: "Pre-configured templates" },
+      { value: "npm", label: "  NPM Package", hint: "Run via npx (most MCP servers)" },
+      { value: "docker", label: "  Docker Image", hint: "Local or registry image" },
     ],
   });
 
@@ -2683,7 +2693,7 @@ async function userManagementFlow(): Promise<void> {
       { value: "back", label: noumena.textDim("← Back") },
       ...userOptions,
       { value: "separator", label: noumena.textDim("───────────────────"), hint: "" },
-      { value: "create", label: noumena.purple("+ Create new Keycloak user"), hint: "Add user to identity system" },
+      { value: "create", label: noumena.accent("+ Create new Keycloak user"), hint: "Add user to identity system" },
     ];
 
     const action = await p.select({
@@ -3431,7 +3441,7 @@ async function credentialManagementFlow(): Promise<void> {
     message: "Select action:",
     options: [
       { value: "back", label: noumena.textDim("← Back") },
-      { value: "add", label: noumena.purple("  + Add credential"), hint: "Create new credential mapping" },
+      { value: "add", label: noumena.accent("  + Add credential"), hint: "Create new credential mapping" },
       { value: "configure", label: "  Configure service", hint: "Set up credentials for a service" },
       { value: "test", label: "  Test injection", hint: "Verify credential injection works" },
       { value: "view", label: "  View credentials.yaml", hint: "Show current configuration" },
