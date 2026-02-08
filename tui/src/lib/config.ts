@@ -529,3 +529,104 @@ export function updateDefaultToolTemplate(template: DefaultToolTemplate): boolea
   config.user_access.default_template = template;
   return saveConfig(config);
 }
+
+// ====================================================================
+// CREDENTIAL CONFIGURATION MANAGEMENT
+// ====================================================================
+
+interface CredentialMapping {
+  vault_path: string;
+  injection: {
+    type: string;
+    mapping: Record<string, string>;
+  };
+}
+
+interface CredentialConfig {
+  mode: string;
+  credentials: Record<string, CredentialMapping>;
+  service_defaults: Record<string, string>;
+  default_credential?: CredentialMapping;
+}
+
+const getCredentialsConfigPath = () => {
+  const servicesPath = getConfigPath();
+  return servicesPath.replace("services.yaml", "credentials.yaml");
+};
+
+/**
+ * Load credentials configuration
+ */
+export function loadCredentialsConfig(): CredentialConfig {
+  try {
+    const content = readFileSync(getCredentialsConfigPath(), "utf-8");
+    return parse(content) as CredentialConfig;
+  } catch (error) {
+    // Return default structure if file doesn't exist
+    return {
+      mode: "simple",
+      credentials: {},
+      service_defaults: {},
+    };
+  }
+}
+
+/**
+ * Save credentials configuration
+ */
+export function saveCredentialsConfig(config: CredentialConfig): boolean {
+  try {
+    const yamlContent = stringify(config);
+    writeFileSync(getCredentialsConfigPath(), yamlContent, "utf-8");
+    return true;
+  } catch (error) {
+    console.error("Failed to save credentials config:", error);
+    return false;
+  }
+}
+
+/**
+ * Add or update a credential mapping
+ */
+export function addCredentialMapping(
+  credentialName: string,
+  vaultPath: string,
+  injectionType: string,
+  fieldMapping: Record<string, string>
+): boolean {
+  const config = loadCredentialsConfig();
+  
+  config.credentials[credentialName] = {
+    vault_path: vaultPath,
+    injection: {
+      type: injectionType,
+      mapping: fieldMapping,
+    },
+  };
+  
+  return saveCredentialsConfig(config);
+}
+
+/**
+ * Set service default credential
+ */
+export function setServiceCredential(serviceName: string, credentialName: string): boolean {
+  const config = loadCredentialsConfig();
+  config.service_defaults[serviceName] = credentialName;
+  return saveCredentialsConfig(config);
+}
+
+/**
+ * Get credential mapping for a service
+ */
+export function getServiceCredential(serviceName: string): string | null {
+  const config = loadCredentialsConfig();
+  return config.service_defaults[serviceName] || null;
+}
+
+/**
+ * Check if service has credentials configured
+ */
+export function hasCredentials(serviceName: string): boolean {
+  return getServiceCredential(serviceName) !== null;
+}

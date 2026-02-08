@@ -29,6 +29,12 @@ import {
   type ServiceDefinition,
   type UserToolAccess,
   getConfigPath,
+  loadCredentialsConfig,
+  saveCredentialsConfig,
+  addCredentialMapping,
+  setServiceCredential,
+  getServiceCredential,
+  hasCredentials,
 } from "./lib/config.js";
 import { 
   checkGatewayHealth, 
@@ -54,6 +60,9 @@ import {
   getUserAccessFromNpl,
   syncUserAccessToNpl,
   type KeycloakUser,
+  storeSecretInVault,
+  getSecretFromVault,
+  testCredentialInjection,
 } from "./lib/api.js";
 
 // Noumena color palette
@@ -430,6 +439,7 @@ async function mainMenu(): Promise<boolean> {
 
     // System section
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
+    { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
     { value: "viewconfig", label: "  View services.yaml", hint: "Show current configuration" },
     { value: "editconfig", label: "  Edit services.yaml", hint: `Opens ${process.env.EDITOR || "nano"}` },
     { value: "bootstrap", label: `  NPL Bootstrap  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: nplReady ? "NPL synced" : "Needs sync" },
@@ -463,6 +473,8 @@ async function mainMenu(): Promise<boolean> {
     await addCustomImageFlow();
   } else if (action === "users") {
     await userManagementFlow();
+  } else if (action === "credentials") {
+    await credentialManagementFlow();
   } else if (action === "viewconfig") {
     await viewConfigFlow();
   } else if (action === "editconfig") {
@@ -1865,6 +1877,400 @@ async function deleteUserFlow(user: UserToolAccess): Promise<void> {
     s.stop(noumena.purpleDim("Failed"));
     p.log.error(`${error}`);
   }
+}
+
+/**
+ * Credential Management Flow
+ */
+async function credentialManagementFlow(): Promise<void> {
+  const credConfig = loadCredentialsConfig();
+  const services = loadConfig().services;
+  
+  console.log();
+  console.log(noumena.purple("  Credential Management"));
+  console.log(noumena.textDim("  Manage Vault secrets and credential mappings"));
+  console.log();
+  
+  // Show current status
+  const credCount = Object.keys(credConfig.credentials).length;
+  const servicesWithCreds = Object.keys(credConfig.service_defaults).length;
+  
+  console.log(noumena.textDim(`  Credentials defined: ${credCount}`));
+  console.log(noumena.textDim(`  Services with credentials: ${servicesWithCreds}/${services.length}`));
+  console.log();
+  
+  const action = await p.select({
+    message: "Select action:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "add", label: noumena.purple("  + Add credential"), hint: "Create new credential mapping" },
+      { value: "configure", label: "  Configure service", hint: "Set up credentials for a service" },
+      { value: "test", label: "  Test injection", hint: "Verify credential injection works" },
+      { value: "view", label: "  View credentials.yaml", hint: "Show current configuration" },
+    ],
+  });
+  
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+  
+  if (action === "add") {
+    await addCredentialFlow();
+  } else if (action === "configure") {
+    await configureServiceCredentialsFlow();
+  } else if (action === "test") {
+    await testCredentialsFlow();
+  } else if (action === "view") {
+    await viewCredentialsConfigFlow();
+  }
+}
+
+/**
+ * Add new credential mapping
+ */
+async function addCredentialFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Add Credential Mapping"));
+  console.log(noumena.textDim("  Create a new credential with Vault integration"));
+  console.log();
+  
+  // Step 1: Credential name
+  const credentialName = await p.text({
+    message: "Credential name:",
+    placeholder: "e.g., google_gemini, personal_github",
+    validate: (value) => {
+      if (!value) return "Credential name is required";
+      if (!/^[a-z0-9_]+$/.test(value)) return "Use lowercase letters, numbers, and underscores only";
+      return undefined;
+    },
+  });
+  
+  if (p.isCancel(credentialName)) return;
+  
+  // Step 2: Vault path template
+  const vaultPath = await p.text({
+    message: "Vault path template:",
+    placeholder: "secret/data/tenants/{tenant}/users/{user}/service/name",
+    initialValue: `secret/data/tenants/{tenant}/users/{user}/${String(credentialName).replace(/_/g, "/")}`,
+    validate: (value) => {
+      if (!value) return "Vault path is required";
+      if (!value.startsWith("secret/data/")) return "Path should start with 'secret/data/'";
+      return undefined;
+    },
+  });
+  
+  if (p.isCancel(vaultPath)) return;
+  
+  // Step 3: Injection type
+  const injectionType = await p.select({
+    message: "How should credentials be injected?",
+    options: [
+      { value: "env", label: "Environment variables", hint: "Most common for MCP servers" },
+      { value: "header", label: "HTTP headers", hint: "For HTTP-based services" },
+    ],
+  });
+  
+  if (p.isCancel(injectionType)) return;
+  
+  // Step 4: Field mappings
+  console.log();
+  console.log(noumena.textDim("  Define field mappings (Vault field → Injection target)"));
+  console.log(noumena.textDim("  Press Enter with empty field name when done"));
+  console.log();
+  
+  const fieldMapping: Record<string, string> = {};
+  
+  while (true) {
+    const vaultField = await p.text({
+      message: `Vault field name (${Object.keys(fieldMapping).length} added):`,
+      placeholder: "e.g., api_key, token, username",
+    });
+    
+    if (p.isCancel(vaultField)) return;
+    if (!vaultField) break; // Done adding fields
+    
+    const targetName = await p.text({
+      message: `  → ${injectionType === "env" ? "Environment variable" : "Header"} name:`,
+      placeholder: injectionType === "env" ? "e.g., GEMINI_API_KEY, GITHUB_TOKEN" : "e.g., X-API-Key, Authorization",
+      initialValue: injectionType === "env" ? String(vaultField).toUpperCase() : String(vaultField),
+    });
+    
+    if (p.isCancel(targetName)) return;
+    if (!targetName) continue;
+    
+    fieldMapping[String(vaultField)] = String(targetName);
+    p.log.success(`  Added: ${vaultField} → ${targetName}`);
+  }
+  
+  if (Object.keys(fieldMapping).length === 0) {
+    p.log.warn("No field mappings defined. Credential not added.");
+    return;
+  }
+  
+  // Step 5: Save mapping
+  const s = p.spinner();
+  s.start("Saving credential mapping...");
+  
+  const success = addCredentialMapping(
+    String(credentialName),
+    String(vaultPath),
+    String(injectionType),
+    fieldMapping
+  );
+  
+  if (success) {
+    s.stop(noumena.success("Credential mapping saved"));
+    
+    // Step 6: Ask if they want to store secrets now
+    const storeNow = await p.confirm({
+      message: "Store secrets in Vault now?",
+      initialValue: true,
+    });
+    
+    if (!p.isCancel(storeNow) && storeNow) {
+      await storeSecretsInVaultFlow(String(credentialName), String(vaultPath), fieldMapping);
+    } else {
+      console.log();
+      p.log.info("You can store secrets manually later:");
+      console.log(noumena.textDim(`  docker exec gateway-vault-1 vault kv put ${vaultPath.replace("{tenant}", "default").replace("{user}", "alice")} ...`));
+    }
+  } else {
+    s.stop(noumena.purpleDim("Failed to save"));
+  }
+}
+
+/**
+ * Store secrets in Vault
+ */
+async function storeSecretsInVaultFlow(
+  credentialName: string,
+  vaultPathTemplate: string,
+  fieldMapping: Record<string, string>
+): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Store Secrets in Vault"));
+  console.log();
+  
+  // Ask for tenant and user
+  const tenantId = await p.text({
+    message: "Tenant ID:",
+    initialValue: "default",
+  });
+  
+  if (p.isCancel(tenantId)) return;
+  
+  const userId = await p.text({
+    message: "User ID:",
+    initialValue: "alice",
+  });
+  
+  if (p.isCancel(userId)) return;
+  
+  // Interpolate path
+  const vaultPath = vaultPathTemplate
+    .replace("{tenant}", String(tenantId))
+    .replace("{user}", String(userId));
+  
+  console.log();
+  console.log(noumena.textDim(`  Vault path: ${vaultPath}`));
+  console.log();
+  
+  // Collect secret values
+  const secretData: Record<string, string> = {};
+  
+  for (const [vaultField, targetName] of Object.entries(fieldMapping)) {
+    const value = await p.password({
+      message: `Enter ${vaultField}:`,
+      mask: "*",
+      validate: (v) => v ? undefined : "Value is required",
+    });
+    
+    if (p.isCancel(value)) return;
+    
+    secretData[vaultField] = String(value);
+  }
+  
+  // Store in Vault
+  const s = p.spinner();
+  s.start("Storing secrets in Vault...");
+  
+  try {
+    await storeSecretInVault(vaultPath, secretData);
+    s.stop(noumena.success("Secrets stored in Vault"));
+    p.log.success(`Credential '${credentialName}' is ready to use`);
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed to store secrets"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Configure service credentials
+ */
+async function configureServiceCredentialsFlow(): Promise<void> {
+  const services = loadConfig().services;
+  const credConfig = loadCredentialsConfig();
+  
+  console.log();
+  console.log(noumena.purple("  Configure Service Credentials"));
+  console.log();
+  
+  if (services.length === 0) {
+    p.log.warn("No services configured yet");
+    return;
+  }
+  
+  // Select service
+  const serviceName = await p.select({
+    message: "Select service:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...services.map(s => ({
+        value: s.name,
+        label: s.displayName,
+        hint: hasCredentials(s.name) ? noumena.success("✓ configured") : noumena.grayDim("no credentials"),
+      })),
+    ],
+  });
+  
+  if (p.isCancel(serviceName) || serviceName === "back") return;
+  
+  const service = services.find(s => s.name === serviceName);
+  if (!service) return;
+  
+  // Show available credentials
+  const availableCredentials = Object.keys(credConfig.credentials);
+  
+  if (availableCredentials.length === 0) {
+    p.log.warn("No credentials defined yet. Add a credential first.");
+    return;
+  }
+  
+  const credentialName = await p.select({
+    message: `Select credential for ${service.displayName}:`,
+    options: [
+      { value: "none", label: noumena.grayDim("(none)"), hint: "Remove credential mapping" },
+      ...availableCredentials.map(name => ({
+        value: name,
+        label: name,
+        hint: credConfig.credentials[name].vault_path,
+      })),
+    ],
+  });
+  
+  if (p.isCancel(credentialName)) return;
+  
+  if (credentialName === "none") {
+    // Remove mapping
+    const config = loadCredentialsConfig();
+    delete config.service_defaults[String(serviceName)];
+    saveCredentialsConfig(config);
+    p.log.success(`Removed credential mapping for ${service.displayName}`);
+  } else {
+    // Set mapping
+    const success = setServiceCredential(String(serviceName), String(credentialName));
+    if (success) {
+      p.log.success(`${service.displayName} will use '${credentialName}' credentials`);
+      
+      // Ask if they want to test
+      const testNow = await p.confirm({
+        message: "Test credential injection now?",
+        initialValue: true,
+      });
+      
+      if (!p.isCancel(testNow) && testNow) {
+        await testSingleServiceCredential(String(serviceName));
+      }
+    }
+  }
+}
+
+/**
+ * Test credentials flow
+ */
+async function testCredentialsFlow(): Promise<void> {
+  const services = loadConfig().services;
+  const servicesWithCreds = services.filter(s => hasCredentials(s.name));
+  
+  console.log();
+  console.log(noumena.purple("  Test Credential Injection"));
+  console.log();
+  
+  if (servicesWithCreds.length === 0) {
+    p.log.warn("No services with credentials configured");
+    return;
+  }
+  
+  const serviceName = await p.select({
+    message: "Test credentials for:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "all", label: noumena.purple("Test all services"), hint: `${servicesWithCreds.length} services` },
+      ...servicesWithCreds.map(s => ({
+        value: s.name,
+        label: s.displayName,
+        hint: getServiceCredential(s.name) || "",
+      })),
+    ],
+  });
+  
+  if (p.isCancel(serviceName) || serviceName === "back") return;
+  
+  if (serviceName === "all") {
+    for (const service of servicesWithCreds) {
+      await testSingleServiceCredential(service.name);
+    }
+  } else {
+    await testSingleServiceCredential(String(serviceName));
+  }
+}
+
+/**
+ * Test a single service's credentials
+ */
+async function testSingleServiceCredential(serviceName: string): Promise<void> {
+  const service = loadConfig().services.find(s => s.name === serviceName);
+  if (!service) return;
+  
+  const s = p.spinner();
+  s.start(`Testing ${service.displayName}...`);
+  
+  try {
+    const result = await testCredentialInjection(serviceName);
+    s.stop(noumena.success(`${service.displayName}: ${result.credentialName}`));
+    
+    const fields = Object.entries(result.injectedFields);
+    for (const [key, value] of fields) {
+      const maskedValue = value.substring(0, 10) + "...";
+      console.log(noumena.textDim(`    ${key}=${maskedValue}`));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim(`${service.displayName}: Failed`));
+    p.log.warn(`${error}`);
+  }
+}
+
+/**
+ * View credentials configuration
+ */
+async function viewCredentialsConfigFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  credentials.yaml"));
+  console.log();
+  
+  try {
+    const configPath = getConfigPath().replace("services.yaml", "credentials.yaml");
+    const content = readFileSync(configPath, "utf-8");
+    console.log(content);
+  } catch {
+    p.log.warn("credentials.yaml not found");
+  }
+  
+  console.log();
+  await p.text({
+    message: "Press Enter to continue...",
+    placeholder: "",
+  });
 }
 
 /**

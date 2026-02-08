@@ -1552,3 +1552,85 @@ export async function syncUserAccessToNpl(userId: string, tools: Record<string, 
     }
   }
 }
+
+// ====================================================================
+// VAULT & CREDENTIAL MANAGEMENT
+// ====================================================================
+
+const VAULT_URL = process.env.VAULT_ADDR || "http://localhost:8200";
+const VAULT_TOKEN = process.env.VAULT_TOKEN || "dev-token";
+
+/**
+ * Store a secret in Vault
+ */
+export async function storeSecretInVault(
+  path: string,
+  data: Record<string, string>
+): Promise<void> {
+  const response = await fetch(`${VAULT_URL}/v1/${path}`, {
+    method: "POST",
+    headers: {
+      "X-Vault-Token": VAULT_TOKEN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ data }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to store secret in Vault: ${response.statusText} - ${error}`);
+  }
+}
+
+/**
+ * Get a secret from Vault
+ */
+export async function getSecretFromVault(path: string): Promise<Record<string, string> | null> {
+  const response = await fetch(`${VAULT_URL}/v1/${path}`, {
+    method: "GET",
+    headers: {
+      "X-Vault-Token": VAULT_TOKEN,
+    },
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to get secret from Vault: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  return result.data?.data || null;
+}
+
+/**
+ * Test credential injection via Credential Proxy
+ */
+export async function testCredentialInjection(
+  serviceName: string,
+  tenantId: string = "default",
+  userId: string = "alice"
+): Promise<{ credentialName: string; injectedFields: Record<string, string> }> {
+  const CREDENTIAL_PROXY_URL = process.env.CREDENTIAL_PROXY_URL || "http://localhost:9002";
+  
+  const response = await fetch(`${CREDENTIAL_PROXY_URL}/inject-credentials`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      service: serviceName,
+      operation: "test",
+      tenantId,
+      userId,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Credential injection test failed: ${response.statusText}`);
+  }
+
+  return await response.json();
+}
