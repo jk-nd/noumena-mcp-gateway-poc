@@ -280,10 +280,12 @@ async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<vo
  * Reset to Defaults - factory reset for the Gateway.
  * 
  * This will:
- * 1. Re-provision Keycloak (runs Terraform)
+ * 1. Re-provision Keycloak (runs Terraform, clears Keycloak DB)
  * 2. Query Keycloak for actual user IDs
  * 3. Restore default services.yaml with actual IDs
- * 4. Import services.yaml to NPL
+ * 4. Reset NPL database (clears all policies and users)
+ * 5. Import services.yaml to NPL
+ * 6. Reload Gateway
  */
 async function resetToDefaultsFlow(): Promise<void> {
   console.log();
@@ -292,7 +294,9 @@ async function resetToDefaultsFlow(): Promise<void> {
   console.log(noumena.textDim("  🔄 Re-provisions Keycloak (Terraform)"));
   console.log(noumena.textDim("  🔍 Queries Keycloak for user IDs"));
   console.log(noumena.textDim("  📄 Restores default services.yaml"));
-  console.log(noumena.textDim("  🔄 Imports services.yaml to NPL"));
+  console.log(noumena.textDim("  🗄️  Resets NPL database"));
+  console.log(noumena.textDim("  📥 Imports services.yaml to NPL"));
+  console.log(noumena.textDim("  🔄 Reloads Gateway"));
   console.log();
   console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will delete all users and configurations!"));
   console.log(noumena.warning("  ⚠  Default users: admin, gateway, jarvis, alice, bob"));
@@ -313,22 +317,43 @@ async function resetToDefaultsFlow(): Promise<void> {
   kcSpinner.start("Re-provisioning Keycloak (Terraform)...");
   
   try {
-    // Remove existing keycloak-provisioning container and volume
+    const deploymentsDir = path.join(process.cwd(), "../deployments");
+    
+    // Stop and remove Keycloak containers
     execSync(
-      "docker compose rm -sf keycloak-provisioning && docker volume rm gateway_keycloak-provisioning 2>/dev/null || true",
+      "docker compose stop keycloak keycloak-db keycloak-provisioning",
       { 
         encoding: "utf-8",
-        cwd: path.join(process.cwd(), "../deployments"),
+        cwd: deploymentsDir,
         stdio: ["pipe", "pipe", "pipe"]
       }
     );
     
-    // Re-run provisioning service (this will re-apply Terraform with env vars from docker-compose.yml)
     execSync(
-      "docker compose up keycloak-provisioning --abort-on-container-exit",
+      "docker compose rm -f keycloak keycloak-db keycloak-provisioning",
       { 
         encoding: "utf-8",
-        cwd: path.join(process.cwd(), "../deployments"),
+        cwd: deploymentsDir,
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    // Remove Keycloak database and provisioning volumes
+    execSync(
+      "docker volume rm gateway_keycloak-db gateway_keycloak-provisioning 2>/dev/null || true",
+      { 
+        encoding: "utf-8",
+        cwd: deploymentsDir,
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    // Re-run Keycloak services (this will re-apply Terraform with env vars from docker-compose.yml)
+    execSync(
+      "docker compose up -d keycloak-db keycloak && sleep 5 && docker compose up keycloak-provisioning --abort-on-container-exit",
+      { 
+        encoding: "utf-8",
+        cwd: deploymentsDir,
         stdio: ["pipe", "pipe", "pipe"]
       }
     );
@@ -336,7 +361,7 @@ async function resetToDefaultsFlow(): Promise<void> {
   } catch (err: any) {
     kcSpinner.stop(noumena.purpleDim("Keycloak provisioning failed"));
     p.log.error(`Error: ${err.message || err}`);
-    p.log.info("Try: cd deployments && docker compose up keycloak-provisioning");
+    p.log.info("Try: cd deployments && docker compose down keycloak keycloak-db && docker volume rm gateway_keycloak-db gateway_keycloak-provisioning && docker compose up -d keycloak-db keycloak && docker compose up keycloak-provisioning");
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
     return;
@@ -403,7 +428,65 @@ async function resetToDefaultsFlow(): Promise<void> {
     return;
   }
 
-  // Step 4: Import services.yaml to NPL
+  // Step 4: Reset NPL database
+  const nplDbSpinner = p.spinner();
+  nplDbSpinner.start("Resetting NPL database...");
+  
+  try {
+    const deploymentsDir = path.join(process.cwd(), "../deployments");
+    
+    // Stop NPL engine and database
+    execSync(
+      "docker compose stop npl-engine engine-db",
+      { 
+        encoding: "utf-8",
+        cwd: deploymentsDir,
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    execSync(
+      "docker compose rm -f npl-engine engine-db",
+      { 
+        encoding: "utf-8",
+        cwd: deploymentsDir,
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    // Remove NPL database volume
+    execSync(
+      "docker volume rm gateway_engine-db 2>/dev/null || true",
+      { 
+        encoding: "utf-8",
+        cwd: deploymentsDir,
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    // Restart NPL services
+    execSync(
+      "docker compose up -d engine-db npl-engine",
+      { 
+        encoding: "utf-8",
+        cwd: deploymentsDir,
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    
+    // Wait for NPL to be healthy
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    
+    nplDbSpinner.stop(noumena.success("NPL database reset"));
+  } catch (err: any) {
+    nplDbSpinner.stop(noumena.purpleDim("NPL reset failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    return;
+  }
+  
+  // Step 5: Import services.yaml to NPL
   const nplSpinner = p.spinner();
   nplSpinner.start("Importing default config to NPL...");
   
@@ -418,7 +501,7 @@ async function resetToDefaultsFlow(): Promise<void> {
     p.log.info("You can retry import from the System menu.");
   }
 
-  // Step 5: Reload Gateway
+  // Step 6: Reload Gateway
   nplSpinner.start("Reloading Gateway...");
   try {
     await reloadGatewayConfig();
