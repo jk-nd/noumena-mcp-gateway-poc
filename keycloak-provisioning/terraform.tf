@@ -24,11 +24,6 @@ resource "keycloak_realm" "master" {
 # MCP Gateway Realm
 # ============================================================================
 
-import {
-  to = keycloak_realm.mcpgateway
-  id = "mcpgateway"
-}
-
 resource "keycloak_realm" "mcpgateway" {
   realm             = "mcpgateway"
   enabled           = true
