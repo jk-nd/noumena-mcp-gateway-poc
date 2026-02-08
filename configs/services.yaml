@@ -1,24 +1,53 @@
-# Gateway Configuration
-# Admins add services and register users via TUI
+# Dynamic MCP Service Configuration
+# This file defines all upstream services and their tools.
+# The Gateway reads this config for tool listing and upstream routing.
 
-services: []
-
+services:
+  - name: "slack"
+    displayName: "Slack"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/slack"
+    args: []
+    requiresCredentials: false
+    description: "Interact with Slack Workspaces over the Slack API."
+    tools:
+      - name: "slack_default"
+        description: "Default tool for slack - run 'Discover tools' to find actual tools"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true
+  - name: "gemini"
+    displayName: "Google Gemini"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-google-gemini"
+    requiresCredentials: true
+    description: "Google Gemini AI API for text generation and chat"
+    tools:
+      - name: "gemini_default"
+        description: "Default tool for gemini - run 'Discover tools' to find actual tools"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true
 user_access:
   default_template:
     enabled: false
     description: "Default access template (disabled - grant explicit per-user access)"
     tools: {}
-  
   users:
     - userId: "jarvis@acme.com"
-      keycloakId: "59d0677b-eeaf-4806-94d4-d3d202b78e79"
+      keycloakId: "e4bf61b7-67c7-44f2-90b4-5fa8b10190c8"
       displayName: "Jarvis AI Agent"
-      createdAt: "2026-02-08T20:03:19.998Z"
-      tools: {}
-      vaultPaths: {}
-    - userId: "alice@acme.com"
-      keycloakId: "6d211e90-5210-4b4d-8fcb-23ead8517d10"
-      displayName: "Alice Chen"
-      createdAt: "2026-02-08T20:03:43.898Z"
-      tools: {}
+      createdAt: "2026-02-08T21:39:38.073Z"
+      tools:
+        slack:
+          - "*"
       vaultPaths: {}
