@@ -40,7 +40,6 @@ services.ToolPolicy:
       claims:
         role:
           - gateway
-          - admin  # Admin can also act as gateway for testing
 
 # ============================================================================
 # USERS PACKAGE - Per-user Access Control (V3)
@@ -69,4 +68,3 @@ users.UserToolAccess:
       claims:
         role:
           - gateway
-          - admin  # Admin can also act as gateway for testing
