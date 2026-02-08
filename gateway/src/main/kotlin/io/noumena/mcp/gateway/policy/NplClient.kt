@@ -363,6 +363,57 @@ class NplClient {
     }
 
     /**
+     * Get all enabled services from NPL ServiceRegistry.
+     * This is the source of truth for which services are available at runtime.
+     * 
+     * @return Set of enabled service names, or empty set if registry unavailable
+     */
+    suspend fun getEnabledServices(): Set<String> {
+        return try {
+            val agentToken = getAgentToken()
+            
+            val listResponse = client.get("$nplUrl/npl/registry/ServiceRegistry/") {
+                header("Authorization", "Bearer $agentToken")
+            }
+
+            if (!listResponse.status.isSuccess()) {
+                logger.warn { "Failed to query ServiceRegistry: ${listResponse.status}" }
+                return emptySet()
+            }
+
+            val responseText = listResponse.bodyAsText()
+            val listBody = Json.parseToJsonElement(responseText).jsonObject
+            val items = listBody["items"]?.jsonArray
+
+            if (items != null && items.isNotEmpty()) {
+                val registry = items[0].jsonObject
+                val enabledServices = registry["enabledServices"]?.jsonArray
+                if (enabledServices != null) {
+                    val services = enabledServices.map { it.jsonPrimitive.content }.toSet()
+                    logger.info { "NPL: Retrieved ${services.size} enabled services from ServiceRegistry" }
+                    return services
+                }
+            }
+            
+            logger.warn { "ServiceRegistry exists but has no enabled services" }
+            emptySet()
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get enabled services from NPL: ${e.message}" }
+            emptySet()
+        }
+    }
+
+    /**
+     * Check if a specific service is enabled in NPL ServiceRegistry.
+     * 
+     * @param serviceName The service name to check
+     * @return true if the service is enabled in NPL
+     */
+    suspend fun isServiceEnabled(serviceName: String): Boolean {
+        return getEnabledServices().contains(serviceName)
+    }
+
+    /**
      * Clear the cached policy IDs and user access IDs (e.g., after NPL bootstrap).
      */
     fun clearCache() {

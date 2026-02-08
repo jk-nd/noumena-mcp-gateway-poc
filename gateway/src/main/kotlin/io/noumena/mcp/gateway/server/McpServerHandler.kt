@@ -37,16 +37,15 @@ class McpServerHandler(
     /**
      * Handle tools/list: aggregate namespaced tools from all enabled services.
      * 
-     * Tools are loaded from services.yaml configuration. Each tool name is
-     * prefixed with the service name (namespace) to avoid collisions.
-     * Only enabled services and enabled tools are returned.
+     * V3 Architecture:
+     * - Queries NPL ServiceRegistry for enabled services (source of truth)
+     * - Reads services.yaml for tool schemas and static config
+     * - Only returns tools from services enabled in NPL
      */
     suspend fun handleToolsList(requestId: JsonElement?, userId: String): String {
-        val configPath = System.getenv("SERVICES_CONFIG_PATH") ?: "/app/configs/services.yaml"
-        
         val namespacedTools = try {
-            ServicesConfigLoader.load(configPath).services
-                .filter { it.enabled }
+            // Use upstreamRouter which queries NPL for enabled state
+            upstreamRouter.getEnabledServices()
                 .flatMap { svc ->
                     svc.tools
                         .filter { it.enabled }
@@ -59,7 +58,7 @@ class McpServerHandler(
 
         logger.info { "Returning ${namespacedTools.size} namespaced tools from ${
             namespacedTools.map { it.first.name }.distinct().size
-        } services" }
+        } services (enabled in NPL)" }
 
         val response = buildJsonObject {
             put("jsonrpc", "2.0")

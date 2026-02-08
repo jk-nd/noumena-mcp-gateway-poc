@@ -367,16 +367,109 @@ async function enableAllToolsInPolicy(
 }
 
 /**
- * Bootstrap NPL: ensure ServiceRegistry, ToolPolicy, and UserRegistry/UserToolAccess instances exist.
+ * Disable a tool in a ToolPolicy instance.
+ */
+async function disableToolInPolicy(
+  token: string,
+  policyId: string,
+  toolName: string
+): Promise<void> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/disableTool`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toolName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to disable tool '${toolName}': ${error}`);
+  }
+}
+
+/**
+ * Get all enabled tools from a ToolPolicy instance.
+ */
+async function getEnabledToolsFromPolicy(
+  token: string,
+  policyId: string
+): Promise<Set<string>> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/getEnabledTools`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    console.error(`Failed to get enabled tools from policy ${policyId}`);
+    return new Set();
+  }
+
+  const result = await response.json();
+  // NPL returns Set as array
+  return new Set(Array.isArray(result) ? result : []);
+}
+
+/**
+ * Get all enabled services from NPL ServiceRegistry.
+ */
+async function getAllEnabledServicesFromNpl(
+  token: string,
+  registryId: string
+): Promise<Set<string>> {
+  const response = await fetch(
+    `${NPL_URL}/npl/registry/ServiceRegistry/${registryId}/getEnabledServices`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    console.error(`Failed to get enabled services from registry`);
+    return new Set();
+  }
+
+  const result = await response.json();
+  // NPL returns Set as array
+  return new Set(Array.isArray(result) ? result : []);
+}
+
+/**
+ * Bootstrap NPL: Sync services.yaml configuration to NPL.
  *
- * V3 Architecture:
+ * IMPORTANT: This is DECLARATIVE sync - NPL will match services.yaml exactly.
+ * - Services, tools, users in YAML → Enabled in NPL
+ * - Services, tools, users NOT in YAML → Disabled/Removed from NPL
+ *
+ * KEYCLOAK NOTE: This does NOT create/delete Keycloak users!
+ * - Keycloak users must exist BEFORE syncing to NPL
+ * - Use Terraform or Keycloak Admin UI to manage Keycloak users separately
+ * - This only syncs NPL permissions for existing Keycloak users
+ *
+ * V3 Architecture Steps:
  *   1. Create ServiceRegistry (if needed)
- *   2. Sync enabled services from services.yaml
+ *   2. Sync services from YAML (enable + disable orphaned)
  *   3. Create ToolPolicy instances per enabled service (if needed)
- *   4. Enable tools in each ToolPolicy based on services.yaml
- *   5. Create UserRegistry (if needed) - NEW
- *   6. Sync users from services.yaml user_access section - NEW
- *   7. Create UserToolAccess per user and grant tools - NEW
+ *   4. Sync tools from YAML (enable + disable orphaned)
+ *   5. Create UserRegistry (if needed)
+ *   6. Sync users from YAML (register + remove orphaned)
+ *   7. Sync user tool access permissions
  */
 export async function bootstrapNpl(): Promise<{
   registryCreated: boolean;
@@ -426,7 +519,9 @@ export async function bootstrapNpl(): Promise<{
   const config = loadConfig();
   const enabledServices = config.services.filter((s) => s.enabled);
   const enabledServiceNames = enabledServices.map((s) => s.name);
+  const configServiceNames = new Set(enabledServiceNames);
 
+  // 2a. Enable services from YAML
   for (const serviceName of enabledServiceNames) {
     try {
       await fetch(
@@ -445,6 +540,27 @@ export async function bootstrapNpl(): Promise<{
     }
   }
 
+  // 2b. Cleanup orphaned services: Disable services in NPL but not in YAML
+  try {
+    const nplServices = await getAllEnabledServicesFromNpl(token, registryId);
+    const orphanedServices = Array.from(nplServices).filter(
+      (serviceName) => !configServiceNames.has(serviceName)
+    );
+
+    for (const orphanedService of orphanedServices) {
+      try {
+        console.log(`Disabling orphaned service in NPL: ${orphanedService}`);
+        await disableServiceInNpl(orphanedService);
+      } catch (error) {
+        console.error(`Failed to disable orphaned service ${orphanedService}:`, error);
+        // Continue with other orphaned services
+      }
+    }
+  } catch (error) {
+    console.error('Failed to cleanup orphaned services:', error);
+    // Not critical - continue
+  }
+
   // 3. Create ToolPolicy instances per enabled service
   const policiesCreated: string[] = [];
 
@@ -458,12 +574,14 @@ export async function bootstrapNpl(): Promise<{
       }
     }
 
-    // 4. Enable tools based on services.yaml
+    // 4. Sync tools based on services.yaml
     if (policyId) {
       const enabledTools = service.tools
         .filter((t) => t.enabled)
         .map((t) => t.name);
+      const configToolNames = new Set(enabledTools);
 
+      // 4a. Enable tools from YAML
       if (enabledTools.length > 0) {
         try {
           await enableAllToolsInPolicy(token, policyId, enabledTools);
@@ -477,6 +595,27 @@ export async function bootstrapNpl(): Promise<{
             }
           }
         }
+      }
+
+      // 4b. Cleanup orphaned tools: Disable tools in NPL but not in YAML
+      try {
+        const nplTools = await getEnabledToolsFromPolicy(token, policyId);
+        const orphanedTools = Array.from(nplTools).filter(
+          (toolName) => !configToolNames.has(toolName)
+        );
+
+        for (const orphanedTool of orphanedTools) {
+          try {
+            console.log(`Disabling orphaned tool in NPL: ${service.name}.${orphanedTool}`);
+            await disableToolInPolicy(token, policyId, orphanedTool);
+          } catch (error) {
+            console.error(`Failed to disable orphaned tool ${orphanedTool}:`, error);
+            // Continue with other orphaned tools
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to cleanup orphaned tools for service ${service.name}:`, error);
+        // Not critical - continue
       }
     }
   }

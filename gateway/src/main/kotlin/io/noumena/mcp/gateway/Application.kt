@@ -165,8 +165,9 @@ fun Application.configureGateway() {
     }
     
     // ─── Upstream infrastructure ─────────────────────────────────────────────
+    val nplClient = io.noumena.mcp.gateway.policy.NplClient()
     val notificationBroadcaster = NotificationBroadcaster()
-    val upstreamRouter = UpstreamRouter()
+    val upstreamRouter = UpstreamRouter(nplClient = nplClient)
     val upstreamSessionManager = UpstreamSessionManager(upstreamRouter, notificationBroadcaster)
     
     // Create MCP Server handler (transparent proxy)
@@ -316,6 +317,9 @@ fun Application.configureGateway() {
                     return@get
                 }
                 
+                // V3 Architecture: Query NPL for enabled services (source of truth)
+                val enabledInNpl = runBlocking { nplClient.getEnabledServices() }
+                
                 val response = buildJsonObject {
                     putJsonArray("services") {
                         config.services.forEach { svc ->
@@ -323,7 +327,10 @@ fun Application.configureGateway() {
                                 put("name", svc.name)
                                 put("displayName", svc.displayName)
                                 put("type", svc.type)
-                                put("enabled", svc.enabled)
+                                // Show both YAML and NPL enabled state
+                                put("enabledInYaml", svc.enabled)
+                                put("enabledInNpl", svc.name in enabledInNpl)
+                                put("enabled", svc.name in enabledInNpl)  // Runtime enabled = NPL
                                 put("description", svc.description)
                                 put("endpoint", svc.endpoint ?: "")
                                 put("toolCount", svc.tools.size)
@@ -340,7 +347,8 @@ fun Application.configureGateway() {
                         }
                     }
                     put("totalServices", config.services.size)
-                    put("enabledServices", config.services.count { it.enabled })
+                    put("enabledServicesInYaml", config.services.count { it.enabled })
+                    put("enabledServicesInNpl", enabledInNpl.size)
                     put("totalTools", config.services.flatMap { it.tools }.size)
                 }
                 
@@ -362,17 +370,29 @@ fun Application.configureGateway() {
                     return@post
                 }
                 
-                logger.info { "Reloading services configuration..." }
+                logger.info { "Reloading services configuration from NPL..." }
+                
+                // V3 Architecture: NPL is source of truth
+                // Clear NPL cache to force fresh query of ServiceRegistry
+                nplClient.clearCache()
+                
+                // Also reload YAML config (in case static config changed)
                 val config = ServicesConfigLoader.reload()
                 
                 // Clear stale upstream sessions so changed services get fresh connections
                 upstreamSessionManager.clearStaleSessions(config)
-                logger.info { "Cleared stale upstream sessions after config reload" }
+                logger.info { "Cleared NPL cache and upstream sessions" }
+                
+                // Query NPL for current enabled services
+                val enabledServicesInNpl = runBlocking { nplClient.getEnabledServices() }
                 
                 val response = buildJsonObject {
                     put("status", "reloaded")
-                    put("servicesLoaded", config.services.size)
-                    put("enabledServices", config.services.count { it.enabled })
+                    put("servicesInYaml", config.services.size)
+                    put("servicesEnabledInNpl", enabledServicesInNpl.size)
+                    putJsonArray("enabledServices") {
+                        enabledServicesInNpl.forEach { add(it) }
+                    }
                 }
                 
                 call.respondText(

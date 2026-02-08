@@ -1,7 +1,9 @@
 package io.noumena.mcp.gateway.upstream
 
+import io.noumena.mcp.gateway.policy.NplClient
 import io.noumena.mcp.shared.config.ServicesConfigLoader
 import io.noumena.mcp.shared.config.ServiceDefinition
+import kotlinx.coroutines.runBlocking
 import mu.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
@@ -15,8 +17,15 @@ private val logger = KotlinLogging.logger {}
  *
  * When forwarding to upstream, the namespace prefix is stripped:
  *   "duckduckgo.search" → upstream receives "search"
+ *
+ * Architecture V3: NPL as Source of Truth
+ *   - services.yaml: Static config (URLs, schemas, commands)
+ *   - NPL ServiceRegistry: Runtime enabled state (source of truth)
+ *   - This router queries NPL to determine which services are enabled
  */
-class UpstreamRouter {
+class UpstreamRouter(
+    private val nplClient: NplClient? = null  // Optional for tests
+) {
 
     private val configPath = System.getenv("SERVICES_CONFIG_PATH") ?: "/app/configs/services.yaml"
 
@@ -41,12 +50,36 @@ class UpstreamRouter {
 
     /**
      * Look up the service definition for a given service name.
-     * Only returns enabled services.
+     * 
+     * V3 Architecture:
+     * - Queries NPL ServiceRegistry for enabled state (source of truth)
+     * - Reads services.yaml for static config (URLs, schemas, commands)
+     * - Only returns services that are enabled in NPL
+     * 
+     * Fallback: If NPL is unavailable, falls back to services.yaml enabled flag
      */
     fun getService(serviceName: String): ServiceDefinition? {
         return try {
-            ServicesConfigLoader.load(configPath).services
-                .find { it.name == serviceName && it.enabled }
+            // Load static config from YAML
+            val allServices = ServicesConfigLoader.load(configPath).services
+            val service = allServices.find { it.name == serviceName } ?: return null
+            
+            // Check if enabled in NPL (source of truth)
+            if (nplClient != null) {
+                val enabledInNpl = runBlocking { nplClient.isServiceEnabled(serviceName) }
+                if (!enabledInNpl) {
+                    logger.debug { "Service '$serviceName' exists in YAML but is not enabled in NPL" }
+                    return null
+                }
+            } else {
+                // Fallback: use YAML enabled flag (for tests or when NPL unavailable)
+                if (!service.enabled) {
+                    logger.debug { "Service '$serviceName' is disabled in YAML (NPL check skipped)" }
+                    return null
+                }
+            }
+            
+            service
         } catch (e: Exception) {
             logger.warn { "Failed to look up service '$serviceName': ${e.message}" }
             null
@@ -55,10 +88,33 @@ class UpstreamRouter {
 
     /**
      * Get all enabled services with their tools.
+     * 
+     * V3 Architecture:
+     * - Queries NPL ServiceRegistry for enabled services (source of truth)
+     * - Reads services.yaml for static config (URLs, schemas, commands)
+     * - Returns intersection: services enabled in NPL AND present in YAML
+     * 
+     * Fallback: If NPL is unavailable, falls back to services.yaml enabled flag
      */
     fun getEnabledServices(): List<ServiceDefinition> {
         return try {
-            ServicesConfigLoader.load(configPath).services.filter { it.enabled }
+            // Load static config from YAML
+            val allServices = ServicesConfigLoader.load(configPath).services
+            
+            // Get enabled services from NPL (source of truth)
+            if (nplClient != null) {
+                val enabledInNpl = runBlocking { nplClient.getEnabledServices() }
+                logger.info { "NPL reports ${enabledInNpl.size} enabled services: $enabledInNpl" }
+                
+                // Return services that are enabled in NPL and present in YAML
+                val enabledServices = allServices.filter { it.name in enabledInNpl }
+                logger.info { "Matched ${enabledServices.size} services from YAML config" }
+                return enabledServices
+            } else {
+                // Fallback: use YAML enabled flag (for tests or when NPL unavailable)
+                logger.debug { "NPL client unavailable, using YAML enabled flags" }
+                return allServices.filter { it.enabled }
+            }
         } catch (e: Exception) {
             logger.warn { "Failed to load services config: ${e.message}" }
             emptyList()

@@ -156,14 +156,16 @@ async function adminLogin(): Promise<boolean> {
 }
 
 /**
- * NPL Sync flow - syncs services.yaml state to NPL Engine (ServiceRegistry, ToolPolicy, UserToolAccess).
+ * NPL Sync flow - DECLARATIVE sync of services.yaml to NPL.
  * 
- * This is an UPDATE/SYNC operation, not overwrite:
- * - Checks if entities exist (creates only if missing)
- * - Syncs enabled services and tools from services.yaml
- * - Syncs user access permissions
- * - Safe to run multiple times
- *
+ * IMPORTANT: This is DECLARATIVE sync - NPL will match services.yaml exactly!
+ * - Services, tools, users IN YAML → Enabled/Registered in NPL
+ * - Services, tools, users NOT IN YAML → Disabled/Removed from NPL
+ * 
+ * KEYCLOAK SEPARATION: This does NOT create/delete Keycloak users!
+ * - Keycloak users must be managed separately (Terraform or Keycloak Admin UI)
+ * - This only syncs NPL permissions for existing Keycloak users
+ * 
  * V3 Architecture:
  *   1. ServiceRegistry — tracks which services are enabled
  *   2. ToolPolicy (per service) — per-tool access control (global)
@@ -172,9 +174,14 @@ async function adminLogin(): Promise<boolean> {
  */
 async function nplBootstrapFlow(): Promise<void> {
   console.log();
-  console.log(noumena.purple("  Sync NPL"));
-  console.log(noumena.textDim("  Syncs services, tools, and user access from services.yaml to NPL Engine."));
-  console.log(noumena.textDim("  This is an UPDATE operation - it won't overwrite existing data, only syncs changes."));
+  console.log(noumena.purple("  Sync NPL (Declarative)"));
+  console.log();
+  console.log(noumena.textDim("  📄 services.yaml is the source of truth"));
+  console.log(noumena.textDim("  ✅ Enables services/tools/users from YAML"));
+  console.log(noumena.textDim("  🧹 Disables services/tools not in YAML"));
+  console.log(noumena.textDim("  🧹 Removes users not in YAML"));
+  console.log();
+  console.log(noumena.warning("  ⚠  DOES NOT touch Keycloak - only syncs NPL permissions!"));
   console.log();
 
   const s = p.spinner();
@@ -458,7 +465,7 @@ async function mainMenu(): Promise<boolean> {
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
     { value: "viewconfig", label: "  View services.yaml", hint: "Show current configuration" },
     { value: "editconfig", label: "  Edit services.yaml", hint: `Opens ${process.env.EDITOR || "nano"}` },
-    { value: "bootstrap", label: `  Sync NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: nplReady ? "NPL synced" : "Sync services.yaml → NPL" },
+    { value: "bootstrap", label: `  Sync NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: nplReady ? "NPL synced with services.yaml" : "Declarative sync: services.yaml → NPL (DOES NOT touch Keycloak)" },
     { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Config changed — reload needed" : "Up to date" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
@@ -1766,8 +1773,11 @@ async function userManagementFlow(): Promise<void> {
     console.log();
     console.log(noumena.purple("  User Management"));
     console.log(noumena.textDim(`  ${localUsers.length} user(s) configured in services.yaml`));
+    console.log();
+    console.log(noumena.textDim("  💡 Keycloak: Identity (who you are) | NPL: Authorization (what you can do)"));
+    console.log(noumena.textDim("  • KC = registered in Keycloak | NPL = registered in NPL"));
     if (keycloakError) {
-      console.log(noumena.warning(`  Keycloak error: ${keycloakError.substring(0, 60)}`));
+      console.log(noumena.warning(`  ⚠ Keycloak error: ${keycloakError.substring(0, 60)}`));
     }
     console.log();
 
@@ -1794,7 +1804,7 @@ async function userManagementFlow(): Promise<void> {
     const allOptions: { value: string; label: string; hint?: string }[] = [
       { value: "back", label: noumena.textDim("← Back") },
       ...userOptions,
-      { value: "create", label: noumena.purple("+ Create new user"), hint: "Create in Keycloak" },
+      { value: "create", label: noumena.purple("+ Create new user"), hint: "Create in Keycloak + register in NPL + add to services.yaml" },
     ];
 
     const action = await p.select({
@@ -1968,7 +1978,7 @@ async function userActionsFlow(user: UserToolAccess): Promise<void> {
       { value: "back", label: noumena.textDim("← Back") },
       { value: "tools", label: "Edit tool access", hint: "Grant/revoke tools" },
       { value: "view", label: "View all access", hint: "Show detailed permissions" },
-      { value: "delete", label: noumena.purpleDim("Delete user"), hint: "Remove from Keycloak and NPL" },
+      { value: "delete", label: noumena.purpleDim("Delete user"), hint: "Remove from Keycloak + NPL + services.yaml" },
     ],
   });
 
