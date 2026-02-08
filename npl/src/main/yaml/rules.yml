@@ -4,11 +4,11 @@
 # Party names use 'p' prefix to distinguish from JWT claim roles.
 #
 # Hierarchy:
-# - pAdmin: Organization administrators (full control)
-# - pAgent: AI agents / Gateway (tool invocation, policy checks)
+# - pAdmin: Organization administrators (policy management)
+# - pGateway: Gateway system service (runtime policy enforcement)
 #
-# Note: Gateway uses built-in NPL 'observers' mechanism for read access.
-# Admin adds Gateway as observer via addObserver permission.
+# Note: Tool users (humans and AI) are NOT parties. They're governed by
+# UserToolAccess protocol instances identified by userId parameter.
 
 # ============================================================================
 # REGISTRY PACKAGE - Service Management
@@ -26,7 +26,7 @@ registry.ServiceRegistry:
 # SERVICES PACKAGE - Tool Governance
 # ============================================================================
 
-# Per-service ToolPolicy (V2 architecture)
+# Per-service ToolPolicy (service-level governance)
 services.ToolPolicy:
   # Admin creates instances, enables/disables tools
   pAdmin:
@@ -34,13 +34,13 @@ services.ToolPolicy:
       claims:
         role:
           - admin
-  # Agent checks access before forwarding to upstream
-  pAgent:
+  # Gateway system service checks access at runtime
+  pGateway:
     set:
       claims:
         role:
-          - agent
-          - admin  # Admin can also act as agent
+          - gateway
+          - admin  # Admin can also act as gateway for testing
 
 # ============================================================================
 # USERS PACKAGE - Per-user Access Control (V3)
@@ -54,25 +54,19 @@ users.UserRegistry:
         role:
           - admin
 
-# UserToolAccess — per-user/agent tool access control
+# UserToolAccess — per-tool-user access control (user-level governance)
+# Note: Tool users (humans/AI) are NOT parties - they're identified by userId parameter
 users.UserToolAccess:
-  # Admin creates instances and grants/revokes tools
+  # Admin creates instances and grants/revokes tools via TUI/API
   pAdmin:
     set:
       claims:
         role:
           - admin
-  # The user this protocol controls (all authenticated users can be pUser)
-  pUser:
-    set:
-      claims:
-        role:
-          - user
-          - admin  # Admin can also act as user for management
-  # Gateway checks access before routing tool calls
+  # Gateway system service enforces access at runtime
   pGateway:
     set:
       claims:
         role:
-          - agent
+          - gateway
           - admin  # Admin can also act as gateway for testing
