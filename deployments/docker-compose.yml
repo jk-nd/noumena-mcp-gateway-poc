@@ -138,6 +138,7 @@ services:
     command: /local.sh
     volumes:
       - keycloak-provisioning:/state
+      - ../configs:/configs  # Mount configs to sync user IDs to services.yaml
     environment:
       KEYCLOAK_USER: admin
       KEYCLOAK_PASSWORD: welcome
