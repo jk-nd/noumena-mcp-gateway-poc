@@ -22,7 +22,6 @@ data class UserIdentity(
     fun hasRole(role: String): Boolean = roles.contains(role)
     fun isAdmin(): Boolean = hasRole("admin")
     fun isAgent(): Boolean = hasRole("agent")
-    fun isExecutor(): Boolean = hasRole("executor")
 }
 
 /**

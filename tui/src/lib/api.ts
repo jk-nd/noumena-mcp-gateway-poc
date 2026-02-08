@@ -1,5 +1,11 @@
 /**
- * API client for interacting with the MCP Gateway and NPL Engine
+ * API client for interacting with the MCP Gateway and NPL Engine.
+ *
+ * V2 Architecture:
+ *   - ServiceRegistry: tracks which services exist
+ *   - ToolPolicy (per-service): governs tool-level access
+ *   - No more ToolExecutionPolicy (legacy, kept for migration)
+ *   - No more executor references
  */
 
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://localhost:8000";
@@ -39,7 +45,6 @@ export interface ServicesResponse {
 
 /**
  * Build authorization headers using the cached admin token.
- * Falls back to empty headers if not logged in (for health check etc.).
  */
 async function authHeaders(): Promise<Record<string, string>> {
   try {
@@ -99,7 +104,7 @@ export async function checkGatewayHealth(): Promise<boolean> {
 }
 
 /**
- * Call an MCP tool via the Gateway
+ * Call an MCP tool via the Gateway (using namespaced tool names)
  */
 export async function callTool(
   toolName: string,
@@ -129,12 +134,10 @@ export async function callTool(
 
 /**
  * Set admin credentials for the TUI session (stored in memory only).
- * Must be called before any NPL operations.
  */
 export function setAdminCredentials(username: string, password: string): void {
   adminUsername = username;
   adminPassword = password;
-  // Invalidate cached token so next call uses new credentials
   cachedToken = null;
   tokenExpiry = 0;
 }
@@ -148,14 +151,12 @@ export function hasAdminCredentials(): boolean {
 
 /**
  * Get access token from Keycloak using stored admin credentials.
- * Credentials must be set via setAdminCredentials() first (i.e., after login).
  */
 export async function getKeycloakToken(): Promise<string> {
   if (!adminUsername || !adminPassword) {
     throw new Error("Admin credentials not set. Please log in first.");
   }
 
-  // Return cached token if still valid (with 60s buffer)
   if (cachedToken && Date.now() < tokenExpiry - 60000) {
     return cachedToken;
   }
@@ -188,7 +189,6 @@ export async function getKeycloakToken(): Promise<string> {
 
 /**
  * Validate admin credentials by attempting to get a token.
- * Returns true if the credentials are valid.
  */
 export async function validateCredentials(
   username: string,
@@ -217,12 +217,11 @@ export async function validateCredentials(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NPL Engine API (admin operations - credentials required)
+// NPL Engine API (admin operations)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Find ServiceRegistry protocol instance in NPL.
- * Uses the correct Noumena engine API path: /npl/{package}/{Protocol}/
  */
 async function findServiceRegistry(token: string): Promise<string | null> {
   try {
@@ -236,12 +235,9 @@ async function findServiceRegistry(token: string): Promise<string | null> {
       }
     );
 
-    if (!response.ok) {
-      return null;
-    }
+    if (!response.ok) return null;
 
     const text = await response.text();
-    // NPL engine may include control characters - strip them
     const clean = text.replace(/[\x00-\x1f]/g, "");
     const data = JSON.parse(clean);
     if (data.items && data.items.length > 0) {
@@ -255,54 +251,236 @@ async function findServiceRegistry(token: string): Promise<string | null> {
 }
 
 /**
- * Find ToolExecutionPolicy protocol instance in NPL.
+ * Find ToolPolicy instance for a specific service.
  */
-async function findToolExecutionPolicy(token: string): Promise<string | null> {
+async function findToolPolicyForService(
+  token: string,
+  serviceName: string
+): Promise<string | null> {
   try {
-    const response = await fetch(
-      `${NPL_URL}/npl/services/ToolExecutionPolicy/`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json",
-        },
-      }
-    );
+    const response = await fetch(`${NPL_URL}/npl/services/ToolPolicy/`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+    });
 
-    if (!response.ok) {
-      return null;
-    }
+    if (!response.ok) return null;
 
     const text = await response.text();
     const clean = text.replace(/[\x00-\x1f]/g, "");
     const data = JSON.parse(clean);
-    if (data.items && data.items.length > 0) {
-      return data.items[0]["@id"] || null;
+    if (data.items) {
+      for (const item of data.items) {
+        if (item.policyServiceName === serviceName) {
+          return item["@id"] || null;
+        }
+      }
     }
   } catch {
-    // ToolExecutionPolicy may not exist
+    // ToolPolicy may not exist
   }
 
   return null;
 }
 
 /**
- * Bootstrap NPL: ensure ServiceRegistry and ToolExecutionPolicy exist,
- * and sync enabled services from services.yaml.
- * 
- * This is an admin operation - requires admin credentials.
- * Returns a summary of what was created/found.
+ * Create a ToolPolicy instance for a service.
+ */
+async function createToolPolicy(
+  token: string,
+  serviceName: string
+): Promise<string | null> {
+  const createPayload = {
+    "@parties": {},  // Let rules.yml auto-assign based on JWT
+    policyServiceName: serviceName,
+  };
+
+  const response = await fetch(`${NPL_URL}/npl/services/ToolPolicy/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(createPayload),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to create ToolPolicy for '${serviceName}': ${error}`);
+  }
+
+  const data = await response.json();
+  return data["@id"] || null;
+}
+
+/**
+ * Enable a tool in a ToolPolicy instance.
+ */
+async function enableToolInPolicy(
+  token: string,
+  policyId: string,
+  toolName: string
+): Promise<void> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/enableTool`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toolName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to enable tool '${toolName}': ${error}`);
+  }
+}
+
+/**
+ * Enable all tools in a ToolPolicy instance.
+ */
+async function enableAllToolsInPolicy(
+  token: string,
+  policyId: string,
+  toolNames: string[]
+): Promise<void> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/enableAllTools`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toolNames }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to enable tools: ${error}`);
+  }
+}
+
+/**
+ * Disable a tool in a ToolPolicy instance.
+ */
+async function disableToolInPolicy(
+  token: string,
+  policyId: string,
+  toolName: string
+): Promise<void> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/disableTool`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toolName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to disable tool '${toolName}': ${error}`);
+  }
+}
+
+/**
+ * Get all enabled tools from a ToolPolicy instance.
+ */
+async function getEnabledToolsFromPolicy(
+  token: string,
+  policyId: string
+): Promise<Set<string>> {
+  const response = await fetch(
+    `${NPL_URL}/npl/services/ToolPolicy/${policyId}/getEnabledTools`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    console.error(`Failed to get enabled tools from policy ${policyId}`);
+    return new Set();
+  }
+
+  const result = await response.json();
+  // NPL returns Set as array
+  return new Set(Array.isArray(result) ? result : []);
+}
+
+/**
+ * Get all enabled services from NPL ServiceRegistry.
+ */
+async function getAllEnabledServicesFromNpl(
+  token: string,
+  registryId: string
+): Promise<Set<string>> {
+  const response = await fetch(
+    `${NPL_URL}/npl/registry/ServiceRegistry/${registryId}/getEnabledServices`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    console.error(`Failed to get enabled services from registry`);
+    return new Set();
+  }
+
+  const result = await response.json();
+  // NPL returns Set as array
+  return new Set(Array.isArray(result) ? result : []);
+}
+
+/**
+ * Bootstrap NPL: Sync services.yaml configuration to NPL.
+ *
+ * IMPORTANT: This is DECLARATIVE sync - NPL will match services.yaml exactly.
+ * - Services, tools, users in YAML → Enabled in NPL
+ * - Services, tools, users NOT in YAML → Disabled/Removed from NPL
+ *
+ * KEYCLOAK NOTE: This does NOT create/delete Keycloak users!
+ * - Keycloak users must exist BEFORE syncing to NPL
+ * - Use Terraform or Keycloak Admin UI to manage Keycloak users separately
+ * - This only syncs NPL permissions for existing Keycloak users
+ *
+ * V3 Architecture Steps:
+ *   1. Create ServiceRegistry (if needed)
+ *   2. Sync services from YAML (enable + disable orphaned)
+ *   3. Create ToolPolicy instances per enabled service (if needed)
+ *   4. Sync tools from YAML (enable + disable orphaned)
+ *   5. Create UserRegistry (if needed)
+ *   6. Sync users from YAML (register + remove orphaned)
+ *   7. Sync user tool access permissions
  */
 export async function bootstrapNpl(): Promise<{
   registryCreated: boolean;
-  policyCreated: boolean;
+  policiesCreated: string[];
   registryId: string;
-  policyId: string;
   servicesEnabled: string[];
+  userRegistryCreated: boolean;
+  usersSynced: string[];
 }> {
   const token = await getKeycloakToken();
-  const gatewayUrl = process.env.GATEWAY_URL || "http://gateway:8080";
-  
+
   // 1. Ensure ServiceRegistry exists
   let registryId = await findServiceRegistry(token);
   let registryCreated = false;
@@ -316,7 +494,9 @@ export async function bootstrapNpl(): Promise<{
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ "@parties": {} }),
+        body: JSON.stringify({ 
+          "@parties": {}  // Let rules.yml auto-assign based on JWT
+        }),
       }
     );
 
@@ -337,9 +517,12 @@ export async function bootstrapNpl(): Promise<{
   // 2. Sync enabled services from services.yaml into ServiceRegistry
   const { loadConfig } = await import("./config.js");
   const config = loadConfig();
-  const enabledServices = config.services.filter(s => s.enabled).map(s => s.name);
-  
-  for (const serviceName of enabledServices) {
+  const enabledServices = config.services.filter((s) => s.enabled);
+  const enabledServiceNames = enabledServices.map((s) => s.name);
+  const configServiceNames = new Set(enabledServiceNames);
+
+  // 2a. Enable services from YAML
+  for (const serviceName of enabledServiceNames) {
     try {
       await fetch(
         `${NPL_URL}/npl/registry/ServiceRegistry/${registryId}/enableService`,
@@ -353,66 +536,165 @@ export async function bootstrapNpl(): Promise<{
         }
       );
     } catch {
-      // Service may already be enabled - ignore
+      // Service may already be enabled
     }
   }
 
-  // 3. Ensure ToolExecutionPolicy exists
-  let policyId = await findToolExecutionPolicy(token);
-  let policyCreated = false;
-
-  if (!policyId) {
-    const createPayload = {
-      "@parties": {},  // Let rules.yml handle party assignment
-      registry: registryId,
-      policyTenantId: "default",
-      policyGatewayUrl: gatewayUrl,
-    };
-
-    const createResponse = await fetch(
-      `${NPL_URL}/npl/services/ToolExecutionPolicy/`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(createPayload),
-      }
+  // 2b. Cleanup orphaned services: Disable services in NPL but not in YAML
+  try {
+    const nplServices = await getAllEnabledServicesFromNpl(token, registryId);
+    const orphanedServices = Array.from(nplServices).filter(
+      (serviceName) => !configServiceNames.has(serviceName)
     );
 
-    if (!createResponse.ok) {
-      const error = await createResponse.text();
-      throw new Error(`Failed to create ToolExecutionPolicy: ${error}`);
+    for (const orphanedService of orphanedServices) {
+      try {
+        console.log(`Disabling orphaned service in NPL: ${orphanedService}`);
+        await disableServiceInNpl(orphanedService);
+      } catch (error) {
+        console.error(`Failed to disable orphaned service ${orphanedService}:`, error);
+        // Continue with other orphaned services
+      }
     }
-
-    const createData = await createResponse.json();
-    policyId = createData["@id"];
-    policyCreated = true;
+  } catch (error) {
+    console.error('Failed to cleanup orphaned services:', error);
+    // Not critical - continue
   }
 
-  if (!policyId) {
-    throw new Error("Failed to obtain ToolExecutionPolicy ID");
+  // 3. Create ToolPolicy instances per enabled service
+  const policiesCreated: string[] = [];
+
+  for (const service of enabledServices) {
+    let policyId = await findToolPolicyForService(token, service.name);
+
+    if (!policyId) {
+      policyId = await createToolPolicy(token, service.name);
+      if (policyId) {
+        policiesCreated.push(service.name);
+      }
+    }
+
+    // 4. Sync tools based on services.yaml
+    if (policyId) {
+      const enabledTools = service.tools
+        .filter((t) => t.enabled)
+        .map((t) => t.name);
+      const configToolNames = new Set(enabledTools);
+
+      // 4a. Enable tools from YAML
+      if (enabledTools.length > 0) {
+        try {
+          await enableAllToolsInPolicy(token, policyId, enabledTools);
+        } catch {
+          // Try one by one as fallback
+          for (const toolName of enabledTools) {
+            try {
+              await enableToolInPolicy(token, policyId, toolName);
+            } catch {
+              // Tool may already be enabled
+            }
+          }
+        }
+      }
+
+      // 4b. Cleanup orphaned tools: Disable tools in NPL but not in YAML
+      try {
+        const nplTools = await getEnabledToolsFromPolicy(token, policyId);
+        const orphanedTools = Array.from(nplTools).filter(
+          (toolName) => !configToolNames.has(toolName)
+        );
+
+        for (const orphanedTool of orphanedTools) {
+          try {
+            console.log(`Disabling orphaned tool in NPL: ${service.name}.${orphanedTool}`);
+            await disableToolInPolicy(token, policyId, orphanedTool);
+          } catch (error) {
+            console.error(`Failed to disable orphaned tool ${orphanedTool}:`, error);
+            // Continue with other orphaned tools
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to cleanup orphaned tools for service ${service.name}:`, error);
+        // Not critical - continue
+      }
+    }
+  }
+
+  // 5. Ensure UserRegistry exists
+  let userRegistryId = await findUserRegistry(token);
+  let userRegistryCreated = false;
+
+  if (!userRegistryId) {
+    userRegistryId = await createUserRegistry(token);
+    userRegistryCreated = true;
+  }
+
+  // 6. Sync users from services.yaml user_access section
+  const usersSynced: string[] = [];
+  const users = config.user_access?.users || [];
+  const configUserIds = new Set(users.map(u => u.userId));
+
+  for (const user of users) {
+    try {
+      // Register user in UserRegistry (if not already)
+      await registerUserInNpl(user.userId);
+
+      // Sync tool access
+      await syncUserAccessToNpl(user.userId, user.tools);
+      usersSynced.push(user.userId);
+    } catch (error) {
+      console.error(`Failed to sync user ${user.userId}:`, error);
+      // Continue with other users
+    }
+  }
+
+  // 7. Cleanup orphaned users: Remove users in NPL but not in services.yaml
+  try {
+    const nplUsers = await getAllUsersFromNpl(token);
+    const orphanedUsers = nplUsers.filter(userId => !configUserIds.has(userId));
+    
+    for (const orphanedUser of orphanedUsers) {
+      try {
+        console.log(`Removing orphaned user from NPL: ${orphanedUser}`);
+        await removeUserFromNpl(orphanedUser);
+        
+        // Also delete their UserToolAccess instance
+        const accessId = await findUserToolAccess(token, orphanedUser);
+        if (accessId) {
+          // Delete the protocol instance
+          await fetch(`${NPL_URL}/npl/users/UserToolAccess/${accessId}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to remove orphaned user ${orphanedUser}:`, error);
+        // Continue with other orphaned users
+      }
+    }
+  } catch (error) {
+    console.error('Failed to cleanup orphaned users:', error);
+    // Not critical - continue
   }
 
   return {
     registryCreated,
-    policyCreated,
+    policiesCreated,
     registryId,
-    policyId,
-    servicesEnabled: enabledServices,
+    servicesEnabled: enabledServiceNames,
+    userRegistryCreated,
+    usersSynced,
   };
 }
 
 /**
- * Check if NPL has been bootstrapped (ServiceRegistry + ToolExecutionPolicy exist).
+ * Check if NPL has been bootstrapped (ServiceRegistry exists).
  */
 export async function isNplBootstrapped(): Promise<boolean> {
   try {
     const token = await getKeycloakToken();
     const registryId = await findServiceRegistry(token);
-    const policyId = await findToolExecutionPolicy(token);
-    return registryId !== null && policyId !== null;
+    return registryId !== null;
   } catch {
     return false;
   }
@@ -478,13 +760,26 @@ export async function disableServiceInNpl(serviceName: string): Promise<void> {
 
 /**
  * Sync a service's enabled state with NPL ServiceRegistry
+ * When enabling, also creates ToolPolicy if it doesn't exist
  */
 export async function syncServiceWithNpl(
   serviceName: string,
   enabled: boolean
 ): Promise<void> {
   if (enabled) {
+    // Enable in ServiceRegistry
     await enableServiceInNpl(serviceName);
+    
+    // Create ToolPolicy if it doesn't exist (required for tool management)
+    const token = await getKeycloakToken();
+    let policyId = await findToolPolicyForService(token, serviceName);
+    
+    if (!policyId) {
+      policyId = await createToolPolicy(token, serviceName);
+      console.log(`[syncServiceWithNpl] Created ToolPolicy for ${serviceName}: ${policyId}`);
+    } else {
+      console.log(`[syncServiceWithNpl] ToolPolicy already exists for ${serviceName}: ${policyId}`);
+    }
   } else {
     await disableServiceInNpl(serviceName);
   }
@@ -515,11 +810,13 @@ export async function discoverMcpServers(
   const response = await fetch(
     `https://hub.docker.com/v2/repositories/mcp/?page_size=${limit}`
   );
-  
+
   if (!response.ok) {
-    throw new Error(`Docker Hub API error: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Docker Hub API error: ${response.status} ${response.statusText}`
+    );
   }
-  
+
   const data = await response.json();
   let servers: McpServerInfo[] = (data.results || []).map((repo: any) => ({
     name: repo.name,
@@ -528,8 +825,7 @@ export async function discoverMcpServers(
     pullCount: repo.pull_count || 0,
     lastUpdated: repo.last_updated || "",
   }));
-  
-  // Filter by query if provided
+
   if (query) {
     const q = query.toLowerCase();
     servers = servers.filter(
@@ -538,10 +834,9 @@ export async function discoverMcpServers(
         s.description.toLowerCase().includes(q)
     );
   }
-  
-  // Sort by pull count (popularity)
+
   servers.sort((a, b) => b.pullCount - a.pullCount);
-  
+
   return servers;
 }
 
@@ -555,11 +850,11 @@ export async function getMcpServerDetails(
     const response = await fetch(
       `https://hub.docker.com/v2/repositories/mcp/${serverName}/`
     );
-    
+
     if (!response.ok) {
       return null;
     }
-    
+
     const repo = await response.json();
     return {
       name: repo.name,
@@ -595,12 +890,11 @@ export interface ContainerStatus {
  */
 export function getContainerStatus(imageName: string): ContainerStatus {
   try {
-    // Check for running containers with this image
     const output = execSync(
       `docker ps --filter "ancestor=${imageName}" --format "{{.ID}}|{{.Names}}|{{.Status}}"`,
       { encoding: "utf-8", timeout: 5000 }
     ).trim();
-    
+
     if (output) {
       const [id, name, status] = output.split("|");
       return {
@@ -610,7 +904,7 @@ export function getContainerStatus(imageName: string): ContainerStatus {
         status: status,
       };
     }
-    
+
     return { running: false };
   } catch (error) {
     return { running: false };
@@ -619,7 +913,6 @@ export function getContainerStatus(imageName: string): ContainerStatus {
 
 /**
  * Start a Docker container for an MCP service
- * Returns the container ID if successful
  */
 export function startContainer(
   imageName: string,
@@ -627,55 +920,69 @@ export function startContainer(
   options: { env?: Record<string, string>; ports?: string[] } = {}
 ): { success: boolean; containerId?: string; error?: string } {
   try {
-    // Remove any existing stopped container with the same name
     try {
-      execSync(`docker rm ${containerName} 2>/dev/null`, { encoding: "utf-8", timeout: 5000 });
+      execSync(`docker rm ${containerName} 2>/dev/null`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
     } catch {
-      // Container doesn't exist or is running - that's fine
+      // Container doesn't exist or is running
     }
 
-    // Build docker run command
-    // MCP STDIO servers need -i for stdin
     let cmd = `docker run -d -i --name ${containerName} --restart unless-stopped`;
-    
-    // Add environment variables
+
     if (options.env) {
       for (const [key, value] of Object.entries(options.env)) {
         cmd += ` -e ${key}="${value}"`;
       }
     }
-    
-    // Add port mappings
+
     if (options.ports) {
       for (const port of options.ports) {
         cmd += ` -p ${port}`;
       }
     }
-    
+
     cmd += ` ${imageName}`;
-    
-    const containerId = execSync(cmd, { encoding: "utf-8", timeout: 30000 }).trim();
-    
+
+    const containerId = execSync(cmd, {
+      encoding: "utf-8",
+      timeout: 30000,
+    }).trim();
+
     return { success: true, containerId };
   } catch (error: any) {
-    // Check if container already exists and is running
     if (error.message?.includes("is already in use")) {
       return { success: false, error: "Container is already running." };
     }
-    return { success: false, error: error.message || "Failed to start container" };
+    return {
+      success: false,
+      error: error.message || "Failed to start container",
+    };
   }
 }
 
 /**
  * Stop a running Docker container
  */
-export function stopContainer(containerIdOrName: string): { success: boolean; error?: string } {
+export function stopContainer(
+  containerIdOrName: string
+): { success: boolean; error?: string } {
   try {
-    execSync(`docker stop ${containerIdOrName}`, { encoding: "utf-8", timeout: 30000 });
-    execSync(`docker rm ${containerIdOrName}`, { encoding: "utf-8", timeout: 10000 });
+    execSync(`docker stop ${containerIdOrName}`, {
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+    execSync(`docker rm ${containerIdOrName}`, {
+      encoding: "utf-8",
+      timeout: 10000,
+    });
     return { success: true };
   } catch (error: any) {
-    return { success: false, error: error.message || "Failed to stop container" };
+    return {
+      success: false,
+      error: error.message || "Failed to stop container",
+    };
   }
 }
 
@@ -684,7 +991,10 @@ export function stopContainer(containerIdOrName: string): { success: boolean; er
  */
 export function imageExists(imageName: string): boolean {
   try {
-    const output = execSync(`docker images -q ${imageName}`, { encoding: "utf-8", timeout: 5000 }).trim();
+    const output = execSync(`docker images -q ${imageName}`, {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
     return output.length > 0;
   } catch (error) {
     return false;
@@ -694,9 +1004,15 @@ export function imageExists(imageName: string): boolean {
 /**
  * Pull a Docker image
  */
-export function pullImage(imageName: string): { success: boolean; error?: string } {
+export function pullImage(
+  imageName: string
+): { success: boolean; error?: string } {
   try {
-    execSync(`docker pull ${imageName}`, { encoding: "utf-8", stdio: "inherit", timeout: 300000 });
+    execSync(`docker pull ${imageName}`, {
+      encoding: "utf-8",
+      stdio: "inherit",
+      timeout: 300000,
+    });
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message || "Failed to pull image" };
@@ -722,7 +1038,6 @@ export interface DiscoveredTool {
 
 /**
  * Discover tools from an MCP container by running it and querying via STDIO.
- * Sends initialize + notifications/initialized + tools/list, then parses the response.
  */
 export function discoverToolsFromContainer(imageName: string): {
   success: boolean;
@@ -731,7 +1046,6 @@ export function discoverToolsFromContainer(imageName: string): {
   error?: string;
 } {
   try {
-    // Build the MCP JSON-RPC messages to send via stdin
     const initMsg = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
@@ -755,8 +1069,6 @@ export function discoverToolsFromContainer(imageName: string): {
       params: {},
     });
 
-    // Use a shell script to send the messages with small delays
-    // The container reads from stdin and writes responses to stdout
     const script = `(echo '${initMsg}'; sleep 1; echo '${initializedMsg}'; sleep 0.5; echo '${toolsListMsg}') | docker run -i --rm ${imageName} 2>/dev/null`;
 
     const output = execSync(script, {
@@ -769,7 +1081,6 @@ export function discoverToolsFromContainer(imageName: string): {
       return { success: false, tools: [], error: "No output from container" };
     }
 
-    // Parse the output - each line is a JSON-RPC response
     const lines = output.split("\n").filter((l) => l.trim().length > 0);
 
     let serverInfo: { name: string; version: string } | undefined;
@@ -779,7 +1090,6 @@ export function discoverToolsFromContainer(imageName: string): {
       try {
         const response = JSON.parse(line);
 
-        // Check for initialize response (id: 1)
         if (response.id === 1 && response.result?.serverInfo) {
           serverInfo = {
             name: response.result.serverInfo.name || "unknown",
@@ -787,7 +1097,6 @@ export function discoverToolsFromContainer(imageName: string): {
           };
         }
 
-        // Check for tools/list response (id: 2)
         if (response.id === 2 && response.result?.tools) {
           tools = response.result.tools.map((tool: any) => ({
             name: tool.name,
@@ -800,7 +1109,6 @@ export function discoverToolsFromContainer(imageName: string): {
           }));
         }
       } catch {
-        // Skip lines that aren't valid JSON
         continue;
       }
     }
@@ -809,7 +1117,11 @@ export function discoverToolsFromContainer(imageName: string): {
   } catch (error: any) {
     const msg = error.message || "Unknown error";
     if (msg.includes("timed out")) {
-      return { success: false, tools: [], error: "Container timed out (30s)" };
+      return {
+        success: false,
+        tools: [],
+        error: "Container timed out (30s)",
+      };
     }
     return { success: false, tools: [], error: msg.substring(0, 200) };
   }
@@ -823,7 +1135,6 @@ export function discoveredToToolDefinitions(
   enabled: boolean = false
 ): ToolDefinition[] {
   return discovered.map((tool) => {
-    // Convert properties to PropertySchema format
     const properties: Record<string, PropertySchema> = {};
     if (tool.inputSchema?.properties) {
       for (const [key, value] of Object.entries(tool.inputSchema.properties)) {
@@ -845,4 +1156,752 @@ export function discoveredToToolDefinitions(
       enabled,
     };
   });
+}
+
+// ============================================================================
+// Keycloak User Management
+// ============================================================================
+
+// The admin user in the mcpgateway realm has realm-management roles,
+// so the regular login token works for Keycloak Admin REST API calls too.
+// No separate master realm authentication needed.
+
+/**
+ * Keycloak user representation
+ */
+export interface KeycloakUser {
+  id?: string;
+  username: string;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  enabled?: boolean;
+  emailVerified?: boolean;
+  attributes?: Record<string, string[]>;
+  createdTimestamp?: number;
+}
+
+/**
+ * Get a token for the Keycloak Admin REST API.
+ * The admin user in the mcpgateway realm has realm-management roles,
+ * so the regular login token works for admin API calls too.
+ * No separate master realm authentication needed.
+ */
+async function getKeycloakAdminToken(): Promise<string> {
+  if (!cachedToken) {
+    throw new Error("Not logged in. Please log in first.");
+  }
+  return cachedToken;
+}
+
+/**
+ * Get Keycloak admin API base URL
+ */
+function getKeycloakAdminUrl(): string {
+  return `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}`;
+}
+
+/**
+ * List all users in Keycloak
+ */
+export async function listKeycloakUsers(): Promise<KeycloakUser[]> {
+  const token = await getKeycloakAdminToken();
+  const response = await fetch(`${getKeycloakAdminUrl()}/users?max=100`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list users (${response.status}): ${response.statusText}`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Get a specific user by ID
+ */
+export async function getKeycloakUser(userId: string): Promise<KeycloakUser> {
+  const token = await getKeycloakAdminToken();
+  const response = await fetch(`${getKeycloakAdminUrl()}/users/${userId}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to get user: ${response.statusText}`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Create a new user in Keycloak
+ * Returns the created user's ID
+ */
+export async function createKeycloakUser(
+  email: string,
+  username: string,
+  firstName?: string,
+  lastName?: string,
+  initialPassword?: string
+): Promise<string> {
+  const token = await getKeycloakAdminToken();
+  
+  const userData: Record<string, unknown> = {
+    username,
+    email,
+    firstName: firstName || undefined,
+    lastName: lastName || undefined,
+    enabled: true,
+    emailVerified: false,
+  };
+
+  // If password provided, include credentials inline
+  if (initialPassword) {
+    userData.credentials = [{
+      type: "password",
+      value: initialPassword,
+      temporary: false,
+    }];
+  }
+
+  const response = await fetch(`${getKeycloakAdminUrl()}/users`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(userData),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to create user (${response.status}): ${error}`);
+  }
+
+  // Get the user ID from Location header
+  const location = response.headers.get("Location");
+  if (location) {
+    return location.split("/").pop()!;
+  }
+
+  // Fallback: search for the user we just created
+  const users = await searchKeycloakUsersByEmail(email);
+  if (users.length > 0 && users[0].id) {
+    return users[0].id;
+  }
+
+  return "unknown";
+}
+
+/**
+ * Set or reset a user's password
+ */
+export async function setKeycloakUserPassword(
+  userId: string,
+  password: string,
+  temporary: boolean = false
+): Promise<void> {
+  const token = await getKeycloakAdminToken();
+  
+  const response = await fetch(`${getKeycloakAdminUrl()}/users/${userId}/reset-password`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      type: "password",
+      value: password,
+      temporary,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to set password: ${response.statusText}`);
+  }
+}
+
+/**
+ * Delete a user from Keycloak
+ */
+export async function deleteKeycloakUser(userId: string): Promise<void> {
+  const token = await getKeycloakAdminToken();
+  
+  const response = await fetch(`${getKeycloakAdminUrl()}/users/${userId}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete user: ${response.statusText}`);
+  }
+}
+
+/**
+ * Search for users by email
+ */
+export async function searchKeycloakUsersByEmail(email: string): Promise<KeycloakUser[]> {
+  const token = await getKeycloakAdminToken();
+  const response = await fetch(`${getKeycloakAdminUrl()}/users?email=${encodeURIComponent(email)}&exact=true`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to search users: ${response.statusText}`);
+  }
+
+  return await response.json();
+}
+
+// ============================================================================
+// NPL User Access Management
+// ============================================================================
+
+/**
+ * Find UserRegistry protocol instance
+ */
+async function findUserRegistry(token: string): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `${NPL_URL}/npl/users/UserRegistry/`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) return null;
+
+    const text = await response.text();
+    const clean = text.replace(/[\x00-\x1f]/g, "");
+    const data = JSON.parse(clean);
+    if (data.items && data.items.length > 0) {
+      return data.items[0]["@id"] || null;
+    }
+  } catch (error) {
+    console.error("Error finding UserRegistry:", error);
+  }
+
+  return null;
+}
+
+/**
+ * Create UserRegistry protocol instance
+ */
+async function createUserRegistry(token: string): Promise<string> {
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserRegistry/`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ 
+        "@parties": {}  // Let rules.yml auto-assign based on JWT
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to create UserRegistry: ${error}`);
+  }
+
+  const data = await response.json();
+  return data["@id"];
+}
+
+/**
+ * Register a user in NPL UserRegistry
+ */
+/**
+ * Check if user is already registered in NPL UserRegistry
+ */
+export async function isUserRegisteredInNpl(registryId: string, token: string, userId: string): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `${NPL_URL}/npl/users/UserRegistry/${registryId}/isUserRegistered`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ userId }),
+      }
+    );
+
+    if (response.ok) {
+      const result = await response.json();
+      return result === true || result.value === true;
+    }
+  } catch (error) {
+    console.error(`Error checking if user ${userId} is registered:`, error);
+  }
+  return false;
+}
+
+export async function registerUserInNpl(userId: string): Promise<void> {
+  const token = await getKeycloakToken();
+  let registryId = await findUserRegistry(token);
+
+  if (!registryId) {
+    registryId = await createUserRegistry(token);
+  }
+
+  // Check if user is already registered
+  const alreadyRegistered = await isUserRegisteredInNpl(registryId, token, userId);
+  if (alreadyRegistered) {
+    return; // Skip - user already registered
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserRegistry/${registryId}/registerUser`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ userId }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to register user in NPL: ${error}`);
+  }
+}
+
+/**
+ * Get all registered users from NPL UserRegistry
+ */
+async function getAllUsersFromNpl(token: string): Promise<string[]> {
+  const registryId = await findUserRegistry(token);
+
+  if (!registryId) {
+    return [];
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserRegistry/${registryId}/getAllUsers`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    console.error('Failed to get users from NPL:', await response.text());
+    return [];
+  }
+
+  const result = await response.json();
+  // NPL returns Set as array
+  return Array.isArray(result) ? result : [];
+}
+
+/**
+ * Remove a user from NPL UserRegistry
+ */
+export async function removeUserFromNpl(userId: string): Promise<void> {
+  const token = await getKeycloakToken();
+  const registryId = await findUserRegistry(token);
+
+  if (!registryId) {
+    throw new Error("UserRegistry not found");
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserRegistry/${registryId}/removeUser`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ userId }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to remove user from NPL: ${error}`);
+  }
+}
+
+/**
+ * Check if user is registered in NPL UserRegistry (simpler check)
+ */
+export async function isUserInNpl(userId: string): Promise<boolean> {
+  try {
+    const token = await getKeycloakToken();
+    const registryId = await findUserRegistry(token);
+    if (!registryId) return false;
+    
+    return await isUserRegisteredInNpl(registryId, token, userId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find UserToolAccess protocol instance for a specific user
+ */
+export async function findUserToolAccess(token: string, userId: string): Promise<string | null> {
+  try {
+    // NPL doesn't support filtering by constructor params via URL query
+    // So we query all UserToolAccess and filter client-side
+    const response = await fetch(
+      `${NPL_URL}/npl/users/UserToolAccess/`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      // Find the UserToolAccess with matching userId
+      const items = data.items || [];
+      for (const item of items) {
+        if (item.userId === userId) {
+          return item["@id"];
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error finding UserToolAccess:", error);
+  }
+
+  return null;
+}
+
+/**
+ * Create UserToolAccess protocol instance for a user
+ */
+async function createUserToolAccess(token: string, userId: string): Promise<string> {
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserToolAccess/`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        "@parties": {},  // Let rules.yml auto-assign based on JWT
+        userId,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to create UserToolAccess: ${error}`);
+  }
+
+  const data = await response.json();
+  return data["@id"];
+}
+
+/**
+ * Grant a tool to a user in NPL
+ */
+export async function grantToolInNpl(
+  userId: string,
+  serviceName: string,
+  toolName: string
+): Promise<void> {
+  const token = await getKeycloakToken();
+  let accessId = await findUserToolAccess(token, userId);
+
+  if (!accessId) {
+    accessId = await createUserToolAccess(token, userId);
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserToolAccess/${accessId}/grantTool`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ serviceName, toolName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to grant tool: ${error}`);
+  }
+}
+
+/**
+ * Revoke a tool from a user in NPL
+ */
+export async function revokeToolInNpl(
+  userId: string,
+  serviceName: string,
+  toolName: string
+): Promise<void> {
+  const token = await getKeycloakToken();
+  const accessId = await findUserToolAccess(token, userId);
+
+  if (!accessId) {
+    return; // User has no access protocol, nothing to revoke
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserToolAccess/${accessId}/revokeTool`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ serviceName, toolName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to revoke tool: ${error}`);
+  }
+}
+
+/**
+ * Grant all tools for a service to a user in NPL
+ */
+export async function grantAllToolsForServiceInNpl(
+  userId: string,
+  serviceName: string
+): Promise<void> {
+  const token = await getKeycloakToken();
+  let accessId = await findUserToolAccess(token, userId);
+
+  if (!accessId) {
+    accessId = await createUserToolAccess(token, userId);
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserToolAccess/${accessId}/grantAllToolsForService`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ serviceName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to grant all tools: ${error}`);
+  }
+}
+
+/**
+ * Revoke all access to a service for a user in NPL
+ */
+export async function revokeServiceInNpl(
+  userId: string,
+  serviceName: string
+): Promise<void> {
+  const token = await getKeycloakToken();
+  const accessId = await findUserToolAccess(token, userId);
+
+  if (!accessId) {
+    return; // User has no access protocol, nothing to revoke
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserToolAccess/${accessId}/revokeServiceAccess`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ serviceName }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to revoke service access: ${error}`);
+  }
+}
+
+/**
+ * Get all services and tools a user has access to from NPL
+ */
+export async function getUserAccessFromNpl(userId: string): Promise<Record<string, string[]>> {
+  const token = await getKeycloakToken();
+  const accessId = await findUserToolAccess(token, userId);
+
+  if (!accessId) {
+    return {}; // No access protocol = no access
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserToolAccess/${accessId}/getAccessList`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to get user access: ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  
+  // Convert NPL List<ServiceToolAccess> to JS object
+  // NPL returns: [{ serviceName: "duckduckgo", allowedTools: ["search"] }, ...]
+  const result: Record<string, string[]> = {};
+  if (Array.isArray(data)) {
+    for (const entry of data) {
+      result[entry.serviceName] = Array.from(entry.allowedTools || []);
+    }
+  }
+  return result;
+}
+
+/**
+ * Sync user tool access from services.yaml to NPL
+ * Creates UserToolAccess protocol and grants all configured tools
+ */
+export async function syncUserAccessToNpl(userId: string, tools: Record<string, string[]>): Promise<void> {
+  const token = await getKeycloakToken();
+  
+  // Ensure user is registered
+  await registerUserInNpl(userId);
+  
+  // Get or create UserToolAccess protocol
+  let accessId = await findUserToolAccess(token, userId);
+  if (!accessId) {
+    accessId = await createUserToolAccess(token, userId);
+  }
+
+  // Grant each tool
+  for (const [serviceName, toolNames] of Object.entries(tools)) {
+    if (toolNames.includes("*")) {
+      // Grant all tools for service
+      await grantAllToolsForServiceInNpl(userId, serviceName);
+    } else {
+      // Grant individual tools
+      for (const toolName of toolNames) {
+        await grantToolInNpl(userId, serviceName, toolName);
+      }
+    }
+  }
+}
+
+// ====================================================================
+// VAULT & CREDENTIAL MANAGEMENT
+// ====================================================================
+
+const VAULT_URL = process.env.VAULT_ADDR || "http://localhost:8200";
+const VAULT_TOKEN = process.env.VAULT_TOKEN || "dev-token";
+
+/**
+ * Store a secret in Vault
+ */
+export async function storeSecretInVault(
+  path: string,
+  data: Record<string, string>
+): Promise<void> {
+  const response = await fetch(`${VAULT_URL}/v1/${path}`, {
+    method: "POST",
+    headers: {
+      "X-Vault-Token": VAULT_TOKEN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ data }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to store secret in Vault: ${response.statusText} - ${error}`);
+  }
+}
+
+/**
+ * Get a secret from Vault
+ */
+export async function getSecretFromVault(path: string): Promise<Record<string, string> | null> {
+  const response = await fetch(`${VAULT_URL}/v1/${path}`, {
+    method: "GET",
+    headers: {
+      "X-Vault-Token": VAULT_TOKEN,
+    },
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to get secret from Vault: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  return result.data?.data || null;
+}
+
+/**
+ * Test credential injection via Credential Proxy
+ */
+export async function testCredentialInjection(
+  serviceName: string,
+  tenantId: string = "default",
+  userId: string = "alice"
+): Promise<{ credentialName: string; injectedFields: Record<string, string> }> {
+  const CREDENTIAL_PROXY_URL = process.env.CREDENTIAL_PROXY_URL || "http://localhost:9002";
+  
+  const response = await fetch(`${CREDENTIAL_PROXY_URL}/inject-credentials`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      service: serviceName,
+      operation: "test",
+      tenantId,
+      userId,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Credential injection test failed: ${response.statusText}`);
+  }
+
+  return await response.json();
 }

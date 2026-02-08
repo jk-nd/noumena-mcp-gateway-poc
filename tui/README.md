@@ -1,27 +1,27 @@
 # NOUMENA MCP Gateway Wizard
 
-Interactive CLI for managing MCP Gateway services. Powered by [@clack/prompts](https://github.com/natemoo-re/clack).
+Interactive CLI for managing MCP Gateway services, users, and credentials. Powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ## Features
 
-- **Service-centric navigation** - Services displayed as main menu items with status indicators
-- **Enable/disable services** - Updates config and syncs with NPL ServiceRegistry
-- **Multi-select tool management** - Use SPACE to select tools, ENTER to apply
-- **Container control** - Pull, start, stop Docker containers for MCP servers
-- **Search Docker Hub** - Find and add MCP servers with search functionality
-- **Add custom images** - Support for local or private registry Docker images
-- **Safe deletion** - Stops container and removes from NPL before deleting
-- **Real-time status** - Gateway connection and container status indicators
+- **Service management** - Add, enable/disable, remove services with NPL sync
+- **Tool management** - Enable/disable individual tools per service
+- **User management** - Register/deregister Keycloak users, grant/revoke tool access
+- **Credential management** - Store secrets in Vault, configure tenant-level or user-level scopes
+- **Container control** - Pull Docker images, manage HTTP service containers
+- **Docker Hub search** - Find and add MCP servers from the `mcp/*` namespace
+- **Atomic operations** - All state changes sync to NPL with automatic rollback on failure
+- **Real-time status** - Gateway connection, container, and NPL sync indicators
 
 ## Status Indicators
 
 | Symbol | Meaning |
 |--------|---------|
-| `✓` | Service/tool enabled |
+| `●` | Service/tool enabled |
 | `–` | Service/tool disabled |
-| `▶` | Container running |
-| `■` | Container stopped (image exists) |
-| `·` | Image not pulled |
+| `■` | Docker image pulled and ready (green) |
+| `·` | Docker image not pulled |
+| `▶` | Container running (HTTP services only) |
 
 ## Prerequisites
 
@@ -73,11 +73,11 @@ When you select a service:
 |--------|-------------|
 | **Enable/Disable** | Toggle service (syncs with NPL policy) |
 | **Pull image** | Download Docker image (if not pulled) |
-| **Start/Stop container** | Control the Docker container |
-| **View logs** | Show last 30 lines of container logs |
+| **Start/Stop container** | Control container (HTTP services only) |
+| **Discover tools** | Query container to find available tools |
 | **Manage tools** | Enable/disable individual tools |
 | **View details** | Show service configuration |
-| **Delete** | Remove service (stops container, removes from NPL) |
+| **Delete** | Remove service (removes from NPL and config) |
 
 ## Tool Management
 
@@ -88,6 +88,15 @@ When enabling a service, you're prompted to select which tools to enable:
 3. Press **ENTER** to apply changes
 
 Or use **Enable all** / **Disable all** for bulk operations.
+
+### Gateway Reload
+
+When you enable/disable a service or toggle individual tools, the TUI automatically:
+1. Saves the change to `services.yaml`
+2. Calls `POST /admin/services/reload` on the Gateway to refresh its cached configuration
+3. The Gateway immediately starts using the updated config for subsequent requests
+
+This means changes take effect instantly — no Gateway restart needed. If the reload fails (e.g. Gateway is down), the TUI warns you and the change will take effect on next Gateway restart.
 
 ## Default Behavior
 
@@ -128,12 +137,57 @@ tui/
 
 ## NPL Integration
 
+All TUI operations are **atomic with rollback**: if the NPL sync fails, `services.yaml` changes are reverted and an error is displayed.
+
 When you enable a service:
-- Service is added to NPL ServiceRegistry's allowed list
-- Requests to that service will be approved by policy
+- Service is registered in NPL ServiceRegistry
+- A per-service ToolPolicy instance is created (if it doesn't already exist)
+- Enabled tools are added to the ToolPolicy's allowed set
 
 When you disable a service:
-- Service is removed from NPL ServiceRegistry's allowed list
+- Service is removed from NPL ServiceRegistry
 - Requests to that service will be denied by policy
 
-Tool-level enabling only affects Gateway routing (which tools appear in `tools/list`), not NPL policy.
+When you manage users:
+- Users are registered/deregistered in NPL UserRegistry
+- Tool access is granted/revoked via NPL UserToolAccess
+- Changes are synced to Keycloak for authentication
+
+Tool-level enabling syncs with ToolPolicy -- only explicitly enabled tools pass the policy check.
+
+## Container Management
+
+The wizard shows Docker image status for MCP services:
+
+- **■ Ready**: Docker image is pulled and ready to use
+- **· Not pulled**: Image needs to be pulled
+
+### STDIO Services (Most Common)
+
+Most MCP services use STDIO transport (`docker run -i`), including:
+- `mcp/duckduckgo`
+- `mcp/github`
+- `mcp/slack`
+- `mcp/fetch`
+- etc.
+
+**How STDIO services work:**
+- Containers are **ephemeral** and expect stdin/stdout communication
+- The Gateway **spawns containers on-demand** when tools are called
+- Containers automatically exit when the request completes
+- **You cannot manually start/stop STDIO containers** - they require an active stdin/stdout pipe
+- The TUI does not show start/stop options for STDIO services
+
+**What this means:**
+- Just pull the image and enable the service
+- The Gateway handles all container lifecycle management
+- No need to worry about starting/stopping containers
+
+### HTTP Services (Less Common)
+
+For HTTP-based MCP services:
+- **▶ Running**: Container is currently running
+- **■ Stopped**: Image is pulled but container is stopped
+- Containers run as long-lived services
+- Start/stop controls are available in the TUI
+- Containers expose HTTP endpoints for the Gateway to call

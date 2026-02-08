@@ -58,7 +58,7 @@ struct HttpResponse {
 
 /**
  * Notification for executing HTTP requests via the HTTP Connector.
- * The HTTP Connector subscribes to this notification via AMQP,
+ * The HTTP Connector subscribes to this notification,
  * executes the request, and returns the response.
  * @param httpRequest The HTTP request to execute
  * @return The HTTP response from the external service

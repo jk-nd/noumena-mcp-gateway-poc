@@ -15,7 +15,7 @@ data class ServiceDefinition(
     val name: String,
     /** Display name for UI */
     val displayName: String = name,
-    /** Transport type: MCP_STDIO, MCP_HTTP, or DIRECT_REST */
+    /** Transport type: MCP_STDIO, MCP_HTTP, MCP_WS, or DIRECT_REST */
     val type: String,
     /** Whether the service is enabled */
     val enabled: Boolean = true,
@@ -29,7 +29,7 @@ data class ServiceDefinition(
     val baseUrl: String? = null,
     /** Whether credentials are required */
     val requiresCredentials: Boolean = true,
-    /** Vault path template for credentials */
+    /** Vault path template for credentials (V2 convention: secret/services/{name}/users/{user}/default) */
     val vaultPath: String? = null,
     /** Service description */
     val description: String = "",

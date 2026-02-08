@@ -8,7 +8,9 @@
 
 import * as p from "@clack/prompts";
 import chalk from "chalk";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
+import { readFileSync } from "fs";
+import * as path from "path";
 import { 
   loadConfig, 
   setServiceEnabled, 
@@ -16,16 +18,30 @@ import {
   addService,
   setToolEnabled,
   updateServiceTools,
+  getAllUsers,
+  getUser,
+  addUser,
+  updateUser,
+  removeUser as removeUserFromConfig,
+  grantToolToUser,
+  revokeToolFromUser,
+  grantAllToolsToUser,
+  revokeServiceFromUser,
   type ServiceDefinition,
+  type UserToolAccess,
+  getConfigPath,
+  loadCredentialsConfig,
+  saveCredentialsConfig,
+  addCredentialMapping,
+  setServiceCredential,
+  getServiceCredential,
+  hasCredentials,
 } from "./lib/config.js";
 import { 
   checkGatewayHealth, 
   reloadGatewayConfig, 
   syncServiceWithNpl,
   discoverMcpServers,
-  getContainerStatus,
-  startContainer,
-  stopContainer,
   imageExists,
   discoverToolsFromContainer,
   discoveredToToolDefinitions,
@@ -33,19 +49,50 @@ import {
   validateCredentials,
   bootstrapNpl,
   isNplBootstrapped,
+  listKeycloakUsers,
+  createKeycloakUser,
+  deleteKeycloakUser,
+  registerUserInNpl,
+  removeUserFromNpl,
+  grantToolInNpl,
+  revokeToolInNpl,
+  grantAllToolsForServiceInNpl,
+  revokeServiceInNpl,
+  getUserAccessFromNpl,
+  syncUserAccessToNpl,
+  getKeycloakToken,
+  findUserToolAccess,
+  isUserInNpl,
+  type KeycloakUser,
+  storeSecretInVault,
+  getSecretFromVault,
+  testCredentialInjection,
 } from "./lib/api.js";
 
-// Noumena color palette
+// Noumena color palette - optimized for dark terminal backgrounds
 const noumena = {
-  purple: chalk.hex("#7C3AED"),      // Primary purple
-  purpleDim: chalk.hex("#6B21A8"),   // Darker purple
-  gray: chalk.hex("#6B7280"),
-  grayDim: chalk.hex("#4B5563"),
-  success: chalk.hex("#10B981"),     // Green for success
-  warning: chalk.hex("#F59E0B"),     // Amber for warnings
-  text: chalk.hex("#E5E7EB"),
-  textDim: chalk.hex("#9CA3AF"),
+  // Brand colors (section headers only)
+  purple: chalk.hex("#A78BFA"),      // Lighter purple for better readability
+  purpleDim: chalk.hex("#8B5CF6"),   // Medium purple
+  
+  // Interactive elements
+  accent: chalk.hex("#60A5FA"),      // Blue for actionable items (+ Add buttons)
+  accentBright: chalk.hex("#93C5FD"), // Brighter blue for emphasis
+  
+  // Status colors
+  success: chalk.hex("#34D399"),     // Brighter green for success
+  warning: chalk.hex("#FBBF24"),     // Brighter amber for warnings
+  error: chalk.hex("#F87171"),       // Red for errors
+  
+  // Text colors
+  text: chalk.hex("#F3F4F6"),        // Brighter white for main text
+  textDim: chalk.hex("#D1D5DB"),     // Lighter gray for secondary text
+  gray: chalk.hex("#9CA3AF"),        // Medium gray
+  grayDim: chalk.hex("#6B7280"),     // Darker gray for disabled items
 };
+
+// Track whether services.yaml has been modified since last Gateway reload
+let configDirty = false;
 
 /**
  * Display the header
@@ -121,32 +168,76 @@ async function adminLogin(): Promise<boolean> {
 }
 
 /**
- * NPL Bootstrap flow - creates ServiceRegistry and ToolExecutionPolicy if needed.
+ * Sync Gateway Configuration to NPL
+ * 
+ * Loads services.yaml into NPL for policy enforcement.
+ * 
+ * When to use:
+ * - FIRST TIME: After fresh deployment (Gateway auto-runs this on first startup)
+ * - AFTER EDITS: When you manually edit services.yaml and want to apply changes
+ * - AFTER TUI CHANGES: TUI automatically syncs after user/service modifications
+ * 
+ * This is a DECLARATIVE sync:
+ * - services.yaml defines the desired state (services, tools, users)
+ * - NPL state is updated to match YAML
+ * - ADDS services/tools/users from YAML to NPL
+ * - REMOVES services/tools/users from NPL not in YAML
+ * 
+ * IMPORTANT: This does NOT touch Keycloak - only syncs NPL permissions!
  */
-async function nplBootstrapFlow(): Promise<void> {
-  console.log();
-  console.log(noumena.purple("  NPL Bootstrap"));
-  console.log(noumena.textDim("  Ensures ServiceRegistry and ToolExecutionPolicy exist in NPL."));
-  console.log(noumena.textDim("  Also syncs enabled services from services.yaml."));
-  console.log();
+async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<void> {
+  const nplReady = await isNplBootstrapped();
+  
+  if (!skipConfirmation) {
+    console.log();
+    console.log(noumena.purple("  Sync Gateway Configuration to NPL"));
+    console.log();
+    
+    if (!nplReady) {
+      console.log(noumena.textDim("  📋 First-time setup: Loading services.yaml into NPL"));
+      console.log(noumena.textDim("  🔧 NPL will enforce policies defined in services.yaml"));
+    } else {
+      console.log(noumena.textDim("  📄 Updates NPL to match services.yaml"));
+      console.log(noumena.textDim("  ✅ Adds new services/tools/users from YAML"));
+      console.log(noumena.textDim("  🧹 Removes items from NPL not in YAML"));
+    }
+    
+    console.log();
+    console.log(noumena.warning("  ⚠  This syncs NPL with services.yaml (does NOT touch Keycloak)"));
+    if (nplReady) {
+      console.log(noumena.warning("  ⚠  Existing NPL state will be updated to match YAML"));
+    }
+    console.log();
+
+    const confirm = await p.confirm({
+      message: "Proceed with import? This will make NPL match services.yaml.",
+      initialValue: false,
+    });
+
+    if (p.isCancel(confirm) || !confirm) {
+      p.log.info("Import cancelled");
+      return;
+    }
+  }
 
   const s = p.spinner();
-  s.start("Bootstrapping NPL...");
+  s.start("Importing from YAML to NPL...");
 
   try {
     const result = await bootstrapNpl();
-    s.stop(noumena.success("NPL bootstrapped"));
+    s.stop(noumena.success("Import completed"));
 
+    // Service-level bootstrap
     if (result.registryCreated) {
       p.log.success("Created ServiceRegistry");
     } else {
       p.log.info("ServiceRegistry already exists");
     }
 
-    if (result.policyCreated) {
-      p.log.success("Created ToolExecutionPolicy");
+    if (result.policiesCreated.length > 0) {
+      p.log.success(`Created ToolPolicy for: ${result.policiesCreated.join(", ")}`);
     } else {
-      p.log.info("ToolExecutionPolicy already exists");
+      p.log.info("All ToolPolicy instances already exist");
     }
 
     if (result.servicesEnabled.length > 0) {
@@ -154,10 +245,684 @@ async function nplBootstrapFlow(): Promise<void> {
     } else {
       p.log.info("No services enabled in services.yaml");
     }
+
+    // User-level bootstrap
+    if (result.userRegistryCreated) {
+      p.log.success("Created UserRegistry");
+    } else {
+      p.log.info("UserRegistry already exists");
+    }
+
+    if (result.usersSynced.length > 0) {
+      p.log.success(`Synced ${result.usersSynced.length} user(s): ${result.usersSynced.join(", ")}`);
+    } else {
+      p.log.info("No users configured in services.yaml");
+    }
+
+    console.log();
+    console.log(noumena.success("  ✓ NPL now matches services.yaml"));
+
+    // Auto-reload Gateway to apply NPL changes
+    s.start("Reloading Gateway...");
+    try {
+      await reloadGatewayConfig();
+      s.stop(noumena.success("Gateway reloaded"));
+      configDirty = false;
+    } catch (err: any) {
+      s.stop(noumena.purpleDim("Gateway reload failed"));
+      p.log.warn("NPL updated but Gateway reload failed - use 'Reload Gateway' manually");
+      configDirty = true;
+    }
+
+    // Pause so user can read the output
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   } catch (error) {
-    s.stop(noumena.purpleDim("Bootstrap failed"));
+    s.stop(noumena.purpleDim("Import failed"));
     p.log.error(`${error}`);
     p.log.info("Make sure the NPL Engine is running and Keycloak is provisioned.");
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    configDirty = true;
+  }
+}
+
+// Factory reset removed - use docker compose down -v && docker compose up -d for clean state
+// The auto-sync script (sync-user-ids.sh) ensures services.yaml is always consistent with Keycloak
+
+/**
+ * Configuration Manager - centralized import/export/backup management
+ */
+async function configurationManagerFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+  const configDir = path.dirname(configPath);
+  const nplReady = await isNplBootstrapped();
+
+  while (true) {
+    console.log();
+    console.log(noumena.purple("  Gateway Configuration Manager"));
+    console.log(noumena.textDim("  Manage Gateway config (services.yaml): Edit, Import to NPL, Backups"));
+    console.log();
+    
+    if (!nplReady) {
+      console.log(noumena.warning("  ⚠  NPL not initialized - use 'Sync Gateway Config to NPL' for first-time setup"));
+      console.log();
+    }
+
+    // List available backups
+    let backupFiles: string[] = [];
+    try {
+      const files = await fs.readdir(configDir);
+      backupFiles = files
+        .filter(f => f.startsWith("services.yaml.") && f.endsWith(".backup"))
+        .sort()
+        .reverse();
+    } catch {
+      // Ignore errors
+    }
+
+    const backupCount = backupFiles.length;
+
+    const action = await p.select({
+      message: "Select action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "---hdr-current", label: noumena.purple("── Gateway Configuration ──"), hint: "" },
+        { value: "manage-current", label: "  Edit services.yaml", hint: "View, Edit, Export current config" },
+        { value: "import-current", label: `  Sync Gateway Config to NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "Load services.yaml into NPL" },
+        { value: "---hdr-backups", label: noumena.purple("── Backups & Advanced ──"), hint: "" },
+        { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore backups" },
+        { value: "import-file", label: "  Import from file...", hint: "Load config from custom YAML" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") {
+      return;
+    }
+
+    if (typeof action === "string" && action.startsWith("---")) {
+      continue;
+    }
+
+    if (action === "manage-current") {
+      await manageCurrentConfigFlow();
+    } else if (action === "import-current") {
+      await importFromYamlFlow();
+    } else if (action === "import-file") {
+      await importFromFileFlow();
+    } else if (action === "view-backups") {
+      if (backupCount === 0) {
+        p.log.info("No backups found. Use 'Export' in Edit menu to create backups.");
+      } else {
+        await browseBackupsFlow(backupFiles);
+      }
+    }
+  }
+}
+
+/**
+ * Manage Current Configuration (services.yaml) - consolidated operations
+ */
+async function manageCurrentConfigFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+
+  while (true) {
+    console.log();
+    console.log(noumena.purple("  Manage services.yaml"));
+    console.log(noumena.textDim("  View, Edit, Export, and Apply changes to current configuration"));
+    console.log();
+
+    // Check file stats
+    let fileSize = "unknown";
+    let lastModified = "unknown";
+    try {
+      const stats = await fs.stat(configPath);
+      fileSize = `${Math.round(stats.size / 1024)}KB`;
+      lastModified = stats.mtime.toLocaleString();
+    } catch {
+      // Ignore
+    }
+
+    console.log(noumena.textDim(`  File: ${path.basename(configPath)}`));
+    console.log(noumena.textDim(`  Size: ${fileSize}`));
+    console.log(noumena.textDim(`  Last modified: ${lastModified}`));
+    console.log();
+
+    const action = await p.select({
+      message: "Select action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "view", label: "  View current config", hint: "Display services.yaml contents" },
+        { value: "export", label: "  Export (create backup)", hint: "Save timestamped backup" },
+        { value: "edit", label: noumena.warning("  Edit and apply"), hint: "Edit in $EDITOR, confirm, then apply to NPL + Gateway" },
+        { value: "restore-factory", label: noumena.purpleDim("  Restore to factory defaults"), hint: "Reset to services.yaml.default" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") {
+      return;
+    }
+
+    if (action === "view") {
+      await viewConfigFlow();
+    } else if (action === "export") {
+      await exportToYamlFlow();
+    } else if (action === "edit") {
+      await editAndApplyConfigFlow();
+    } else if (action === "restore-factory") {
+      await restoreFactoryConfigFlow();
+    }
+  }
+}
+
+/**
+ * Edit services.yaml and apply changes with confirmation
+ */
+async function editAndApplyConfigFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const configPath = getConfigPath();
+
+  console.log();
+  console.log(noumena.purple("  Edit and Apply Configuration"));
+  console.log();
+  console.log(noumena.textDim("  This will:"));
+  console.log(noumena.textDim("    1. Open services.yaml in your editor"));
+  console.log(noumena.textDim("    2. Ask for confirmation after editing"));
+  console.log(noumena.textDim("    3. Import changes to NPL"));
+  console.log(noumena.textDim("    4. Reload Gateway to apply"));
+  console.log();
+  console.log(noumena.warning("  ⚠  Changes will affect NPL and Gateway state!"));
+  console.log();
+
+  const proceed = await p.confirm({
+    message: "Open editor?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(proceed) || !proceed) {
+    p.log.info("Edit cancelled");
+    return;
+  }
+
+  // Create backup before editing
+  try {
+    const backupPath = configPath + ".pre-edit.backup";
+    const content = await fs.readFile(configPath, "utf-8");
+    await fs.writeFile(backupPath, content, "utf-8");
+    p.log.info(`Backup created: ${backupPath}`);
+  } catch {
+    p.log.warn("Could not create pre-edit backup");
+  }
+
+  // Open editor
+  const editor = process.env.EDITOR || process.env.VISUAL || "nano";
+  console.log();
+  console.log(noumena.textDim(`  Opening ${editor}...`));
+  console.log();
+
+  try {
+    execSync(`${editor} ${configPath}`, { stdio: "inherit" });
+  } catch {
+    p.log.error("Editor failed or was cancelled");
+    return;
+  }
+
+  // Confirm changes
+  console.log();
+  console.log(noumena.warning("  ⚠  Apply changes to NPL and Gateway?"));
+  console.log(noumena.textDim("  This will:"));
+  console.log(noumena.textDim("    • Import services.yaml → NPL (declarative sync)"));
+  console.log(noumena.textDim("    • Reload Gateway configuration"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Apply changes?",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Changes saved to file but NOT applied to NPL/Gateway");
+    p.log.info("Use 'Import from services.yaml' to apply later");
+    return;
+  }
+
+  // Apply changes
+  const s = p.spinner();
+  s.start("Importing to NPL...");
+
+  try {
+    await bootstrapNpl();
+    s.stop(noumena.success("NPL updated"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("NPL import failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    return;
+  }
+
+  // Reload Gateway
+  s.start("Reloading Gateway...");
+  try {
+    await reloadGatewayConfig();
+    s.stop(noumena.success("Gateway reloaded"));
+    configDirty = false;
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Gateway reload failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("Changes applied to NPL but Gateway may need manual restart");
+    return;
+  }
+
+  console.log();
+  console.log(noumena.success("  ✓ Configuration applied successfully!"));
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Restore to factory defaults (services.yaml.default)
+ */
+async function restoreFactoryConfigFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const configPath = getConfigPath();
+  const defaultPath = configPath.replace("services.yaml", "services.yaml.default");
+
+  console.log();
+  console.log(noumena.purple("  Restore to Factory Defaults"));
+  console.log();
+  console.log(noumena.textDim("  This will:"));
+  console.log(noumena.textDim("    1. Replace services.yaml with services.yaml.default"));
+  console.log(noumena.textDim("    2. Import to NPL (Jarvis, Alice, Bob)"));
+  console.log(noumena.textDim("    3. Reload Gateway"));
+  console.log();
+  console.log(noumena.warning("  ⚠  DESTRUCTIVE: Current services.yaml will be replaced!"));
+  console.log(noumena.warning("  ⚠  All custom services and users will be lost!"));
+  console.log();
+  console.log(noumena.textDim("  Note: This only restores the services.yaml file to factory defaults."));
+  console.log(noumena.textDim("  After restore, you should import it to NPL."));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Restore factory defaults?",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Restore cancelled");
+    return;
+  }
+
+  // Query Keycloak for user IDs (same as full reset)
+  const userIdSpinner = p.spinner();
+  userIdSpinner.start("Querying Keycloak for user IDs...");
+  
+  let userIdMap: Record<string, string> = {};
+  try {
+    const kcUsers = await listKeycloakUsers();
+    
+    for (const user of kcUsers) {
+      if (user.username && user.id) {
+        userIdMap[user.username] = user.id;
+      }
+    }
+    
+    userIdSpinner.stop(noumena.success("User IDs fetched"));
+  } catch (err: any) {
+    userIdSpinner.stop(noumena.purpleDim("Failed to query Keycloak"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.warn("Proceeding with placeholder IDs - you may need to update manually");
+  }
+
+  // Restore default config
+  const s = p.spinner();
+  s.start("Restoring factory defaults...");
+
+  try {
+    let defaultYaml = await fs.readFile(defaultPath, "utf-8");
+    
+    // Replace placeholder IDs with actual Keycloak IDs
+    if (userIdMap['jarvis']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_JARVIS_ID/g, userIdMap['jarvis']);
+    }
+    if (userIdMap['alice']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_ALICE_ID/g, userIdMap['alice']);
+    }
+    if (userIdMap['bob']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_BOB_ID/g, userIdMap['bob']);
+    }
+    
+    await fs.writeFile(configPath, defaultYaml, "utf-8");
+    s.stop(noumena.success("Factory defaults restored"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Restore failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    return;
+  }
+
+  // Import to NPL
+  s.start("Importing to NPL...");
+  try {
+    await bootstrapNpl();
+    s.stop(noumena.success("NPL updated"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("NPL import failed"));
+    p.log.error(`Error: ${err.message || err}`);
+  }
+
+  // Reload Gateway
+  s.start("Reloading Gateway...");
+  try {
+    await reloadGatewayConfig();
+    s.stop(noumena.success("Gateway reloaded"));
+    configDirty = false;
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Gateway reload failed"));
+    p.log.error(`Error: ${err.message || err}`);
+  }
+
+  console.log();
+  console.log(noumena.success("  ✓ Factory defaults restored!"));
+  console.log(noumena.textDim("  Default users: jarvis, alice, bob"));
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Import from a specific file (file picker)
+ */
+async function importFromFileFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Import from File"));
+  console.log();
+
+  const filePath = await p.text({
+    message: "Enter path to YAML file:",
+    placeholder: "/path/to/services.yaml or ./backup.yaml",
+    validate: (v) => {
+      if (!v || v.trim().length === 0) return "Path is required";
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(filePath)) {
+    return;
+  }
+
+  const fs = await import("fs/promises");
+  const path = await import("path");
+
+  // Resolve path (support relative paths)
+  const resolvedPath = path.resolve(String(filePath).trim());
+
+  // Check if file exists
+  try {
+    await fs.access(resolvedPath);
+  } catch {
+    p.log.error(`File not found: ${resolvedPath}`);
+    return;
+  }
+
+  console.log();
+  console.log(noumena.textDim(`  Source: ${resolvedPath}`));
+  console.log(noumena.textDim(`  Target: ${getConfigPath()}`));
+  console.log();
+  console.log(noumena.warning("  ⚠  This will overwrite services.yaml and sync to NPL!"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Proceed with import?",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Import cancelled");
+    return;
+  }
+
+  const s = p.spinner();
+  s.start("Copying file...");
+
+  try {
+    // Read source file
+    const content = await fs.readFile(resolvedPath, "utf-8");
+    
+    // Write to services.yaml
+    await fs.writeFile(getConfigPath(), content, "utf-8");
+    
+    s.stop(noumena.success("File copied"));
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Copy failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    return;
+  }
+
+  // Now import to NPL (skip confirmation since already confirmed above)
+  p.log.info("Importing to NPL...");
+  await importFromYamlFlow(true);
+}
+
+/**
+ * Export to YAML with versioning
+ */
+async function exportToYamlFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+
+  console.log();
+  console.log(noumena.purple("  Export Configuration"));
+  console.log();
+  console.log(noumena.textDim("  Creates a timestamped backup of services.yaml"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Create backup of current configuration?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Export cancelled");
+    return;
+  }
+
+  const s = p.spinner();
+  s.start("Creating backup...");
+
+  try {
+    const configPath = getConfigPath();
+    const configDir = path.dirname(configPath);
+    
+    // Create timestamp
+    const now = new Date();
+    const timestamp = now.toISOString().replace(/:/g, "-").replace(/\..+/, "").replace("T", "_");
+    const backupPath = path.join(configDir, `services.yaml.${timestamp}.backup`);
+    
+    // Read current config
+    const content = await fs.readFile(configPath, "utf-8");
+    
+    // Write backup
+    await fs.writeFile(backupPath, content, "utf-8");
+    
+    s.stop(noumena.success("Backup created"));
+    p.log.info(`Saved to: ${path.basename(backupPath)}`);
+  } catch (err: any) {
+    s.stop(noumena.purpleDim("Backup failed"));
+    p.log.error(`Error: ${err.message || err}`);
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * View factory defaults
+ */
+async function viewFactoryDefaultsFlow(): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+
+  console.log();
+  console.log(noumena.purple("  Factory Defaults (services.yaml.default)"));
+  console.log();
+
+  try {
+    const configPath = getConfigPath();
+    const defaultPath = configPath.replace("services.yaml", "services.yaml.default");
+    const content = await fs.readFile(defaultPath, "utf-8");
+    
+    console.log(noumena.textDim("  ─".repeat(40)));
+    console.log(content);
+    console.log(noumena.textDim("  ─".repeat(40)));
+  } catch (err: any) {
+    p.log.error(`Error reading factory defaults: ${err.message || err}`);
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Browse and restore from backups
+ */
+async function browseBackupsFlow(backupFiles: string[]): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+  const configDir = path.dirname(configPath);
+
+  while (true) {
+    console.log();
+    console.log(noumena.purple("  Backup Browser"));
+    console.log(noumena.textDim(`  ${backupFiles.length} backup(s) available`));
+    console.log();
+
+    // Build options with file stats
+    const options: { value: string; label: string; hint: string }[] = [
+      { value: "back", label: noumena.textDim("← Back"), hint: "" },
+    ];
+
+    for (const file of backupFiles) {
+      try {
+        const filePath = path.join(configDir, file);
+        const stats = await fs.stat(filePath);
+        const size = `${Math.round(stats.size / 1024)}KB`;
+        const date = stats.mtime.toLocaleString();
+        
+        options.push({
+          value: file,
+          label: `  ${file.replace("services.yaml.", "").replace(".backup", "")}`,
+          hint: `${size} | ${date}`,
+        });
+      } catch {
+        options.push({
+          value: file,
+          label: `  ${file}`,
+          hint: "",
+        });
+      }
+    }
+
+    const selected = await p.select({
+      message: "Select backup to view/restore:",
+      options,
+    });
+
+    if (p.isCancel(selected) || selected === "back") {
+      return;
+    }
+
+    await backupActionsFlow(selected);
+  }
+}
+
+/**
+ * Actions for a specific backup file
+ */
+async function backupActionsFlow(backupFile: string): Promise<void> {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const configPath = getConfigPath();
+  const configDir = path.dirname(configPath);
+  const backupPath = path.join(configDir, backupFile);
+
+  console.log();
+  console.log(noumena.purple(`  Backup: ${backupFile}`));
+  console.log();
+
+  const action = await p.select({
+    message: "Action:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "view", label: "View contents", hint: "Display YAML contents" },
+      { value: "restore", label: noumena.warning("Restore this backup"), hint: "Replace services.yaml and import to NPL" },
+      { value: "delete", label: noumena.purpleDim("Delete backup"), hint: "Remove backup file" },
+    ],
+  });
+
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+
+  if (action === "view") {
+    console.log();
+    console.log(noumena.textDim("  ─".repeat(40)));
+    try {
+      const content = await fs.readFile(backupPath, "utf-8");
+      console.log(content);
+    } catch (err: any) {
+      p.log.error(`Error: ${err.message || err}`);
+    }
+    console.log(noumena.textDim("  ─".repeat(40)));
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+  } else if (action === "restore") {
+    console.log();
+    console.log(noumena.warning("  ⚠  This will overwrite services.yaml and sync to NPL!"));
+    console.log();
+
+    const confirm = await p.confirm({
+      message: `Restore from ${backupFile}?`,
+      initialValue: false,
+    });
+
+    if (p.isCancel(confirm) || !confirm) {
+      p.log.info("Restore cancelled");
+      return;
+    }
+
+    const s = p.spinner();
+    s.start("Restoring backup...");
+
+    try {
+      const content = await fs.readFile(backupPath, "utf-8");
+      await fs.writeFile(configPath, content, "utf-8");
+      s.stop(noumena.success("Backup restored"));
+      
+      // Import to NPL (skip confirmation since already confirmed above)
+      p.log.info("Importing to NPL...");
+      await importFromYamlFlow(true);
+    } catch (err: any) {
+      s.stop(noumena.purpleDim("Restore failed"));
+      p.log.error(`Error: ${err.message || err}`);
+    }
+  } else if (action === "delete") {
+    const confirm = await p.confirm({
+      message: `Delete ${backupFile}?`,
+      initialValue: false,
+    });
+
+    if (p.isCancel(confirm) || !confirm) {
+      return;
+    }
+
+    try {
+      await fs.unlink(backupPath);
+      p.log.success("Backup deleted");
+    } catch (err: any) {
+      p.log.error(`Error: ${err.message || err}`);
+    }
   }
 }
 
@@ -182,6 +947,109 @@ function getDockerImageName(service: ServiceDefinition): string | null {
 }
 
 /**
+ * Check if a container for this service is running
+ */
+function isContainerRunning(imageName: string): boolean {
+  try {
+    const result = execSync(`docker ps --filter ancestor=${imageName} --format "{{.ID}}"`, { 
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "ignore"] 
+    });
+    return result.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get container ID for a running container with this image
+ */
+function getContainerId(imageName: string): string | null {
+  try {
+    const result = execSync(`docker ps --filter ancestor=${imageName} --format "{{.ID}}"`, { 
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "ignore"] 
+    });
+    const id = result.trim().split("\n")[0];
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start a container for this service
+ */
+function startContainer(service: ServiceDefinition): { success: boolean; error?: string; command?: string } {
+  try {
+    const imageName = getDockerImageName(service);
+    if (!imageName) return { success: false, error: "Not a Docker service" };
+    
+    // Start container in detached mode with a name
+    const containerName = `mcp-${service.name}`;
+    
+    // First check if container with this name already exists
+    try {
+      const existing = execSync(`docker ps -a --filter name=^${containerName}$ --format "{{.ID}}"`, { 
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "ignore"]
+      });
+      
+      if (existing.trim()) {
+        // Container exists - remove it first
+        execSync(`docker rm -f ${containerName}`, { stdio: "pipe" });
+      }
+    } catch (e) {
+      // Ignore - container doesn't exist or cleanup failed
+    }
+    
+    // Create and start new container in detached mode
+    const runCmd = `docker run -d --name ${containerName} ${imageName}`;
+    try {
+      const result = execSync(runCmd, { encoding: "utf-8", stdio: "pipe" });
+      return { success: true, command: runCmd };
+    } catch (err: any) {
+      let errorMsg = "Unknown error";
+      
+      if (err.stderr) {
+        errorMsg = err.stderr.toString().trim();
+      } else if (err.stdout) {
+        errorMsg = err.stdout.toString().trim();
+      } else if (err.message) {
+        errorMsg = err.message;
+      }
+      
+      return { success: false, error: errorMsg, command: runCmd };
+    }
+  } catch (err: any) {
+    let errorMsg = "Unknown error";
+    
+    if (err.stderr) {
+      errorMsg = err.stderr.toString().trim();
+    } else if (err.stdout) {
+      errorMsg = err.stdout.toString().trim();
+    } else if (err.message) {
+      errorMsg = err.message;
+    }
+    
+    return { success: false, error: errorMsg };
+  }
+}
+
+/**
+ * Stop a running container
+ */
+function stopContainer(containerId: string): boolean {
+  try {
+    execSync(`docker stop ${containerId}`, { stdio: "pipe" });
+    execSync(`docker rm ${containerId}`, { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get type label for display
  */
 function getTypeLabel(type: string): string {
@@ -194,77 +1062,113 @@ function getTypeLabel(type: string): string {
 }
 
 /**
- * Show main menu and handle selection
+ * Show main menu and handle selection.
+ *
+ * Organized into three sections:
+ *   1. Gateway Settings — services list + add new services
+ *   2. User Management — per-user/agent tool access
+ *   3. System — NPL bootstrap, reload, quit
  */
 async function mainMenu(): Promise<boolean> {
   const config = loadConfig();
   const services = config.services;
   const gatewayConnected = await checkGatewayHealth();
+  const nplReady = await isNplBootstrapped();
   
   // Build status line
   const gatewayStatus = gatewayConnected 
     ? noumena.success("● Connected") 
     : noumena.grayDim("○ Disconnected");
   const enabledCount = services.filter(s => s.enabled).length;
+  const userCount = getAllUsers().length;
   
   console.clear();
   showHeader();
   
-  // Compact status bar with legend
+  // Compact status bar
   console.log(
     noumena.textDim("  Gateway: ") + gatewayStatus + 
     noumena.textDim("  |  Services: ") + noumena.text(`${enabledCount}/${services.length}`) +
-    noumena.textDim("  |  ") +
-    noumena.success("✓") + noumena.textDim(" on  ") +
-    noumena.grayDim("–") + noumena.textDim(" off  ") +
-    noumena.success("▶") + noumena.textDim(" running  ") +
-    noumena.warning("■") + noumena.textDim(" stopped")
+    noumena.textDim("  |  Users: ") + noumena.text(`${userCount}`)
+  );
+  console.log(
+    noumena.textDim("  ") +
+    noumena.success("●") + noumena.textDim(" enabled  ") +
+    noumena.grayDim("–") + noumena.textDim(" disabled  ") +
+    noumena.success("■") + noumena.textDim(" image ready  ") +
+    noumena.grayDim("·") + noumena.textDim(" not pulled")
   );
   console.log();
-  
-  if (services.length === 0) {
-    p.note("Use 'Search Docker Hub' or 'Add custom image' to get started.", "No services");
-  }
 
-  // Build service options with status indicators
-  const serviceOptions = services.map(service => {
-    const statusIcon = service.enabled ? noumena.success("✓") : noumena.grayDim("–");
+  // ── Build service options with status indicators ──
+  const serviceOptions: { value: string; label: string; hint?: string }[] = services.map(service => {
+    const statusIcon = service.enabled ? noumena.success("●") : noumena.grayDim("–");
     const imageName = getDockerImageName(service);
     let containerIcon = "";
     if (imageName) {
-      const status = getContainerStatus(imageName);
-      if (status.running) {
-        containerIcon = noumena.success(" ▶");
-      } else if (imageExists(imageName)) {
-        containerIcon = noumena.warning(" ■");
+      const pulled = imageExists(imageName);
+      if (service.type !== "MCP_STDIO") {
+        const running = isContainerRunning(imageName);
+        if (running) {
+          containerIcon = noumena.success(" ▶");
+        } else if (pulled) {
+          containerIcon = noumena.success(" ■");
+        } else {
+          containerIcon = noumena.grayDim(" ·");
+        }
       } else {
-        containerIcon = noumena.grayDim(" ·");
+        containerIcon = pulled ? noumena.success(" ■") : noumena.grayDim(" ·");
       }
     }
     const enabledTools = service.tools.filter(t => t.enabled !== false).length;
     
     return {
-      value: `service:${service.name}` as const,
+      value: `service:${service.name}`,
       label: `${statusIcon}${containerIcon}  ${service.displayName}`,
       hint: `${getTypeLabel(service.type)} | ${enabledTools}/${service.tools.length} tools`,
     };
   });
 
+  if (services.length === 0) {
+    serviceOptions.push({
+      value: "---no-services",
+      label: noumena.textDim("  No services configured yet"),
+      hint: "",
+    });
+  }
+
+  // ── Assemble menu with section headers ──
+  const options: { value: string; label: string; hint?: string }[] = [
+    // Gateway Settings section
+    { value: "---hdr-gw", label: noumena.purple("── Gateway Settings ──"), hint: "" },
+    ...serviceOptions,
+    { value: "search", label: noumena.accent("  + Search Docker Hub"), hint: "Find and add MCP servers" },
+    { value: "custom", label: noumena.accent("  + Add MCP service"), hint: "Templates, NPM, or Docker" },
+
+    // User Management section
+    { value: "---hdr-users", label: noumena.purple("── User Management ──"), hint: "" },
+    { value: "users", label: `  Manage users & tool access`, hint: `${userCount} user(s)` },
+
+    // System section
+    { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
+    { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
+    { value: "config", label: "  Configuration Manager", hint: "Manage services.yaml, Import/Export, Backups" },
+    { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Manual reload needed" : "Auto-reloads after imports" },
+    { value: "quit", label: "  Quit", hint: "" },
+  ];
+
   const action = await p.select({
-    message: "Select a service or action:",
-    options: [
-      ...serviceOptions,
-      { value: "search" as const, label: noumena.purple("+ Search Docker Hub"), hint: "Find and add MCP servers" },
-      { value: "custom" as const, label: noumena.purple("+ Add custom image"), hint: "Local or private registry" },
-      { value: "bootstrap" as const, label: noumena.purple("NPL Bootstrap"), hint: "Create/sync NPL protocol instances" },
-      { value: "reload" as const, label: "Reload config", hint: "Reload services.yaml" },
-      { value: "gateway" as const, label: "Reload Gateway", hint: "Tell Gateway to reload" },
-      { value: "quit" as const, label: "Quit", hint: "" },
-    ],
+    message: "Select:",
+    options,
   });
 
   if (p.isCancel(action) || action === "quit") {
     return false;
+  }
+
+  // Ignore section headers and empty placeholders
+  if (typeof action === "string" && (action.startsWith("---"))) {
+    return true;
   }
 
   if (typeof action === "string" && action.startsWith("service:")) {
@@ -277,13 +1181,19 @@ async function mainMenu(): Promise<boolean> {
     await searchDockerHubFlow();
   } else if (action === "custom") {
     await addCustomImageFlow();
-  } else if (action === "bootstrap") {
-    await nplBootstrapFlow();
-  } else if (action === "reload") {
-    loadConfig(); // Force reload
-    p.log.success("Configuration reloaded from disk");
+  } else if (action === "users") {
+    await userManagementFlow();
+  } else if (action === "credentials") {
+    await credentialManagementFlow();
+  } else if (action === "config") {
+    await configurationManagerFlow();
   } else if (action === "gateway") {
     await reloadGatewayFlow();
+  }
+
+  // Mark config as potentially dirty after config-modifying flows
+  if (typeof action === "string" && !["config", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
+    configDirty = true;
   }
 
   return true;
@@ -295,8 +1205,8 @@ async function mainMenu(): Promise<boolean> {
 async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
   const imageName = getDockerImageName(service);
   const isDocker = imageName !== null;
-  const containerStatus = isDocker ? getContainerStatus(imageName) : null;
   const hasImage = isDocker ? imageExists(imageName) : false;
+  const containerRunning = isDocker && hasImage ? isContainerRunning(imageName) : false;
   
   // Show service info header
   console.log();
@@ -304,8 +1214,17 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
   console.log(noumena.textDim(`  Type: ${getTypeLabel(service.type)}`));
   console.log(noumena.textDim(`  Status: `) + (service.enabled ? noumena.success("Enabled") : noumena.grayDim("Disabled")));
   if (isDocker) {
-    console.log(noumena.textDim(`  Image: ${imageName}`));
-    console.log(noumena.textDim(`  Container: `) + (containerStatus?.running ? noumena.success("Running") : hasImage ? noumena.warning("Stopped") : noumena.grayDim("Not pulled")));
+    console.log(noumena.textDim(`  Image: ${imageName}`) + (hasImage ? noumena.success(" (pulled)") : noumena.grayDim(" (not pulled)")));
+    if (service.type === "MCP_STDIO") {
+      console.log(noumena.textDim(`  Transport: `) + noumena.text("STDIN/STDOUT (ephemeral containers)"));
+      console.log(noumena.textDim(`  Note: `) + noumena.textDim("Gateway spawns containers on-demand when tools are called"));
+    } else if (service.type === "MCP_HTTP") {
+      if (hasImage && containerRunning) {
+        console.log(noumena.textDim(`  Container: `) + noumena.success("Running"));
+      } else if (hasImage) {
+        console.log(noumena.textDim(`  Container: `) + noumena.grayDim("Stopped"));
+      }
+    }
   }
   console.log();
 
@@ -321,16 +1240,19 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
     options.push({ value: "enable", label: noumena.success("Enable service"), hint: "Start accepting requests" });
   }
   
-  // Container actions (only for Docker-based services)
-  if (isDocker) {
-    if (!hasImage) {
-      options.push({ value: "pull", label: "Pull image", hint: `docker pull ${imageName}` });
-    } else if (containerStatus?.running) {
-      options.push({ value: "stop", label: "Stop container" });
-      options.push({ value: "logs", label: "View logs" });
+  // Container start/stop (only for non-STDIO services with image available)
+  // STDIO services can't stay running in detached mode - they need stdin/stdout
+  if (isDocker && hasImage && service.type !== "MCP_STDIO") {
+    if (containerRunning) {
+      options.push({ value: "stop", label: "Stop container", hint: "Stop the running Docker container" });
     } else {
-      options.push({ value: "start", label: noumena.success("Start container") });
+      options.push({ value: "start", label: "Start container", hint: "Start a Docker container" });
     }
+  }
+  
+  // Image pull (only if image not available)
+  if (isDocker && !hasImage) {
+    options.push({ value: "pull", label: "Pull image", hint: `docker pull ${imageName}` });
   }
   
   // Other actions
@@ -364,22 +1286,29 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
       return;
     }
 
-    s.start(`${newEnabled ? "Enabling" : "Disabling"}...`);
+    // Backup current state for rollback
+    const originalEnabled = service.enabled;
+    
+    s.start(`${newEnabled ? "Enabling" : "Disabling"} and syncing to NPL...`);
+    
+    // Apply change to services.yaml
     const success = setServiceEnabled(service.name, newEnabled);
     
     if (success) {
       try {
+        // First sync to NPL
         await reloadGatewayConfig();
-        s.stop(noumena.success(`${service.displayName}: ${newEnabled ? "Enabled" : "Disabled"}`));
-      } catch {
-        s.stop(noumena.success(`${service.displayName}: ${newEnabled ? "Enabled" : "Disabled"}`));
-      }
-
-      try {
         await syncServiceWithNpl(service.name, newEnabled);
-        p.log.success("NPL policy updated");
-      } catch {
-        p.log.warn("NPL sync failed - policy may not reflect this change");
+        s.stop(noumena.success(`✓ ${service.displayName} ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        setServiceEnabled(service.name, originalEnabled);
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${error}`);
+        return; // Exit early - don't proceed to tool selection
       }
 
       // After enabling, go to tool selection
@@ -390,41 +1319,96 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
     } else {
       s.stop(noumena.purpleDim("Failed"));
     }
-  } else if (action === "pull" && imageName) {
-    s.start(`Pulling ${imageName}...`);
-    try {
-      execSync(`docker pull ${imageName}`, { stdio: "pipe" });
-      s.stop(noumena.success("Image pulled"));
-    } catch {
-      s.stop(noumena.purpleDim("Failed to pull"));
-    }
-  } else if (action === "start" && imageName) {
-    const containerName = `mcp-${service.name}`;
-    s.start("Starting container...");
-    const result = startContainer(imageName, containerName);
-    if (result.success) {
-      s.stop(noumena.success("Container started"));
-    } else {
-      s.stop(noumena.purpleDim(`Failed: ${result.error}`));
-    }
-  } else if (action === "stop") {
-    const containerName = `mcp-${service.name}`;
-    s.start("Stopping container...");
-    const result = stopContainer(containerName);
-    if (result.success) {
-      s.stop(noumena.success("Container stopped"));
-    } else {
-      s.stop(noumena.purpleDim(`Failed: ${result.error}`));
-    }
-  } else if (action === "logs") {
-    const containerName = `mcp-${service.name}`;
-    try {
-      const logs = execSync(`docker logs --tail 30 ${containerName}`, { encoding: "utf-8" });
+  } else if (action === "start") {
+    // Note: STDIO services may exit immediately when started in detached mode
+    // as they expect stdin/stdout communication. Gateway spawns them on-demand.
+    console.log();
+    if (service.type === "MCP_STDIO") {
+      p.log.info("Note: STDIO services expect stdin/stdout and may exit immediately.");
+      p.log.info("The Gateway will spawn containers on-demand when tools are called.");
       console.log();
-      console.log(noumena.purple("  Last 30 log lines:"));
-      console.log(noumena.textDim(logs || "(no logs)"));
+      
+      const shouldContinue = await p.confirm({
+        message: "Start container anyway for testing?",
+        initialValue: false,
+      });
+      
+      if (p.isCancel(shouldContinue) || !shouldContinue) {
+        return;
+      }
+    }
+    
+    s.start("Starting container...");
+    const result = startContainer(service);
+    if (result.success) {
+      s.stop(noumena.success("Container created"));
+      
+      if (result.command) {
+        p.log.info(noumena.textDim(`Command: ${result.command}`));
+      }
+      
+      // Give it a moment to start, then check status
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      if (imageName && isContainerRunning(imageName)) {
+        p.log.success("Container is running");
+      } else {
+        p.log.warn("Container exited (expected for STDIO services without stdin/stdout connection)");
+        // Show container logs to help diagnose issues
+        if (imageName) {
+          try {
+            const containerName = `mcp-${service.name}`;
+            const logs = execSync(`docker logs ${containerName} 2>&1 | tail -10`, { 
+              encoding: "utf-8",
+              stdio: ["pipe", "pipe", "ignore"]
+            });
+            if (logs.trim()) {
+              console.log(noumena.textDim("  Last container output:"));
+              logs.trim().split("\n").forEach(line => {
+                console.log(noumena.textDim(`    ${line}`));
+              });
+            }
+          } catch {
+            // Ignore log fetch errors
+          }
+        }
+      }
+    } else {
+      s.stop(noumena.purpleDim("Failed to start container"));
+      if (result.command) {
+        console.log();
+        console.log(noumena.textDim("  Command: ") + result.command);
+      }
+      if (result.error) {
+        console.log();
+        console.log(noumena.textDim("  Error:"));
+        result.error.split("\n").forEach(line => {
+          console.log(noumena.textDim(`    ${line}`));
+        });
+      }
+    }
+  } else if (action === "stop" && imageName) {
+    const containerId = getContainerId(imageName);
+    if (containerId) {
+      s.start("Stopping container...");
+      const success = stopContainer(containerId);
+      if (success) {
+        s.stop(noumena.success("Container stopped"));
+      } else {
+        s.stop(noumena.purpleDim("Failed to stop container"));
+      }
+    }
+  } else if (action === "pull" && imageName) {
+    console.log();
+    console.log(noumena.purple(`  Pulling ${imageName}...`));
+    console.log();
+    try {
+      execSync(`docker pull ${imageName}`, { stdio: "inherit" });
+      console.log();
+      p.log.success("Image pulled successfully");
     } catch {
-      p.log.warn("Failed to get logs");
+      console.log();
+      p.log.error("Failed to pull image");
     }
   } else if (action === "discover" && imageName) {
     const toolCount = await discoverAndSaveTools(service.name, imageName);
@@ -443,23 +1427,8 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
 
     if (!p.isCancel(confirmed) && confirmed) {
       const deleteSpinner = p.spinner();
-      
-      // Step 1: Stop container if running (for Docker-based services)
-      if (isDocker && imageName) {
-        const containerName = `mcp-${service.name}`;
-        const status = getContainerStatus(imageName);
-        if (status.running) {
-          deleteSpinner.start("Stopping container...");
-          const result = stopContainer(containerName);
-          if (result.success) {
-            deleteSpinner.stop(noumena.success("Container stopped"));
-          } else {
-            deleteSpinner.stop(noumena.warning("Could not stop container (may already be stopped)"));
-          }
-        }
-      }
 
-      // Step 2: Disable in NPL (remove from allowed services)
+      // Step 1: Disable in NPL (remove from allowed services)
       deleteSpinner.start("Removing from NPL policy...");
       try {
         await syncServiceWithNpl(service.name, false);
@@ -530,18 +1499,66 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
     }
 
     if (action === "enable_all") {
+      // Backup current state for rollback
+      const originalStates = new Map(
+        freshService.tools.map(t => [t.name, t.enabled !== false])
+      );
+      
+      // Apply changes to services.yaml
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, true);
       }
-      p.log.success("All tools enabled");
+      
+      // Try to sync to NPL via Gateway reload
+      const s = p.spinner();
+      s.start("Syncing to NPL...");
+      
+      try {
+        await reloadGatewayConfig();
+        s.stop(noumena.success("✓ All tools enabled and synced to NPL"));
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        for (const tool of freshService.tools) {
+          setToolEnabled(freshService.name, tool.name, originalStates.get(tool.name) || false);
+        }
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${error}`);
+      }
       continue;
     }
 
     if (action === "disable_all") {
+      // Backup current state for rollback
+      const originalStates = new Map(
+        freshService.tools.map(t => [t.name, t.enabled !== false])
+      );
+      
+      // Apply changes to services.yaml
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, false);
       }
-      p.log.success("All tools disabled");
+      
+      // Try to sync to NPL via Gateway reload
+      const s = p.spinner();
+      s.start("Syncing to NPL...");
+      
+      try {
+        await reloadGatewayConfig();
+        s.stop(noumena.success("✓ All tools disabled and synced to NPL"));
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        for (const tool of freshService.tools) {
+          setToolEnabled(freshService.name, tool.name, originalStates.get(tool.name) || false);
+        }
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${error}`);
+      }
       continue;
     }
 
@@ -576,13 +1593,38 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
       continue;
     }
 
-    // Apply changes
+    // Backup current state for rollback
+    const originalStates = new Map(
+      selectedTools.map(toolName => {
+        const tool = freshService?.tools.find(t => t.name === toolName);
+        return [toolName, tool ? (tool.enabled !== false) : false];
+      })
+    );
+    
+    // Apply changes to services.yaml
     const newEnabled = action === "enable";
     for (const toolName of selectedTools) {
       setToolEnabled(freshService.name, toolName, newEnabled);
     }
     
-    p.log.success(`${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"}`);
+    // Try to sync to NPL via Gateway reload
+    const s = p.spinner();
+    s.start("Syncing to NPL...");
+    
+    try {
+      await reloadGatewayConfig();
+      s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
+    } catch (error) {
+      s.stop(noumena.error("✗ NPL sync failed"));
+      
+      // ROLLBACK: Restore original state
+      for (const toolName of selectedTools) {
+        setToolEnabled(freshService.name, toolName, originalStates.get(toolName) || false);
+      }
+      
+      p.log.error("Failed to sync to NPL - changes rolled back");
+      p.log.error(`${error}`);
+    }
   }
 }
 
@@ -609,11 +1651,13 @@ async function viewServiceInfo(service: ServiceDefinition): Promise<void> {
 
   console.log();
   console.log(noumena.purple(`  Tools (${enabledTools}/${service.tools.length} enabled):`));
+  console.log(noumena.textDim(`  Namespaced as: ${service.name}.{tool}`));
   
   for (const tool of service.tools) {
     const enabled = tool.enabled !== false;
     const status = enabled ? noumena.success("✓") : noumena.grayDim("–");
-    console.log(`    ${status} ${tool.name}`);
+    const namespacedName = `${service.name}.${tool.name}`;
+    console.log(`    ${status} ${namespacedName}`);
     console.log(noumena.textDim(`      ${tool.description.substring(0, 60)}...`));
   }
   console.log();
@@ -755,13 +1799,16 @@ async function searchDockerHubFlow(): Promise<void> {
   });
 
   if (!p.isCancel(shouldPull) && shouldPull) {
-    const s = p.spinner();
-    s.start(`Pulling mcp/${server.name}...`);
+    console.log();
+    console.log(noumena.purple(`  Pulling mcp/${server.name}...`));
+    console.log();
     try {
-      execSync(`docker pull mcp/${server.name}`, { stdio: "pipe" });
-      s.stop(noumena.success("Image pulled successfully"));
+      execSync(`docker pull mcp/${server.name}`, { stdio: "inherit" });
+      console.log();
+      p.log.success("Image pulled successfully");
     } catch {
-      s.stop(noumena.purpleDim("Failed to pull image - you can pull manually later"));
+      console.log();
+      p.log.warn("Failed to pull image - you can pull manually later");
     }
   }
 
@@ -820,12 +1867,368 @@ async function searchDockerHubFlow(): Promise<void> {
   }
 }
 
+// Service templates for common MCP servers
+const SERVICE_TEMPLATES: Record<string, {
+  displayName: string;
+  description: string;
+  command: string;
+  args: string[];
+  requiresCredentials: boolean;
+  credentialName?: string;
+  setupGuide: string;
+}> = {
+  gemini: {
+    displayName: "Google Gemini",
+    description: "Google Gemini AI API for text generation and chat",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-google-gemini"],
+    requiresCredentials: true,
+    credentialName: "gemini",
+    setupGuide: "You'll need a Gemini API key from https://aistudio.google.com/apikey",
+  },
+  github: {
+    displayName: "GitHub",
+    description: "GitHub API for repository management and code operations",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github"],
+    requiresCredentials: true,
+    credentialName: "github",
+    setupGuide: "You'll need a GitHub Personal Access Token from https://github.com/settings/tokens",
+  },
+  filesystem: {
+    displayName: "Filesystem",
+    description: "Local filesystem access for reading and writing files",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem"],
+    requiresCredentials: false,
+    setupGuide: "Provides safe filesystem operations within configured directories",
+  },
+  memory: {
+    displayName: "Memory",
+    description: "Persistent memory/knowledge graph storage",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-memory"],
+    requiresCredentials: false,
+    setupGuide: "Stores and retrieves information across sessions",
+  },
+  brave_search: {
+    displayName: "Brave Search",
+    description: "Web search via Brave Search API",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-brave-search"],
+    requiresCredentials: true,
+    credentialName: "brave_search",
+    setupGuide: "You'll need a Brave Search API key from https://brave.com/search/api/",
+  },
+};
+
 /**
  * Add a custom Docker image (local or private registry)
  */
 async function addCustomImageFlow(): Promise<void> {
   console.log();
-  console.log(noumena.purple("  Add Custom MCP Service"));
+  console.log(noumena.purple("  Add MCP Service"));
+  console.log(noumena.textDim("  Choose how you want to add a service"));
+  console.log();
+
+  const serviceType = await p.select({
+    message: "Service type:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "template", label: "  Quick Start (Common Services)", hint: "Pre-configured templates" },
+      { value: "npm", label: "  NPM Package", hint: "Run via npx (most MCP servers)" },
+      { value: "docker", label: "  Docker Image", hint: "Local or registry image" },
+    ],
+  });
+
+  if (p.isCancel(serviceType) || serviceType === "back") {
+    return;
+  }
+
+  if (serviceType === "template") {
+    await addTemplateServiceFlow();
+  } else if (serviceType === "npm") {
+    await addNpmServiceFlow();
+  } else if (serviceType === "docker") {
+    await addDockerServiceFlow();
+  }
+}
+
+/**
+ * Add a service from a template
+ */
+async function addTemplateServiceFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Quick Start: Common Services"));
+  console.log();
+
+  const templateName = await p.select({
+    message: "Select service:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...Object.entries(SERVICE_TEMPLATES).map(([key, template]) => ({
+        value: key,
+        label: template.displayName,
+        hint: template.requiresCredentials ? "🔐 requires credentials" : "no credentials needed",
+      })),
+    ],
+  });
+
+  if (p.isCancel(templateName) || templateName === "back") {
+    return;
+  }
+
+  const template = SERVICE_TEMPLATES[String(templateName)];
+  
+  console.log();
+  console.log(noumena.success(`  ✓ Selected: ${template.displayName}`));
+  console.log(noumena.textDim(`  ${template.description}`));
+  console.log();
+  console.log(noumena.textDim(`  💡 ${template.setupGuide}`));
+  console.log();
+
+  // Check if service already exists
+  const config = loadConfig();
+  if (config.services.some(s => s.name === templateName)) {
+    p.log.warn(`Service '${templateName}' already exists`);
+    return;
+  }
+
+  // Confirm
+  const confirmed = await p.confirm({
+    message: `Add ${template.displayName}?`,
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  // Create service definition
+  const newService: ServiceDefinition = {
+    name: String(templateName),
+    displayName: template.displayName,
+    type: "MCP_STDIO",
+    enabled: true,  // Enable by default for templates
+    command: template.command,
+    args: template.args,
+    requiresCredentials: template.requiresCredentials,
+    description: template.description,
+    tools: [],
+  };
+
+  const success = addService(newService);
+  if (!success) {
+    p.log.warn("Failed to add service");
+    return;
+  }
+
+  p.log.success(`✓ Added: ${template.displayName}`);
+
+  // Add placeholder tool
+  const { addTool } = await import("./lib/config.js");
+  addTool(String(templateName), {
+    name: `${templateName}_default`,
+    description: `Default tool for ${templateName} - run 'Discover tools' to find actual tools`,
+    inputSchema: { type: "object", properties: {}, required: [] },
+    enabled: true,
+  });
+
+  try {
+    await reloadGatewayConfig();
+  } catch {
+    // Ignore
+  }
+
+  // If requires credentials, prompt to set them up now
+  if (template.requiresCredentials) {
+    console.log();
+    console.log(noumena.warning("  ⚠️  This service requires credentials"));
+    console.log();
+
+    const setupCreds = await p.confirm({
+      message: "Set up credentials now?",
+      initialValue: true,
+    });
+
+    if (!p.isCancel(setupCreds) && setupCreds) {
+      // Check if credential already exists
+      const credConfig = loadCredentialsConfig();
+      const credName = template.credentialName || String(templateName);
+      
+      if (!credConfig.credentials[credName]) {
+        console.log();
+        p.log.info(`Creating credential: ${credName}`);
+        await addCredentialFlow();
+      } else {
+        p.log.success(`Credential '${credName}' already exists`);
+      }
+
+      // Configure service to use the credential
+      console.log();
+      const linkCred = await p.confirm({
+        message: `Link ${template.displayName} to '${credName}' credential?`,
+        initialValue: true,
+      });
+
+      if (!p.isCancel(linkCred) && linkCred) {
+        setServiceCredential(String(templateName), credName);
+        p.log.success(`✓ ${template.displayName} will use '${credName}' credentials`);
+      }
+    }
+  }
+
+  console.log();
+  p.log.info("✨ Service added! Don't forget to grant user access via 'User Management'");
+}
+
+/**
+ * Add an NPM-based MCP server
+ */
+async function addNpmServiceFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Add NPM-based MCP Service"));
+  console.log(noumena.textDim("  For services installed via 'npx' or 'npm'"));
+  console.log();
+  console.log(noumena.textDim("  Examples:"));
+  console.log(noumena.textDim("    • @modelcontextprotocol/server-github"));
+  console.log(noumena.textDim("    • @modelcontextprotocol/server-google-gemini"));
+  console.log(noumena.textDim("    • my-custom-mcp-server"));
+  console.log();
+
+  const packageName = await p.text({
+    message: "NPM package name:",
+    placeholder: "e.g., @modelcontextprotocol/server-github",
+    validate: (value) => {
+      if (!value || value.trim().length === 0) {
+        return "Package name is required";
+      }
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(packageName)) {
+    return;
+  }
+
+  const packageNameStr = String(packageName).trim();
+
+  // Suggest service name from package
+  const extractServiceName = (pkg: string): string => {
+    const parts = pkg.split("/");
+    const last = parts[parts.length - 1];
+    return last.replace("server-", "").replace(/@/g, "");
+  };
+
+  const suggestedName = extractServiceName(packageNameStr);
+
+  const serviceName = await p.text({
+    message: "Service name:",
+    initialValue: suggestedName,
+    placeholder: "e.g., github, gemini",
+    validate: (value) => {
+      if (!value || value.trim().length === 0) {
+        return "Service name is required";
+      }
+      if (!/^[a-z0-9_-]+$/.test(value)) {
+        return "Use lowercase letters, numbers, hyphens, and underscores only";
+      }
+      // Check if already exists
+      const config = loadConfig();
+      if (config.services.some(s => s.name === value)) {
+        return `A service named '${value}' already exists`;
+      }
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(serviceName)) {
+    return;
+  }
+
+  const serviceNameStr = String(serviceName).trim();
+
+  const displayName = await p.text({
+    message: "Display name:",
+    initialValue: serviceNameStr.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+    placeholder: "Human-readable name for the service",
+  });
+
+  if (p.isCancel(displayName)) {
+    return;
+  }
+
+  const description = await p.text({
+    message: "Description:",
+    placeholder: "Brief description of what this MCP service does",
+    initialValue: `MCP service: ${displayName}`,
+  });
+
+  if (p.isCancel(description)) {
+    return;
+  }
+
+  const requiresCreds = await p.confirm({
+    message: "Does this service require credentials?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(requiresCreds)) {
+    return;
+  }
+
+  // Create service definition
+  const newService: ServiceDefinition = {
+    name: serviceNameStr,
+    displayName: String(displayName).trim(),
+    type: "MCP_STDIO",
+    enabled: true,  // Enable by default
+    command: "npx",
+    args: ["-y", packageNameStr],
+    requiresCredentials: Boolean(requiresCreds),
+    description: String(description).trim(),
+    tools: [],
+  };
+
+  const success = addService(newService);
+  if (!success) {
+    p.log.warn("Failed to add service");
+    return;
+  }
+
+  p.log.success(`✓ Added: ${displayName}`);
+
+  // Add placeholder tool
+  const { addTool } = await import("./lib/config.js");
+  addTool(serviceNameStr, {
+    name: `${serviceNameStr}_default`,
+    description: `Default tool for ${serviceNameStr} - run 'Discover tools' to find actual tools`,
+    inputSchema: { type: "object", properties: {}, required: [] },
+    enabled: true,
+  });
+
+  try {
+    await reloadGatewayConfig();
+  } catch {
+    // Ignore
+  }
+
+  if (requiresCreds) {
+    console.log();
+    console.log(noumena.warning("  ⚠️  Don't forget to set up credentials!"));
+    console.log(noumena.textDim("     Go to: System > Manage credentials"));
+  }
+
+  console.log();
+  p.log.info("✨ Service added! Don't forget to grant user access via 'User Management'");
+}
+
+/**
+ * Add a Docker-based MCP service
+ */
+async function addDockerServiceFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Add Docker-based MCP Service"));
   console.log(noumena.textDim("  Add a Docker-based MCP server from:"));
   console.log(noumena.textDim("  • Local image (my-mcp-server)"));
   console.log(noumena.textDim("  • Private registry (ghcr.io/org/mcp-server)"));
@@ -925,13 +2328,16 @@ async function addCustomImageFlow(): Promise<void> {
     });
 
     if (!p.isCancel(shouldPull) && shouldPull) {
-      const s = p.spinner();
-      s.start(`Pulling ${imageNameStr}...`);
+      console.log();
+      console.log(noumena.purple(`  Pulling ${imageNameStr}...`));
+      console.log();
       try {
-        execSync(`docker pull ${imageNameStr}`, { stdio: "pipe" });
-        s.stop(noumena.success("Image pulled successfully"));
+        execSync(`docker pull ${imageNameStr}`, { stdio: "inherit" });
+        console.log();
+        p.log.success("Image pulled successfully");
       } catch (err) {
-        s.stop(noumena.purpleDim("Failed to pull image"));
+        console.log();
+        p.log.error("Failed to pull image");
         
         const continueAnyway = await p.confirm({
           message: "Continue adding service anyway? (image must be available when used)",
@@ -1001,18 +2407,1599 @@ async function addCustomImageFlow(): Promise<void> {
 }
 
 /**
- * Reload Gateway configuration
+ * View the current services.yaml configuration
+ */
+async function viewConfigFlow(): Promise<void> {
+  const configPath = getConfigPath();
+  try {
+    const contents = readFileSync(configPath, "utf-8");
+    console.clear();
+    console.log();
+    console.log(noumena.purple("  services.yaml"));
+    console.log(noumena.textDim(`  ${configPath}`));
+    console.log();
+    console.log(contents);
+    console.log();
+    await p.text({ message: "Press Enter to return...", defaultValue: "", placeholder: "" });
+  } catch (error) {
+    p.log.error(`Failed to read config: ${error}`);
+  }
+}
+
+/**
+ * Open services.yaml in the user's preferred editor
+ */
+async function editConfigFlow(): Promise<void> {
+  const configPath = getConfigPath();
+  const editor = process.env.EDITOR || process.env.VISUAL || "nano";
+  
+  p.log.info(`Opening ${configPath} in ${editor}...`);
+  
+  try {
+    spawnSync(editor, [configPath], { stdio: "inherit" });
+    configDirty = true;
+    p.log.success("Editor closed. Use Reload Gateway to apply changes.");
+  } catch (error) {
+    p.log.error(`Failed to open editor: ${error}`);
+  }
+}
+
+/**
+ * Reload Gateway configuration (manual fallback)
+ * 
+ * Gateway automatically reloads after:
+ * - Import from YAML
+ * - Edit and Apply
+ * 
+ * Use this only when:
+ * - Auto-reload failed
+ * - Manual edits made outside TUI
+ * - Recovery after Gateway restart
  */
 async function reloadGatewayFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Reload Gateway"));
+  console.log();
+  console.log(noumena.textDim("  Manual reload for edge cases:"));
+  console.log(noumena.textDim("  • Auto-reload failed after import"));
+  console.log(noumena.textDim("  • Manual YAML edits outside TUI"));
+  console.log(noumena.textDim("  • Recovery after Gateway restart"));
+  console.log();
+  console.log(noumena.textDim("  Note: Gateway auto-reloads after Import/Edit operations"));
+  console.log();
+
   const s = p.spinner();
   s.start("Reloading Gateway configuration...");
 
   try {
     await reloadGatewayConfig();
     s.stop(noumena.success("Gateway configuration reloaded"));
-  } catch {
+    configDirty = false;
+    
+    console.log();
+    p.log.success("✓ Gateway now has fresh NPL cache and services.yaml");
+  } catch (err: any) {
     s.stop(noumena.purpleDim("Failed to reload Gateway config"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("Check that Gateway is running and try again");
   }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+// ============================================================================
+// User Management Flows
+// ============================================================================
+
+/**
+ * System/service accounts that should be hidden from user management.
+ * These are infrastructure accounts, not end users.
+ */
+const SYSTEM_USERNAMES = new Set(["admin", "service-account-mcpgateway"]);
+
+/**
+ * Filter out system/service accounts from a Keycloak user list.
+ */
+function filterSystemUsers(users: KeycloakUser[]): KeycloakUser[] {
+  return users.filter(u => !SYSTEM_USERNAMES.has(u.username));
+}
+
+/**
+ * User management main menu (V3 Architecture).
+ * 
+ * Keycloak is the source of truth for identity (who exists).
+ * NPL tracks who is "registered for the Gateway" (authorization).
+ * services.yaml is a configuration export, not the source of truth.
+ * 
+ * Flow:
+ * 1. Query Keycloak for all users (identity source)
+ * 2. Check NPL registration status (authorization)
+ * 3. Show registration actions (register/deregister from Gateway)
+ * 4. Show identity actions (create/delete in Keycloak)
+ */
+async function userManagementFlow(): Promise<void> {
+  while (true) {
+    // 1. Load all Keycloak users (source of truth for identity)
+    let keycloakUsers: KeycloakUser[] = [];
+    let keycloakError = "";
+    try {
+      keycloakUsers = await listKeycloakUsers();
+    } catch (err) {
+      keycloakError = `${err}`;
+    }
+
+    // Filter out system accounts (admin and gateway service)
+    // These should not be registered as regular Gateway users
+    const isSystemAccount = (user: KeycloakUser): boolean => {
+      const username = user.username?.toLowerCase() || "";
+      const email = user.email?.toLowerCase() || "";
+      const roles = user.attributes?.role || [];
+      
+      // Filter by username
+      if (username === "admin" || username === "agent") return true;
+      
+      // Filter by email
+      if (email === "admin@acme.com" || email === "agent@acme.com") return true;
+      
+      // Filter by role (admin or gateway system role)
+      if (roles.includes("admin") || roles.includes("gateway")) return true;
+      
+      return false;
+    };
+    
+    const regularUsers = keycloakUsers.filter(u => !isSystemAccount(u));
+    const systemUsers = keycloakUsers.filter(u => isSystemAccount(u));
+
+    // 2. Load services.yaml users (for tool access configuration)
+    const localUsers = getAllUsers();
+    const localUsersByEmail = new Map(localUsers.map(u => [u.userId, u]));
+
+    // 3. Check NPL registration status for each Keycloak user
+    const nplRegistered = new Set<string>();
+    try {
+      const token = await getKeycloakToken();
+      for (const kcUser of regularUsers) {
+        if (!kcUser.email) continue;
+        const accessId = await findUserToolAccess(token, kcUser.email);
+        if (accessId) {
+          nplRegistered.add(kcUser.email);
+        }
+      }
+    } catch (err) {
+      // NPL check failed, continue without NPL status
+    }
+
+    console.clear();
+    console.log();
+    console.log(noumena.purple("  User Management"));
+    console.log();
+    console.log(noumena.textDim("  💡 Keycloak: Identity (who you are) | Gateway: Authorization (what you can do)"));
+    console.log(noumena.textDim("  • Users in Keycloak can be registered for Gateway access (→ NPL + services.yaml)"));
+    console.log();
+    console.log(noumena.textDim(`  ${regularUsers.length} user(s) in Keycloak (${systemUsers.length} system accounts hidden)`));
+    if (keycloakError) {
+      console.log(noumena.warning(`  ⚠ Keycloak error: ${keycloakError.substring(0, 60)}`));
+    }
+    console.log();
+
+    // Build user list from Keycloak with Gateway registration status
+    const userOptions: { value: string; label: string; hint?: string }[] = regularUsers.map(kcUser => {
+      const email = kcUser.email || "(no email)";
+      const role = kcUser.attributes?.role?.[0] || "user";
+      const localUser = localUsersByEmail.get(email);
+      
+      // Registration status
+      const isRegisteredInNpl = nplRegistered.has(email);
+      const isInConfig = !!localUser;
+      const registrationIcon = (isRegisteredInNpl && isInConfig) ? noumena.success("✓") : noumena.grayDim("○");
+      const registrationStatus = (isRegisteredInNpl && isInConfig) 
+        ? noumena.success("Registered")
+        : noumena.grayDim("Not registered");
+      
+      // Tool access count
+      const serviceCount = localUser ? Object.keys(localUser.tools).length : 0;
+      const totalTools = localUser ? Object.values(localUser.tools).reduce((sum, t) => sum + t.length, 0) : 0;
+      const toolInfo = totalTools > 0 ? `${totalTools} tools` : "no tools yet";
+
+      return {
+        value: `user:${kcUser.id}`,
+        label: `${registrationIcon}  ${kcUser.firstName || ""} ${kcUser.lastName || email} ${noumena.textDim(`(${role})`)}`,
+        hint: `${email} | ${registrationStatus} | ${toolInfo}`,
+      };
+    });
+
+    const allOptions: { value: string; label: string; hint?: string }[] = [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...userOptions,
+      { value: "separator", label: noumena.textDim("───────────────────"), hint: "" },
+      { value: "create", label: noumena.accent("+ Create new Keycloak user"), hint: "Add user to identity system" },
+    ];
+
+    const action = await p.select({
+      message: "Select a user or action:",
+      options: allOptions.filter(o => o.value !== "separator"),
+    });
+
+    if (p.isCancel(action) || action === "back") {
+      break;
+    }
+
+    if (typeof action === "string" && action.startsWith("user:")) {
+      const keycloakId = action.replace("user:", "");
+      const kcUser = keycloakUsers.find(u => u.id === keycloakId);
+      if (!kcUser || !kcUser.email) continue;
+
+      await userActionsFlowV3(kcUser, localUsersByEmail.get(kcUser.email));
+    } else if (action === "create") {
+      await createUserFlow();
+    }
+  }
+}
+
+/**
+ * Create a new user in Keycloak and NPL
+ */
+async function createUserFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Create New User"));
+  console.log();
+
+  const email = await p.text({
+    message: "Email:",
+    initialValue: "newuser@acme.com",
+    validate: (v) => {
+      if (!v || !v.includes("@") || !v.includes(".")) return "Valid email required";
+      const users = getAllUsers();
+      if (users.some(u => u.userId === v)) return "User already exists";
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(email)) return;
+
+  const emailStr = String(email).trim();
+
+  const username = await p.text({
+    message: "Username:",
+    initialValue: emailStr.split("@")[0],
+  });
+
+  if (p.isCancel(username)) return;
+
+  const firstName = await p.text({
+    message: "First name:",
+    placeholder: "Optional",
+  });
+
+  if (p.isCancel(firstName)) return;
+
+  const lastName = await p.text({
+    message: "Last name:",
+    placeholder: "Optional",
+  });
+
+  if (p.isCancel(lastName)) return;
+
+  const password = await p.password({
+    message: "Initial password:",
+    validate: (v) => (!v || v.length < 8 ? "Password must be at least 8 characters" : undefined),
+  });
+
+  if (p.isCancel(password)) return;
+
+  const usernameStr = String(username).trim();
+  const firstNameStr = firstName ? String(firstName).trim() : "";
+  const lastNameStr = lastName ? String(lastName).trim() : "";
+
+  const s = p.spinner();
+  
+  try {
+    // Step 1: Create in Keycloak
+    s.start("Creating user in Keycloak...");
+    const keycloakId = await createKeycloakUser(
+      emailStr,
+      usernameStr,
+      firstNameStr || undefined,
+      lastNameStr || undefined,
+      String(password)
+    );
+    s.stop(noumena.success("User created in Keycloak"));
+
+    // Step 2: Register in NPL
+    s.start("Registering in NPL...");
+    try {
+      await registerUserInNpl(emailStr);
+      s.stop(noumena.success("User registered in NPL"));
+    } catch {
+      s.stop(noumena.textDim("NPL registration skipped (NPL may not be available)"));
+    }
+
+    // Step 3: Add to services.yaml
+    s.start("Saving to configuration...");
+    const newUser: UserToolAccess = {
+      userId: emailStr,
+      keycloakId,
+      displayName: `${firstNameStr} ${lastNameStr}`.trim() || usernameStr,
+      createdAt: new Date().toISOString(),
+      tools: {},
+      vaultPaths: {},
+    };
+    
+    const success = addUser(newUser);
+    if (success) {
+      s.stop(noumena.success("Configuration updated"));
+      p.log.success(`User created: ${email}`);
+      p.log.info("Use 'Edit tool access' to grant tools to this user");
+    } else {
+      s.stop(noumena.purpleDim("Failed to update configuration"));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * User actions menu (V3 Architecture).
+ * Keycloak user is the source, localUser may or may not exist.
+ */
+async function userActionsFlowV3(kcUser: KeycloakUser, localUser: UserToolAccess | undefined): Promise<void> {
+  const email = kcUser.email || "(no email)";
+  const role = kcUser.attributes?.role?.[0] || "user";
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
+  
+  console.log();
+  console.log(noumena.purple(`  ${displayName}`));
+  console.log(noumena.textDim(`  Email: ${email}`));
+  console.log(noumena.textDim(`  Role: ${role}`));
+  console.log(noumena.textDim(`  Keycloak ID: ${kcUser.id}`));
+  console.log();
+  
+  // Check registration status
+  const isRegistered = !!localUser;
+  let isInNpl = false;
+  try {
+    // Check UserRegistry (not UserToolAccess) - users exist even without tools
+    isInNpl = await isUserInNpl(email);
+  } catch {
+    // NPL check failed
+  }
+  
+  if (isRegistered && isInNpl) {
+    const serviceCount = Object.keys(localUser.tools).length;
+    const toolCount = Object.values(localUser.tools).reduce((sum, tools) => sum + tools.length, 0);
+    console.log(noumena.success(`  ✓ Registered for Gateway`));
+    console.log(noumena.textDim(`    Access: ${serviceCount} services, ${toolCount} tools`));
+  } else if (isInNpl && !isRegistered) {
+    console.log(noumena.warning(`  ⚠ Registered in NPL but not in services.yaml (inconsistent state)`));
+  } else if (isRegistered && !isInNpl) {
+    console.log(noumena.warning(`  ⚠ In services.yaml but not in NPL (inconsistent state)`));
+  } else {
+    console.log(noumena.grayDim(`  ○ Not registered for Gateway`));
+  }
+  console.log();
+
+  // Build action options based on registration status
+  const actionOptions: Array<{ value: string; label: string; hint?: string }> = [
+    { value: "back", label: noumena.textDim("← Back") },
+  ];
+  
+  if (isRegistered) {
+    actionOptions.push(
+      { value: "tools", label: "Edit tool access", hint: "Grant/revoke tools" },
+      { value: "view", label: "View all access", hint: "Show detailed permissions" },
+      { value: "deregister", label: noumena.warning("Deregister from Gateway"), hint: "Remove from NPL + services.yaml" }
+    );
+  } else {
+    actionOptions.push(
+      { value: "register", label: noumena.success("Register for Gateway"), hint: "Add to NPL + services.yaml" }
+    );
+  }
+  
+  actionOptions.push(
+    { value: "separator", label: noumena.textDim("───────────────"), hint: "" },
+    { value: "delete", label: noumena.purpleDim("Delete from Keycloak"), hint: "Remove identity (+ cascade to NPL)" }
+  );
+
+  const action = await p.select({
+    message: "Action:",
+    options: actionOptions.filter(o => o.value !== "separator"),
+  });
+
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+
+  if (action === "register") {
+    await registerUserForGatewayFlow(kcUser);
+  } else if (action === "deregister") {
+    if (localUser) {
+      await deregisterUserFromGatewayFlow(kcUser, localUser);
+    }
+  } else if (action === "tools") {
+    if (localUser) {
+      await editUserToolAccessFlow(localUser);
+    }
+  } else if (action === "view") {
+    if (localUser) {
+      await viewUserAccessFlow(localUser);
+    }
+  } else if (action === "delete") {
+    await deleteUserFromKeycloakFlow(kcUser, localUser);
+  }
+}
+
+/**
+ * Register a Keycloak user for Gateway access (add to NPL + services.yaml)
+ */
+async function registerUserForGatewayFlow(kcUser: KeycloakUser): Promise<void> {
+  const email = kcUser.email || "";
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
+  
+  const confirmed = await p.confirm({
+    message: `Register ${noumena.purple(displayName)} for Gateway access?`,
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Register in NPL
+    s.start("Registering in NPL...");
+    await registerUserInNpl(email);
+    s.stop(noumena.success("Registered in NPL"));
+
+    // Step 2: Add to services.yaml
+    s.start("Saving to configuration...");
+    const newUser: UserToolAccess = {
+      userId: email,
+      keycloakId: kcUser.id,
+      displayName,
+      createdAt: new Date().toISOString(),
+      tools: {},
+      vaultPaths: {},
+    };
+    
+    const success = addUser(newUser);
+    if (success) {
+      s.stop(noumena.success("Configuration updated"));
+      p.log.success(`User registered: ${email}`);
+      p.log.info("Use 'Edit tool access' to grant tools to this user");
+    } else {
+      s.stop(noumena.purpleDim("Failed to update configuration"));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Deregister a user from Gateway (remove from NPL + services.yaml, keep in Keycloak)
+ */
+async function deregisterUserFromGatewayFlow(kcUser: KeycloakUser, localUser: UserToolAccess): Promise<void> {
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || localUser.userId;
+  
+  const confirmed = await p.confirm({
+    message: `Deregister ${noumena.purple(displayName)} from Gateway? (Keycloak account will remain)`,
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Remove from NPL
+    s.start("Removing from NPL...");
+    try {
+      await removeUserFromNpl(localUser.userId);
+      s.stop(noumena.success("Removed from NPL"));
+    } catch {
+      s.stop(noumena.textDim("NPL removal skipped (not found)"));
+    }
+
+    // Step 2: Remove from services.yaml
+    s.start("Removing from configuration...");
+    const success = removeUserFromConfig(localUser.userId);
+    if (success) {
+      s.stop(noumena.success("Removed from configuration"));
+      p.log.success(`User deregistered: ${localUser.userId}`);
+      p.log.info("User can still authenticate via Keycloak but has no Gateway access");
+    } else {
+      s.stop(noumena.purpleDim("Failed to update configuration"));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Delete a user from Keycloak (cascade delete from NPL + services.yaml)
+ */
+async function deleteUserFromKeycloakFlow(kcUser: KeycloakUser, localUser: UserToolAccess | undefined): Promise<void> {
+  const email = kcUser.email || "(no email)";
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
+  
+  console.log();
+  console.log(noumena.warning("  ⚠ WARNING: This will delete the user's identity!"));
+  console.log(noumena.textDim("  • Keycloak account will be removed"));
+  console.log(noumena.textDim("  • NPL registration will be removed (if exists)"));
+  console.log(noumena.textDim("  • services.yaml entry will be removed (if exists)"));
+  console.log();
+  
+  const confirmed = await p.confirm({
+    message: `Delete ${noumena.purple(displayName)} from Keycloak?`,
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Remove from NPL (if registered)
+    if (localUser) {
+      s.start("Removing from NPL...");
+      try {
+        await removeUserFromNpl(localUser.userId);
+        s.stop(noumena.success("Removed from NPL"));
+      } catch {
+        s.stop(noumena.textDim("NPL removal skipped (not found)"));
+      }
+    }
+
+    // Step 2: Delete from Keycloak
+    if (kcUser.id) {
+      s.start("Deleting from Keycloak...");
+      try {
+        await deleteKeycloakUser(kcUser.id);
+        s.stop(noumena.success("Deleted from Keycloak"));
+      } catch (error) {
+        s.stop(noumena.warning("Failed to delete from Keycloak"));
+        p.log.warn(`${error}`);
+      }
+    } else {
+      s.stop(noumena.warning("Cannot delete from Keycloak (missing ID)"));
+    }
+
+    // Step 3: Remove from config (if exists)
+    if (localUser) {
+      s.start("Removing from configuration...");
+      const success = removeUserFromConfig(localUser.userId);
+      if (success) {
+        s.stop(noumena.success("Removed from configuration"));
+      } else {
+        s.stop(noumena.purpleDim("Failed to update configuration"));
+      }
+    }
+    
+    p.log.success(`User deleted: ${email}`);
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * User actions menu (legacy, kept for compatibility)
+ */
+async function userActionsFlow(user: UserToolAccess): Promise<void> {
+  console.log();
+  console.log(noumena.purple(`  ${user.displayName || user.userId}`));
+  console.log(noumena.textDim(`  Email: ${user.userId}`));
+  if (user.keycloakId) {
+    console.log(noumena.textDim(`  Keycloak ID: ${user.keycloakId}`));
+  }
+  
+  const serviceCount = Object.keys(user.tools).length;
+  const toolCount = Object.values(user.tools).reduce((sum, tools) => sum + tools.length, 0);
+  console.log(noumena.textDim(`  Access: ${serviceCount} services, ${toolCount} tools`));
+  console.log();
+
+  const action = await p.select({
+    message: "Action:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "tools", label: "Edit tool access", hint: "Grant/revoke tools" },
+      { value: "view", label: "View all access", hint: "Show detailed permissions" },
+      { value: "delete", label: noumena.purpleDim("Delete user"), hint: "Remove from Keycloak + NPL + services.yaml" },
+    ],
+  });
+
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+
+  if (action === "tools") {
+    await editUserToolAccessFlow(user);
+  } else if (action === "view") {
+    await viewUserAccessFlow(user);
+  } else if (action === "delete") {
+    await deleteUserFlow(user);
+  }
+}
+
+/**
+ * Edit tool access for a user
+ */
+async function editUserToolAccessFlow(user: UserToolAccess): Promise<void> {
+  const config = loadConfig();
+  const services = config.services.filter(s => s.enabled);
+
+  if (services.length === 0) {
+    p.log.warn("No services are enabled");
+    return;
+  }
+
+  while (true) {
+    // Refresh user data
+    const freshUser = getUser(user.userId);
+    if (!freshUser) break;
+
+    console.log();
+    console.log(noumena.purple(`  Tool Access: ${freshUser.displayName || freshUser.userId}`));
+    console.log();
+
+    // Show services with access status
+    const serviceOptions = services.map(service => {
+      const hasAccess = service.name in freshUser.tools;
+      const toolList = freshUser.tools[service.name] || [];
+      const isWildcard = toolList.includes("*");
+      const serviceDisabled = !service.enabled;
+      
+      let hint: string;
+      if (isWildcard) {
+        hint = serviceDisabled ? "All tools granted (service disabled)" : "All tools granted";
+      } else if (hasAccess) {
+        hint = serviceDisabled 
+          ? `${toolList.length}/${service.tools.length} tools (service disabled)`
+          : `${toolList.length}/${service.tools.length} tools`;
+      } else {
+        hint = "No access";
+      }
+
+      const icon = hasAccess ? noumena.success("✓") : noumena.grayDim("–");
+      const serviceLabel = serviceDisabled 
+        ? `${service.displayName} ${noumena.grayDim("(disabled)")}`
+        : service.displayName;
+      
+      return {
+        value: service.name,
+        label: `${icon}  ${serviceLabel}`,
+        hint,
+      };
+    });
+
+    const selected = await p.select({
+      message: "Select a service to manage:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        ...serviceOptions,
+      ],
+    });
+
+    if (p.isCancel(selected) || selected === "back") {
+      break;
+    }
+
+    const service = services.find(s => s.name === selected);
+    if (service) {
+      await manageUserServiceAccessFlow(freshUser, service);
+    }
+  }
+}
+
+/**
+ * Manage user access for a specific service
+ */
+async function manageUserServiceAccessFlow(
+  user: UserToolAccess,
+  service: ServiceDefinition
+): Promise<void> {
+  while (true) {
+    // Refresh user data
+    const freshUser = getUser(user.userId);
+    if (!freshUser) break;
+
+    const userTools = freshUser.tools[service.name] || [];
+    const hasWildcard = userTools.includes("*");
+    const enabledCount = hasWildcard ? service.tools.length : userTools.length;
+    const serviceDisabled = !service.enabled;
+
+    console.log();
+    console.log(noumena.purple(`  ${service.displayName} - ${freshUser.displayName || freshUser.userId}`));
+    console.log(noumena.textDim(`  ${enabledCount}/${service.tools.length} tools granted`));
+    if (serviceDisabled) {
+      console.log(noumena.warning("  ⚠ Service is globally disabled - tools cannot be used until enabled"));
+    }
+    console.log();
+
+    const action = await p.select({
+      message: "What do you want to do?",
+      options: [
+        { value: "back" as const, label: noumena.textDim("← Back") },
+        { value: "grant" as const, label: noumena.success("Grant tools"), hint: "Pick tools with SPACE, then ENTER" },
+        { value: "revoke" as const, label: noumena.warning("Revoke tools"), hint: "Pick tools with SPACE, then ENTER" },
+        { value: "grant_all" as const, label: "Grant all", hint: "Grant all tools at once" },
+        { value: "revoke_all" as const, label: "Revoke all", hint: "Remove all access to this service" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") {
+      break;
+    }
+
+    const s = p.spinner();
+
+    if (action === "grant_all") {
+      // Backup current state for rollback
+      const originalTools = {...freshUser.tools};
+      
+      s.start(`Granting all ${service.displayName} tools and syncing to NPL...`);
+      
+      // Apply change to services.yaml
+      grantAllToolsToUser(freshUser.userId, service.name);
+      
+      try {
+        await grantAllToolsForServiceInNpl(freshUser.userId, service.name);
+        s.stop(noumena.success("✓ All tools granted and synced to NPL"));
+      } catch (err) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        const user = getUser(freshUser.userId);
+        if (user) {
+          user.tools = originalTools;
+          updateUser(freshUser.userId, user);
+        }
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${err}`);
+      }
+      continue;
+    }
+
+    if (action === "revoke_all") {
+      const confirmed = await p.confirm({
+        message: `Revoke ALL access to ${service.displayName}?`,
+        initialValue: false,
+      });
+
+      if (!p.isCancel(confirmed) && confirmed) {
+        // Backup current state for rollback
+        const originalTools = {...freshUser.tools};
+        
+        s.start("Revoking access and syncing to NPL...");
+        
+        // Apply change to services.yaml
+        revokeServiceFromUser(freshUser.userId, service.name);
+        
+        try {
+          await revokeServiceInNpl(freshUser.userId, service.name);
+          s.stop(noumena.success("✓ Service access revoked and synced to NPL"));
+        } catch (err) {
+          s.stop(noumena.error("✗ NPL sync failed"));
+          
+          // ROLLBACK: Restore original state
+          const user = getUser(freshUser.userId);
+          if (user) {
+            user.tools = originalTools;
+            updateUser(freshUser.userId, user);
+          }
+          
+          p.log.error("Failed to sync to NPL - changes rolled back");
+          p.log.error(`${err}`);
+        }
+      }
+      continue;
+    }
+
+    // Filter tools based on action
+    const toolsToShow = action === "grant"
+      ? service.tools.filter(t => !hasWildcard && !userTools.includes(t.name))
+      : service.tools.filter(t => hasWildcard || userTools.includes(t.name));
+
+    if (toolsToShow.length === 0) {
+      p.log.info(action === "grant" ? "All tools are already granted" : "No tools to revoke");
+      continue;
+    }
+
+    // Instructions
+    console.log();
+    console.log(noumena.textDim("  Use ") + noumena.purple("SPACE") + noumena.textDim(" to select/deselect tools"));
+    console.log(noumena.textDim("  Press ") + noumena.purple("ENTER") + noumena.textDim(` to ${action} selected tools`));
+    console.log();
+
+    // Multi-select tools
+    const selectedTools = await p.multiselect({
+      message: `Select tools to ${action}:`,
+      options: toolsToShow.map(tool => ({
+        value: tool.name,
+        label: tool.name,
+        hint: tool.description.substring(0, 50),
+      })),
+      required: false,
+    });
+
+    if (p.isCancel(selectedTools) || selectedTools.length === 0) {
+      continue;
+    }
+
+    // Apply changes — save to local config first, then sync to NPL
+    s.start(`${action === "grant" ? "Granting" : "Revoking"} ${selectedTools.length} tool(s)...`);
+    
+    // Step 1: Always save to local config
+    for (const toolName of selectedTools) {
+      if (action === "grant") {
+        grantToolToUser(freshUser.userId, service.name, toolName);
+      } else {
+        revokeToolFromUser(freshUser.userId, service.name, toolName);
+      }
+    }
+
+    // Step 2: Best-effort sync to NPL
+    let nplSynced = true;
+    let nplError = "";
+    try {
+      for (const toolName of selectedTools) {
+        if (action === "grant") {
+          await grantToolInNpl(freshUser.userId, service.name, toolName);
+        } else {
+          await revokeToolInNpl(freshUser.userId, service.name, toolName);
+        }
+      }
+    } catch (err) {
+      nplSynced = false;
+      nplError = String(err);
+    }
+
+    if (nplSynced) {
+      s.stop(noumena.success(`${selectedTools.length} tool(s) ${action === "grant" ? "granted" : "revoked"} and synced to NPL`));
+    } else {
+      s.stop(noumena.warning(`${selectedTools.length} tool(s) ${action === "grant" ? "granted" : "revoked"} locally (NPL sync failed)`));
+      console.log(noumena.textDim(`  Error: ${nplError.substring(0, 100)}`));
+      console.log(noumena.textDim("  Run 'Sync NPL' from main menu to sync"));
+    }
+  }
+}
+
+/**
+ * View detailed access for a user
+ */
+async function viewUserAccessFlow(user: UserToolAccess): Promise<void> {
+  console.log();
+  console.log(noumena.purple(`  Access Details: ${user.displayName || user.userId}`));
+  console.log();
+
+  if (Object.keys(user.tools).length === 0) {
+    console.log(noumena.textDim("  No tool access granted"));
+  } else {
+    for (const [serviceName, tools] of Object.entries(user.tools)) {
+      const service = loadConfig().services.find(s => s.name === serviceName);
+      const displayName = service?.displayName || serviceName;
+      
+      if (tools.includes("*")) {
+        console.log(noumena.success(`  ✓ ${displayName}`));
+        console.log(noumena.textDim(`    ALL TOOLS`));
+      } else {
+        console.log(noumena.success(`  ✓ ${displayName}`));
+        tools.forEach(tool => {
+          console.log(noumena.textDim(`    - ${tool}`));
+        });
+      }
+      console.log();
+    }
+  }
+
+  await p.confirm({ message: "Press Enter to continue", initialValue: true });
+}
+
+/**
+ * Delete a user
+ */
+async function deleteUserFlow(user: UserToolAccess): Promise<void> {
+  const confirmed = await p.confirm({
+    message: `Delete ${noumena.purple(user.displayName || user.userId)}? This will remove them from Keycloak and NPL.`,
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Remove from NPL
+    s.start("Removing from NPL...");
+    try {
+      await removeUserFromNpl(user.userId);
+      s.stop(noumena.success("Removed from NPL"));
+    } catch {
+      s.stop(noumena.textDim("NPL removal skipped (not found)"));
+    }
+
+    // Step 2: Delete from Keycloak (if we have the ID)
+    if (user.keycloakId) {
+      s.start("Deleting from Keycloak...");
+      try {
+        await deleteKeycloakUser(user.keycloakId);
+        s.stop(noumena.success("Deleted from Keycloak"));
+      } catch (error) {
+        s.stop(noumena.warning("Failed to delete from Keycloak"));
+        p.log.warn(`${error}`);
+      }
+    }
+
+    // Step 3: Remove from config
+    s.start("Removing from configuration...");
+    const success = removeUserFromConfig(user.userId);
+    if (success) {
+      s.stop(noumena.success("Removed from configuration"));
+      p.log.success(`User deleted: ${user.userId}`);
+    } else {
+      s.stop(noumena.purpleDim("Failed to update configuration"));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Credential Management Flow
+ */
+async function credentialManagementFlow(): Promise<void> {
+  const credConfig = loadCredentialsConfig();
+  const services = loadConfig().services;
+  
+  console.log();
+  console.log(noumena.purple("  Credential Management"));
+  console.log(noumena.textDim("  Manage Vault secrets and credential mappings"));
+  console.log();
+  
+  // Show current status
+  const credCount = Object.keys(credConfig.credentials).length;
+  const servicesWithCreds = Object.keys(credConfig.service_defaults).length;
+  
+  console.log(noumena.textDim(`  Credentials defined: ${credCount}`));
+  console.log(noumena.textDim(`  Services with credentials: ${servicesWithCreds}/${services.length}`));
+  console.log();
+  
+  // Show quick guide if first time
+  if (credCount === 0) {
+    console.log(noumena.success("  💡 Quick Start Guide:"));
+    console.log(noumena.textDim("     1. Add credential - Define how to fetch secrets from Vault"));
+    console.log(noumena.textDim("     2. Configure service - Map a service to use the credential"));
+    console.log(noumena.textDim("     3. Test injection - Verify it works before making real calls"));
+    console.log();
+  }
+  
+  const action = await p.select({
+    message: "Select action:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "add", label: noumena.accent("  + Add credential"), hint: "Create new credential mapping" },
+      { value: "configure", label: "  Configure service", hint: "Set up credentials for a service" },
+      { value: "test", label: "  Test injection", hint: "Verify credential injection works" },
+      { value: "view", label: "  View credentials.yaml", hint: "Show current configuration" },
+    ],
+  });
+  
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+  
+  if (action === "add") {
+    await addCredentialFlow();
+  } else if (action === "configure") {
+    await configureServiceCredentialsFlow();
+  } else if (action === "test") {
+    await testCredentialsFlow();
+  } else if (action === "view") {
+    await viewCredentialsConfigFlow();
+  }
+}
+
+// Service configuration lookup table for common services
+const SERVICE_CONFIGS: Record<string, {
+  pathSuffix: string;
+  envVarPrefix: string;
+  fields: Array<{ vaultField: string; envVar: string }>;
+  description: string;
+}> = {
+  gemini: {
+    pathSuffix: "gemini/api",
+    envVarPrefix: "GEMINI",
+    fields: [{ vaultField: "api_key", envVar: "GEMINI_API_KEY" }],
+    description: "Google Gemini AI API",
+  },
+  google_gemini: {
+    pathSuffix: "gemini/api",
+    envVarPrefix: "GEMINI",
+    fields: [{ vaultField: "api_key", envVar: "GEMINI_API_KEY" }],
+    description: "Google Gemini AI API",
+  },
+  github: {
+    pathSuffix: "github/personal",
+    envVarPrefix: "GITHUB",
+    fields: [{ vaultField: "token", envVar: "GITHUB_TOKEN" }],
+    description: "GitHub API",
+  },
+  work_github: {
+    pathSuffix: "github/work",
+    envVarPrefix: "GITHUB",
+    fields: [{ vaultField: "token", envVar: "GITHUB_TOKEN" }],
+    description: "GitHub API (work account)",
+  },
+  personal_github: {
+    pathSuffix: "github/personal",
+    envVarPrefix: "GITHUB",
+    fields: [{ vaultField: "token", envVar: "GITHUB_TOKEN" }],
+    description: "GitHub API (personal account)",
+  },
+  slack: {
+    pathSuffix: "slack/workspace",
+    envVarPrefix: "SLACK",
+    fields: [{ vaultField: "token", envVar: "SLACK_TOKEN" }],
+    description: "Slack API",
+  },
+  prod_slack: {
+    pathSuffix: "slack/prod",
+    envVarPrefix: "SLACK",
+    fields: [{ vaultField: "token", envVar: "SLACK_TOKEN" }],
+    description: "Slack API (production)",
+  },
+  openai: {
+    pathSuffix: "openai/api",
+    envVarPrefix: "OPENAI",
+    fields: [{ vaultField: "api_key", envVar: "OPENAI_API_KEY" }],
+    description: "OpenAI API",
+  },
+  anthropic: {
+    pathSuffix: "anthropic/api",
+    envVarPrefix: "ANTHROPIC",
+    fields: [{ vaultField: "api_key", envVar: "ANTHROPIC_API_KEY" }],
+    description: "Anthropic Claude API",
+  },
+  database: {
+    pathSuffix: "database/credentials",
+    envVarPrefix: "DB",
+    fields: [
+      { vaultField: "username", envVar: "DB_USER" },
+      { vaultField: "password", envVar: "DB_PASS" },
+    ],
+    description: "Database credentials",
+  },
+};
+
+/**
+ * Detect service from credential name and return canonical config
+ */
+function detectService(credentialName: string): typeof SERVICE_CONFIGS[string] | null {
+  // Direct match
+  if (SERVICE_CONFIGS[credentialName]) {
+    return SERVICE_CONFIGS[credentialName];
+  }
+  
+  // Partial match (e.g., "my_gemini" contains "gemini")
+  for (const [key, config] of Object.entries(SERVICE_CONFIGS)) {
+    if (credentialName.includes(key)) {
+      return config;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Add new credential mapping
+ */
+async function addCredentialFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Add Credential Mapping"));
+  console.log(noumena.textDim("  Create a new credential with Vault integration"));
+  console.log();
+  console.log(noumena.textDim("  💡 Common services: gemini, github, slack, openai, anthropic"));
+  console.log();
+  
+  // Step 1: Credential name
+  const credentialName = await p.text({
+    message: "Credential name:",
+    placeholder: "e.g., google_gemini, work_github, prod_slack",
+    validate: (value) => {
+      if (!value) return "Credential name is required";
+      if (!/^[a-z0-9_]+$/.test(value)) return "Use lowercase, numbers, and underscores only";
+      return undefined;
+    },
+  });
+  
+  if (p.isCancel(credentialName)) return;
+  
+  // Detect service and provide smart defaults
+  const detectedService = detectService(String(credentialName));
+  
+  if (detectedService) {
+    console.log();
+    console.log(noumena.success(`  ✓ Detected: ${detectedService.description}`));
+    console.log(noumena.textDim(`  Using canonical configuration for this service`));
+    console.log();
+  }
+  
+  // Step 2: Vault path template (with better suggestion)
+  // Step 2: Credential scope (tenant-level vs. user-level)
+  console.log();
+  console.log(noumena.textDim("  📊 Credential Scope:"));
+  console.log(noumena.textDim("     • Tenant-level: One API key shared by all users in the organization"));
+  console.log(noumena.textDim("     • User-level: Each user provides their own API key"));
+  console.log();
+  
+  const credentialScope = await p.select({
+    message: "Credential scope:",
+    options: [
+      { value: "tenant", label: "Tenant-level (shared)", hint: "e.g., company Slack workspace" },
+      { value: "user", label: "User-level (per-user)", hint: "e.g., personal GitHub tokens" },
+    ],
+  });
+  
+  if (p.isCancel(credentialScope)) return;
+  
+  // Generate suggested path based on scope
+  const isTenantLevel = credentialScope === "tenant";
+  const pathBase = detectedService
+    ? detectedService.pathSuffix
+    : String(credentialName).replace(/_/g, "/");
+  
+  const suggestedPath = isTenantLevel
+    ? `secret/data/tenants/{tenant}/services/${pathBase}`
+    : `secret/data/tenants/{tenant}/users/{user}/${pathBase}`;
+  
+  console.log();
+  console.log(noumena.success(`  ✓ ${isTenantLevel ? "Tenant-level" : "User-level"} credential`));
+  console.log(noumena.textDim(`     Path: ${suggestedPath}`));
+  console.log();
+  
+  const vaultPath = await p.text({
+    message: "Vault path template:",
+    placeholder: "Use suggested path or enter custom",
+    initialValue: suggestedPath,
+    validate: (value) => {
+      if (!value) return "Vault path is required";
+      if (!value.startsWith("secret/data/")) return "Path should start with 'secret/data/'";
+      if (!value.includes("{tenant}")) return "Path should include {tenant} placeholder";
+      if (!isTenantLevel && !value.includes("{user}")) {
+        return "User-level path should include {user} placeholder";
+      }
+      if (isTenantLevel && value.includes("{user}")) {
+        return "Tenant-level path should NOT include {user} placeholder";
+      }
+      return undefined;
+    },
+  });
+  
+  if (p.isCancel(vaultPath)) return;
+  
+  // Step 3: Injection type
+  const injectionType = await p.select({
+    message: "How should credentials be injected?",
+    options: [
+      { value: "env", label: "Environment variables", hint: "Most common for MCP servers" },
+      { value: "header", label: "HTTP headers", hint: "For HTTP-based services" },
+    ],
+  });
+  
+  if (p.isCancel(injectionType)) return;
+  
+  // Step 4: Field mappings (with smart suggestions)
+  console.log();
+  console.log(noumena.textDim("  🔑 Define field mappings (Vault field → Injection target)"));
+  
+  const fieldMapping: Record<string, string> = {};
+  
+  // If we detected the service, suggest its standard fields
+  if (detectedService && detectedService.fields.length > 0) {
+    console.log(noumena.textDim(`  Standard fields for ${detectedService.description}:`));
+    detectedService.fields.forEach(f => {
+      console.log(noumena.textDim(`    • ${f.vaultField} → ${f.envVar}`));
+    });
+    console.log();
+    
+    const useStandard = await p.confirm({
+      message: "Use standard field mappings?",
+      initialValue: true,
+    });
+    
+    if (!p.isCancel(useStandard) && useStandard) {
+      // Use the standard mappings
+      detectedService.fields.forEach(f => {
+        fieldMapping[f.vaultField] = f.envVar;
+      });
+      console.log();
+      p.log.success(`  ✓ Added ${detectedService.fields.length} standard field(s)`);
+    } else {
+      console.log();
+      console.log(noumena.textDim("  Define custom field mappings (press Enter with empty field to finish)"));
+      console.log();
+    }
+  } else {
+    console.log(noumena.textDim("  Common fields: api_key, token, username, password"));
+    console.log(noumena.textDim("  Press Enter with empty field name when done"));
+    console.log();
+  }
+  
+  // Allow adding custom fields (or all fields if not using standard)
+  if (Object.keys(fieldMapping).length === 0 || detectedService === null) {
+    while (true) {
+      const vaultField = await p.text({
+        message: `Vault field name (${Object.keys(fieldMapping).length} added):`,
+        placeholder: "e.g., api_key, token, username, password",
+      });
+      
+      if (p.isCancel(vaultField)) return;
+      if (!vaultField) break; // Done adding fields
+      
+      // Smart env var suggestion based on field name and detected service
+      let suggestedEnvVar = String(vaultField).toUpperCase();
+      if (detectedService && injectionType === "env") {
+        // Use service prefix for better naming
+        const fieldName = String(vaultField).toUpperCase();
+        suggestedEnvVar = `${detectedService.envVarPrefix}_${fieldName}`;
+      }
+      
+      const targetName = await p.text({
+        message: `  → ${injectionType === "env" ? "Environment variable" : "Header"} name:`,
+        placeholder: injectionType === "env" ? "e.g., GEMINI_API_KEY, GITHUB_TOKEN" : "e.g., X-API-Key, Authorization",
+        initialValue: suggestedEnvVar,
+      });
+      
+      if (p.isCancel(targetName)) return;
+      if (!targetName) continue;
+      
+      fieldMapping[String(vaultField)] = String(targetName);
+      p.log.success(`  ✓ Added: ${vaultField} → ${targetName}`);
+    }
+  }
+  
+  if (Object.keys(fieldMapping).length === 0) {
+    p.log.warn("No field mappings defined. Credential not added.");
+    return;
+  }
+  
+  // Step 5: Save mapping
+  const s = p.spinner();
+  s.start("Saving credential mapping...");
+  
+  const success = addCredentialMapping(
+    String(credentialName),
+    String(vaultPath),
+    String(injectionType),
+    fieldMapping
+  );
+  
+  if (success) {
+    s.stop(noumena.success("Credential mapping saved"));
+    
+    // Step 6: Ask if they want to store secrets now
+    const storeNow = await p.confirm({
+      message: "Store secrets in Vault now?",
+      initialValue: true,
+    });
+    
+    if (!p.isCancel(storeNow) && storeNow) {
+      await storeSecretsInVaultFlow(
+        String(credentialName), 
+        String(vaultPath), 
+        fieldMapping, 
+        credentialScope === "tenant"
+      );
+    } else {
+      console.log();
+      p.log.info("You can store secrets manually later:");
+      const examplePath = (credentialScope === "tenant")
+        ? vaultPath.replace("{tenant}", "default")
+        : vaultPath.replace("{tenant}", "default").replace("{user}", "alice@acme.com");
+      console.log(noumena.textDim(`  docker exec gateway-vault-1 vault kv put ${examplePath} ...`));
+    }
+  } else {
+    s.stop(noumena.purpleDim("Failed to save"));
+  }
+}
+
+/**
+ * Store secrets in Vault
+ */
+async function storeSecretsInVaultFlow(
+  credentialName: string,
+  vaultPathTemplate: string,
+  fieldMapping: Record<string, string>,
+  isTenantLevel: boolean
+): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Store Secrets in Vault"));
+  console.log(noumena.textDim("  Securely store credential values for this mapping"));
+  console.log();
+  
+  // Ask for tenant ID
+  const tenantId = await p.text({
+    message: "Tenant ID:",
+    initialValue: "default",
+    validate: (v) => v ? undefined : "Tenant ID is required",
+  });
+  
+  if (p.isCancel(tenantId)) return;
+  
+  if (isTenantLevel) {
+    // Tenant-level: Store once for all users
+    const vaultPath = vaultPathTemplate.replace("{tenant}", String(tenantId));
+    
+    console.log();
+    console.log(noumena.success(`  ✓ Tenant-level credential`));
+    console.log(noumena.textDim(`     Available to all users in tenant: ${tenantId}`));
+    console.log(noumena.textDim(`     Vault path: ${vaultPath}`));
+    console.log();
+    
+    await storeSecretsForPath(vaultPath, fieldMapping, credentialName);
+  } else {
+    // User-level: Select users and store for each
+    const config = loadConfig();
+    const users = config.user_access?.users || [];
+    
+    if (users.length === 0) {
+      p.log.warn("No users registered yet. Register users first via 'Manage users & tool access'");
+      return;
+    }
+    
+    console.log();
+    console.log(noumena.textDim(`  Select which user(s) to configure credentials for:`));
+    console.log();
+    
+    const selectedUserIds = await p.multiselect({
+      message: "Select users:",
+      options: users.map(u => ({
+        value: u.userId,
+        label: `${u.userId} (${u.displayName})`,
+      })),
+      required: true,
+    });
+    
+    if (p.isCancel(selectedUserIds) || selectedUserIds.length === 0) {
+      p.log.warn("No users selected");
+      return;
+    }
+    
+    // Store secrets for each selected user
+    for (const userId of selectedUserIds) {
+      const user = users.find(u => u.userId === userId);
+      const vaultPath = vaultPathTemplate
+        .replace("{tenant}", String(tenantId))
+        .replace("{user}", String(userId));
+      
+      console.log();
+      console.log(noumena.purple(`  Configure for: ${user?.displayName || userId}`));
+      console.log(noumena.textDim(`  Vault path: ${vaultPath}`));
+      console.log();
+      
+      await storeSecretsForPath(vaultPath, fieldMapping, credentialName);
+    }
+    
+    console.log();
+    p.log.success(`✓ Configured credentials for ${selectedUserIds.length} user(s)`);
+  }
+}
+
+/**
+ * Helper: Collect secrets and store at a specific Vault path
+ */
+async function storeSecretsForPath(
+  vaultPath: string,
+  fieldMapping: Record<string, string>,
+  credentialName: string
+): Promise<void> {
+  const secretData: Record<string, string> = {};
+  
+  for (const [vaultField, targetName] of Object.entries(fieldMapping)) {
+    const value = await p.password({
+      message: `Enter ${vaultField}:`,
+      mask: "*",
+      validate: (v) => v ? undefined : "Value is required",
+    });
+    
+    if (p.isCancel(value)) return;
+    
+    secretData[vaultField] = String(value);
+  }
+  
+  // Store in Vault
+  const s = p.spinner();
+  s.start("Storing secrets in Vault...");
+  
+  try {
+    await storeSecretInVault(vaultPath, secretData);
+    s.stop(noumena.success("✓ Secrets stored"));
+  } catch (error) {
+    s.stop(noumena.error("✗ Failed to store secrets"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Configure service credentials
+ */
+async function configureServiceCredentialsFlow(): Promise<void> {
+  const services = loadConfig().services;
+  const credConfig = loadCredentialsConfig();
+  
+  console.log();
+  console.log(noumena.purple("  Configure Service Credentials"));
+  console.log();
+  
+  if (services.length === 0) {
+    p.log.warn("No services configured yet");
+    return;
+  }
+  
+  // Select service
+  const serviceName = await p.select({
+    message: "Select service:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...services.map(s => ({
+        value: s.name,
+        label: s.displayName,
+        hint: hasCredentials(s.name) ? noumena.success("✓ configured") : noumena.grayDim("no credentials"),
+      })),
+    ],
+  });
+  
+  if (p.isCancel(serviceName) || serviceName === "back") return;
+  
+  const service = services.find(s => s.name === serviceName);
+  if (!service) return;
+  
+  // Show available credentials
+  const availableCredentials = Object.keys(credConfig.credentials);
+  
+  if (availableCredentials.length === 0) {
+    p.log.warn("No credentials defined yet. Add a credential first.");
+    return;
+  }
+  
+  const credentialName = await p.select({
+    message: `Select credential for ${service.displayName}:`,
+    options: [
+      { value: "none", label: noumena.grayDim("(none)"), hint: "Remove credential mapping" },
+      ...availableCredentials.map(name => ({
+        value: name,
+        label: name,
+        hint: credConfig.credentials[name].vault_path,
+      })),
+    ],
+  });
+  
+  if (p.isCancel(credentialName)) return;
+  
+  if (credentialName === "none") {
+    // Remove mapping
+    const config = loadCredentialsConfig();
+    delete config.service_defaults[String(serviceName)];
+    saveCredentialsConfig(config);
+    p.log.success(`Removed credential mapping for ${service.displayName}`);
+  } else {
+    // Set mapping
+    const success = setServiceCredential(String(serviceName), String(credentialName));
+    if (success) {
+      p.log.success(`${service.displayName} will use '${credentialName}' credentials`);
+      
+      // Ask if they want to test
+      const testNow = await p.confirm({
+        message: "Test credential injection now?",
+        initialValue: true,
+      });
+      
+      if (!p.isCancel(testNow) && testNow) {
+        await testSingleServiceCredential(String(serviceName));
+      }
+    }
+  }
+}
+
+/**
+ * Test credentials flow
+ */
+async function testCredentialsFlow(): Promise<void> {
+  const services = loadConfig().services;
+  const servicesWithCreds = services.filter(s => hasCredentials(s.name));
+  
+  console.log();
+  console.log(noumena.purple("  Test Credential Injection"));
+  console.log();
+  
+  if (servicesWithCreds.length === 0) {
+    p.log.warn("No services with credentials configured");
+    return;
+  }
+  
+  const serviceName = await p.select({
+    message: "Test credentials for:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "all", label: noumena.purple("Test all services"), hint: `${servicesWithCreds.length} services` },
+      ...servicesWithCreds.map(s => ({
+        value: s.name,
+        label: s.displayName,
+        hint: getServiceCredential(s.name) || "",
+      })),
+    ],
+  });
+  
+  if (p.isCancel(serviceName) || serviceName === "back") return;
+  
+  if (serviceName === "all") {
+    for (const service of servicesWithCreds) {
+      await testSingleServiceCredential(service.name);
+    }
+  } else {
+    await testSingleServiceCredential(String(serviceName));
+  }
+}
+
+/**
+ * Test a single service's credentials
+ */
+async function testSingleServiceCredential(serviceName: string): Promise<void> {
+  const service = loadConfig().services.find(s => s.name === serviceName);
+  if (!service) return;
+  
+  const s = p.spinner();
+  s.start(`Testing ${service.displayName}...`);
+  
+  try {
+    const result = await testCredentialInjection(serviceName);
+    s.stop(noumena.success(`${service.displayName}: ${result.credentialName}`));
+    
+    const fields = Object.entries(result.injectedFields);
+    for (const [key, value] of fields) {
+      const maskedValue = value.substring(0, 10) + "...";
+      console.log(noumena.textDim(`    ${key}=${maskedValue}`));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim(`${service.displayName}: Failed`));
+    p.log.warn(`${error}`);
+  }
+}
+
+/**
+ * View credentials configuration
+ */
+async function viewCredentialsConfigFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  credentials.yaml"));
+  console.log();
+  
+  try {
+    const configPath = getConfigPath().replace("services.yaml", "credentials.yaml");
+    const content = readFileSync(configPath, "utf-8");
+    console.log(content);
+  } catch {
+    p.log.warn("credentials.yaml not found");
+  }
+  
+  console.log();
+  await p.text({
+    message: "Press Enter to continue...",
+    placeholder: "",
+  });
 }
 
 /**
@@ -1041,16 +4028,20 @@ async function main() {
     s.stop(noumena.warning("Gateway not available (running in offline mode)"));
   }
 
-  // Step 3: Check NPL bootstrap status
+  // Step 3: Auto-bootstrap NPL if needed
   const bs = p.spinner();
   bs.start("Checking NPL status...");
   const bootstrapped = await isNplBootstrapped();
   if (bootstrapped) {
-    bs.stop(noumena.success("NPL bootstrapped"));
+    bs.stop(noumena.success("NPL ready"));
   } else {
-    bs.stop(noumena.warning("NPL not bootstrapped"));
-    p.log.warn("ServiceRegistry or ToolExecutionPolicy not found.");
-    p.log.info("Use 'NPL Bootstrap' from the menu to set up.");
+    bs.stop(noumena.textDim("NPL not yet bootstrapped — setting up..."));
+    try {
+      await bootstrapNpl();
+      p.log.success("NPL bootstrapped automatically");
+    } catch {
+      p.log.warn("NPL auto-sync failed (engine may not be running). You can retry from System > Import from YAML.");
+    }
   }
 
   // Main loop

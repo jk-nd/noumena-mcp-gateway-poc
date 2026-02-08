@@ -1,5 +1,6 @@
 # Gateway Configuration
-# NOTE: Gateway has NO Vault access - this is by design
+# V2: Transparent proxy — no Vault access, no callback endpoint.
+# Credentials are handled by a separate Credential Proxy (future).
 
 server:
   port: 8080
@@ -11,9 +12,6 @@ oidc:
 npl:
   url: ${NPL_URL:-http://npl-engine:8080}
   timeout_ms: 30000
-
-callback:
-  url: ${CALLBACK_URL:-http://gateway:8080/callback}
 
 policy:
   mode: required  # required | optional | audit_only

@@ -1,0 +1,29 @@
+# Optional Vault service for credential storage
+# Use when testing credential injection locally
+# Start with: docker compose -f docker-compose.yml -f docker-compose-vault.yml up -d
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # HashiCorp Vault (Development mode - NOT for production!)
+  # ─────────────────────────────────────────────────────────────────────────
+  vault:
+    image: hashicorp/vault:1.15
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "dev-token"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - secrets-net
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  secrets-net:
+    external: true
+    name: gateway_secrets-net

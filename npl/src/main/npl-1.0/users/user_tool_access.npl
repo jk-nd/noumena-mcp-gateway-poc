@@ -1,0 +1,270 @@
+package users
+
+/**
+ * Struct to represent tool access for a service.
+ * @param serviceName The service name (e.g., "duckduckgo")
+ * @param allowedTools Set of tool names, or ["*"] for all tools
+ */
+struct ServiceToolAccess {
+    serviceName: Text,
+    allowedTools: Set<Text>
+};
+
+/**
+ * Struct to represent Vault path mapping.
+ * @param serviceName The service name
+ * @param vaultPath The Vault path for credentials
+ */
+struct VaultPathMapping {
+    serviceName: Text,
+    vaultPath: Text
+};
+
+/**
+ * UserToolAccess - Per-user/agent tool access control.
+ *
+ * Each tool user (human or AI) gets their own UserToolAccess protocol instance.
+ * Admin grants/revokes specific tools for this user via TUI or API.
+ * Gateway queries this protocol to enforce per-user access at runtime.
+ *
+ * Architecture note: Tool users (humans and AI agents) are treated identically
+ * from a governance perspective. Both need tool access grants, both are subject
+ * to the same policies. User delegation (human authorizing AI to act on their
+ * behalf) is handled by a separate authorization layer, not tool governance.
+ *
+ * Features:
+ *   - Per-service, per-tool access control
+ *   - Wildcard support: "*" means all tools for a service
+ *   - Vault path storage for per-user credentials
+ *   - Request counting for audit
+ *
+ * @party pAdmin Organization administrator who manages tool grants
+ * @party pGateway Gateway system service performing runtime access checks
+ * @param userId The tool user identifier (e.g., "alice", "agent-x")
+ */
+@api
+protocol[pAdmin, pGateway] UserToolAccess(
+    var userId: Text
+) {
+    initial state active;
+    final state revoked;
+
+    private var serviceAccess: List<ServiceToolAccess> = listOf<ServiceToolAccess>();
+    private var vaultPathMappings: List<VaultPathMapping> = listOf<VaultPathMapping>();
+    private var requestCounter: Number = 0;
+
+    /**
+     * Grant access to a specific tool for a service.
+     * @param serviceName The service name (e.g., "duckduckgo")
+     * @param toolName The tool name (e.g., "search")
+     */
+    @api
+    permission[pAdmin] grantTool(serviceName: Text, toolName: Text) | active {
+        var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
+        
+        if (existingEntry.isPresent()) {
+            var entry = existingEntry.getOrFail();
+            var updatedTools = entry.allowedTools.with(toolName);
+            var updatedEntry = ServiceToolAccess(serviceName = serviceName, allowedTools = updatedTools);
+            
+            serviceAccess = serviceAccess.without(entry).with(updatedEntry);
+        } else {
+            var newEntry = ServiceToolAccess(serviceName = serviceName, allowedTools = setOf(toolName));
+            serviceAccess = serviceAccess.with(newEntry);
+        };
+        
+        info("[UserToolAccess:" + userId + "] Granted: " + serviceName + "." + toolName);
+    };
+    
+    /**
+     * Revoke access to a specific tool for a service.
+     * @param serviceName The service name
+     * @param toolName The tool name
+     */
+    @api
+    permission[pAdmin] revokeTool(serviceName: Text, toolName: Text) | active {
+        var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
+        
+        if (existingEntry.isPresent()) {
+            var entry = existingEntry.getOrFail();
+            var updatedTools = entry.allowedTools.without(toolName);
+            
+            if (updatedTools.isEmpty()) {
+                serviceAccess = serviceAccess.without(entry);
+            } else {
+                var updatedEntry = ServiceToolAccess(serviceName = serviceName, allowedTools = updatedTools);
+                serviceAccess = serviceAccess.without(entry).with(updatedEntry);
+            };
+        };
+        
+        info("[UserToolAccess:" + userId + "] Revoked: " + serviceName + "." + toolName);
+    };
+    
+    /**
+     * Grant access to ALL tools for a service.
+     * Uses "*" as a wildcard marker.
+     * @param serviceName The service name
+     */
+    @api
+    permission[pAdmin] grantAllToolsForService(serviceName: Text) | active {
+        var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
+        
+        var wildcardSet = setOf("*");
+        var newEntry = ServiceToolAccess(serviceName = serviceName, allowedTools = wildcardSet);
+        
+        if (existingEntry.isPresent()) {
+            var entry = existingEntry.getOrFail();
+            serviceAccess = serviceAccess.without(entry).with(newEntry);
+        } else {
+            serviceAccess = serviceAccess.with(newEntry);
+        };
+        
+        info("[UserToolAccess:" + userId + "] Granted ALL tools for: " + serviceName);
+    };
+    
+    /**
+     * Revoke all access to a service.
+     * @param serviceName The service name
+     */
+    @api
+    permission[pAdmin] revokeServiceAccess(serviceName: Text) | active {
+        var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
+        
+        if (existingEntry.isPresent()) {
+            var entry = existingEntry.getOrFail();
+            serviceAccess = serviceAccess.without(entry);
+        };
+        
+        info("[UserToolAccess:" + userId + "] Revoked service: " + serviceName);
+    };
+    
+    /**
+     * Check if user has access to a specific tool.
+     * Called by Gateway before routing tool calls.
+     *
+     * @param serviceName The service being accessed
+     * @param toolName The tool being called
+     * @return true if access is allowed
+     */
+    @api
+    permission[pGateway | pAdmin] hasAccess(
+        serviceName: Text, 
+        toolName: Text
+    ) returns Boolean | active {
+        requestCounter = requestCounter + 1;
+        
+        var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
+        
+        if (existingEntry.isPresent()) {
+            var entry = existingEntry.getOrFail();
+            var tools = entry.allowedTools;
+            
+            var hasWildcard = tools.contains("*");
+            var hasSpecificTool = tools.contains(toolName);
+            var allowed = hasWildcard || hasSpecificTool;
+            
+            if (allowed) {
+                info("[UserToolAccess:" + userId + "] ALLOWED: " + serviceName + "." + toolName);
+            } else {
+                info("[UserToolAccess:" + userId + "] DENIED: " + serviceName + "." + toolName + " (not in allowed list)");
+            };
+            
+            return allowed;
+        } else {
+            info("[UserToolAccess:" + userId + "] DENIED: " + serviceName + "." + toolName + " (service not granted)");
+            return false;
+        };
+    };
+    
+    /**
+     * Get all tools the user has access to for a specific service.
+     * Called by admin/TUI to display user's access.
+     * @param serviceName The service name
+     * @return Set of tool names (may contain "*" for wildcard)
+     */
+    @api
+    permission[pAdmin] getToolsForService(serviceName: Text) returns Set<Text> | active {
+        var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
+        
+        if (existingEntry.isPresent()) {
+            return existingEntry.getOrFail().allowedTools;
+        } else {
+            return setOf<Text>();
+        };
+    };
+    
+    /**
+     * Get all services the user has access to.
+     * Called by admin/TUI to display user's access.
+     * @return List of service names
+     */
+    @api
+    permission[pAdmin] getAllServices() returns List<Text> | active {
+        return serviceAccess.map(function(entry: ServiceToolAccess) -> entry.serviceName);
+    };
+    
+    /**
+     * Get complete access list for this user.
+     * @return List of service tool access entries
+     */
+    @api
+    permission[pAdmin] getAccessList() returns List<ServiceToolAccess> | active {
+        return serviceAccess;
+    };
+    
+    /**
+     * Set Vault path for service credentials (future feature).
+     * @param serviceName The service name
+     * @param vaultPath The Vault path (e.g., "vault/users/alice/github")
+     */
+    @api
+    permission[pAdmin] setVaultPath(serviceName: Text, vaultPath: Text) | active {
+        var existingMapping = vaultPathMappings.findFirstOrNone(function(mapping: VaultPathMapping) -> mapping.serviceName == serviceName);
+        
+        var newMapping = VaultPathMapping(serviceName = serviceName, vaultPath = vaultPath);
+        
+        if (existingMapping.isPresent()) {
+            var mapping = existingMapping.getOrFail();
+            vaultPathMappings = vaultPathMappings.without(mapping).with(newMapping);
+        } else {
+            vaultPathMappings = vaultPathMappings.with(newMapping);
+        };
+        
+        info("[UserToolAccess:" + userId + "] Set Vault path for " + serviceName + ": " + vaultPath);
+    };
+    
+    /**
+     * Get Vault path for service credentials (future feature).
+     * @param serviceName The service name
+     * @return Vault path if configured
+     */
+    @api
+    permission[pGateway | pAdmin] getVaultPath(serviceName: Text) returns Optional<Text> | active {
+        var existingMapping = vaultPathMappings.findFirstOrNone(function(mapping: VaultPathMapping) -> mapping.serviceName == serviceName);
+        
+        if (existingMapping.isPresent()) {
+            return optionalOf(existingMapping.getOrFail().vaultPath);
+        } else {
+            return optionalOf<Text>();
+        };
+    };
+    
+    /**
+     * Get request count for audit.
+     * @return Total number of access checks
+     */
+    @api
+    permission[pAdmin] getRequestCount() returns Number | active, revoked {
+        return requestCounter;
+    };
+    
+    /**
+     * Revoke all access for this user (emergency).
+     * Transitions to revoked state where no access is allowed.
+     */
+    @api
+    permission[pAdmin] revokeAllAccess() | active {
+        become revoked;
+        info("[UserToolAccess:" + userId + "] ALL ACCESS REVOKED");
+    };
+}

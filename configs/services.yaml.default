@@ -1,0 +1,21 @@
+# Gateway Configuration Template
+# Fresh system starts with NO pre-configured services or users
+# Admins use TUI to:
+#   1. Search and add MCP services (Docker Hub, NPM, templates)
+#   2. Register Keycloak users for Gateway access
+#   3. Grant per-user tool access
+
+services: []
+  # No services configured by default
+  # Use TUI → "Add MCP service" to discover and add services
+
+user_access:
+  default_template:
+    enabled: false
+    description: "Default access template (disabled - grant explicit per-user access)"
+    tools: {}
+  
+  users: []
+    # No users registered by default
+    # Keycloak has: admin, gateway (system), jarvis, alice, bob (provisioned)
+    # Use TUI → "Manage users & tool access" to register users and grant access

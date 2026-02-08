@@ -2,6 +2,6 @@ rootProject.name = "noumena-mcp-gateway"
 
 include("shared")
 include("gateway")
-include("executor")
+include("credential-proxy")
 include("integration-tests")
-// notification-bridge removed - replaced by HTTP Connector
+// executor removed - V2 architecture uses transparent proxy instead

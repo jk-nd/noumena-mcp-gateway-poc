@@ -10,4 +10,9 @@ export KEYCLOAK_URL=${KEYCLOAK_URL?: "KEYCLOAK_URL has not been set" }
 export TF_VAR_default_password=${TF_VAR_default_password?: "TF_VAR_default_password has not been set"}
 export TF_VAR_app_name=${TF_VAR_app_name?: "TF_VAR_app_name has not been set"}
 
+echo "▶ Running Terraform to provision Keycloak..."
 terraform apply -auto-approve -state=state.tfstate
+
+echo ""
+echo "▶ Syncing Keycloak user IDs to services.yaml..."
+/sync-user-ids.sh

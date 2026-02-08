@@ -4,12 +4,11 @@
 # Party names use 'p' prefix to distinguish from JWT claim roles.
 #
 # Hierarchy:
-# - pAdmin: Organization administrators (full control)
-# - pUser: End users (tool ownership)
-# - pAgent: AI agents (tool invocation)
+# - pAdmin: Organization administrators (policy management)
+# - pGateway: Gateway system service (runtime policy enforcement)
 #
-# Note: Gateway uses built-in NPL 'observers' mechanism for read access.
-# Admin adds Gateway as observer via addObserver permission.
+# Note: Tool users (humans and AI) are NOT parties. They're governed by
+# UserToolAccess protocol instances identified by userId parameter.
 
 # ============================================================================
 # REGISTRY PACKAGE - Service Management
@@ -27,24 +26,46 @@ registry.ServiceRegistry:
 # SERVICES PACKAGE - Tool Governance
 # ============================================================================
 
-services.ToolExecutionPolicy:
-  # Admin has override control on all tools
+# Per-service ToolPolicy (service-level governance)
+services.ToolPolicy:
+  # Admin creates instances, enables/disables tools
   pAdmin:
     set:
       claims:
         role:
           - admin
-  # Agent invokes the tool (checkAndApprove)
-  pAgent:
+  # Gateway system service checks access at runtime
+  pGateway:
     set:
       claims:
         role:
-          - agent
-          - admin  # Admin can act as agent
-  # Executor validates and reports completion
-  pExecutor:
+          - gateway
+
+# ============================================================================
+# USERS PACKAGE - Per-user Access Control (V3)
+# ============================================================================
+
+# UserRegistry — master list of registered users
+users.UserRegistry:
+  pAdmin:
     set:
       claims:
         role:
-          - executor
-          - admin  # Admin can act as executor
+          - admin
+
+# UserToolAccess — per-tool-user access control (user-level governance)
+# Note: Tool users (humans/AI) are NOT parties - they're identified by userId parameter
+users.UserToolAccess:
+  # Admin creates instances and grants/revokes tools via TUI/API
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  # Gateway system service and AI agents enforce/query access at runtime
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+          - agent  # AI agents (like Jarvis) can query their own access

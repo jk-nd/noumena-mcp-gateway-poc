@@ -31,6 +31,7 @@ resource "keycloak_realm" "mcpgateway" {
   display_name_html = "<b>MCP Gateway</b>"
 
   access_code_lifespan = "30m"
+  access_token_lifespan = "30m"  # Token lifetime for development
   ssl_required         = "none"
   password_policy      = "length(8)"
 
@@ -202,13 +203,96 @@ resource "keycloak_user" "admin" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# Regular User - can delegate to agents, set company policies
-resource "keycloak_user" "user" {
+# ============================================================================
+# Realm Management — give admin user full realm-admin capabilities
+# so the admin's mcpgateway-realm token can call the Keycloak Admin API
+# (eliminates the need for a separate master-realm login)
+# ============================================================================
+
+data "keycloak_openid_client" "realm_management" {
+  realm_id  = keycloak_realm.mcpgateway.id
+  client_id = "realm-management"
+}
+
+data "keycloak_role" "realm_admin" {
+  realm_id  = keycloak_realm.mcpgateway.id
+  client_id = data.keycloak_openid_client.realm_management.id
+  name      = "realm-admin"
+}
+
+resource "keycloak_user_roles" "admin_realm_management" {
+  realm_id = keycloak_realm.mcpgateway.id
+  user_id  = keycloak_user.admin.id
+
+  role_ids = [
+    data.keycloak_role.realm_admin.id
+  ]
+}
+
+# ============================================================================
+# System Accounts
+# ============================================================================
+
+# Gateway Service Account - Backend system service for NPL policy enforcement
+# This is the service account used by the Gateway application itself
+resource "keycloak_user" "gateway_service" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "user"
-  email      = "user@acme.com"
-  first_name = "Regular"
-  last_name  = "User"
+  username   = "gateway"
+  email      = "gateway@system.local"
+  first_name = "Gateway"
+  last_name  = "Service"
+  enabled    = true
+
+  attributes = {
+    "role"         = "gateway"  # Gateway system service role
+    "organization" = "system"
+  }
+
+  initial_password {
+    value     = var.default_password
+    temporary = false
+  }
+
+  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
+}
+
+# ============================================================================
+# AI Agents - Default Demo Agent
+# ============================================================================
+
+# Jarvis - AI Agent (autonomous tool user)
+resource "keycloak_user" "jarvis" {
+  realm_id   = keycloak_realm.mcpgateway.id
+  username   = "jarvis"
+  email      = "jarvis@acme.com"
+  first_name = "Jarvis"
+  last_name  = "AI Agent"
+  enabled    = true
+
+  attributes = {
+    "role"         = "agent"  # AI agent (can use tools like a human user)
+    "organization" = "acme"
+  }
+
+  initial_password {
+    value     = var.default_password
+    temporary = false
+  }
+
+  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
+}
+
+# ============================================================================
+# Default Users for Demo / Testing
+# ============================================================================
+
+# Alice - Product Manager
+resource "keycloak_user" "alice" {
+  realm_id   = keycloak_realm.mcpgateway.id
+  username   = "alice"
+  email      = "alice@acme.com"
+  first_name = "Alice"
+  last_name  = "Chen"
   enabled    = true
 
   attributes = {
@@ -224,39 +308,17 @@ resource "keycloak_user" "user" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# AI Agent - can invoke tools within delegated permissions
-resource "keycloak_user" "agent" {
+# Bob - Developer
+resource "keycloak_user" "bob" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "agent"
-  email      = "agent@acme.com"
-  first_name = "AI"
-  last_name  = "Agent"
+  username   = "bob"
+  email      = "bob@acme.com"
+  first_name = "Bob"
+  last_name  = "Smith"
   enabled    = true
 
   attributes = {
-    "role"         = "agent"
-    "organization" = "acme"
-  }
-
-  initial_password {
-    value     = var.default_password
-    temporary = false
-  }
-
-  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
-}
-
-# Executor - system user for NPL validation and completion reporting
-resource "keycloak_user" "executor" {
-  realm_id   = keycloak_realm.mcpgateway.id
-  username   = "executor"
-  email      = "executor@acme.com"
-  first_name = "Executor"
-  last_name  = "Service"
-  enabled    = true
-
-  attributes = {
-    "role"         = "executor"
+    "role"         = "user"
     "organization" = "acme"
   }
 

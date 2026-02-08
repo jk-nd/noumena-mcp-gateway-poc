@@ -1,5 +1,4 @@
-# Gateway Dockerfile
-# NOTE: Gateway has NO Vault access
+# Gateway Dockerfile — V2 Transparent Proxy
 
 FROM gradle:8.5-jdk17 AS builder
 WORKDIR /app
@@ -9,13 +8,23 @@ RUN gradle :gateway:shadowJar --no-daemon
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 
+# Install Docker CLI for STDIO transport (spawning upstream MCP containers)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    chmod a+r /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends docker-ce-cli && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Copy JAR
 COPY --from=builder /app/gateway/build/libs/gateway-*-all.jar gateway.jar
 
 # Copy config
 COPY configs/gateway.yaml /app/configs/
-
-# No secrets volumes - Gateway has no Vault access
+COPY configs/services.yaml /app/configs/
 
 EXPOSE 8080
 
