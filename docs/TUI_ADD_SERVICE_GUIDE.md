@@ -300,8 +300,8 @@ cd tui && npm run build
 ## Related Documentation
 
 - [TUI_CREDENTIAL_MANAGEMENT.md](./TUI_CREDENTIAL_MANAGEMENT.md) - Credential setup guide
-- [CREDENTIAL_SERVICE_CATALOG.md](./CREDENTIAL_SERVICE_CATALOG.md) - Supported services
-- [GEMINI_QUICKSTART_TUI.md](./GEMINI_QUICKSTART_TUI.md) - End-to-end Gemini example
+- [USER_ACCESS_CONTROL.md](./USER_ACCESS_CONTROL.md) - Per-user tool access control
+- [CREDENTIAL_INJECTION.md](./CREDENTIAL_INJECTION.md) - Credential injection architecture
 
 ---
 

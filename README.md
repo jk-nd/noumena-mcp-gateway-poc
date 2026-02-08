@@ -1,115 +1,60 @@
 # Noumena MCP Gateway
 
-A transparent MCP (Model Context Protocol) proxy that enables AI agents to securely access upstream MCP services through NPL policy enforcement, JWT authentication, and tool namespacing.
+A transparent MCP (Model Context Protocol) proxy that enables AI agents and users to securely access upstream MCP services through NPL policy enforcement, JWT authentication, credential injection, and tool namespacing.
 
-## Architecture (V2 — Transparent Proxy)
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  public-net                                                         │
-│                                                                     │
-│  ┌──────────────┐      ┌──────────┐                                │
-│  │   Keycloak   │      │ Gateway  │◄──── Agents / Humans           │
-│  │   (OIDC)     │      │ MCP Proxy│     (JWT auth)                 │
-│  └──────────────┘      └────┬─────┘                                │
-│                              │                                      │
-├──────────────────────────────┼──────────────────────────────────────┤
-│  policy-net                  │                                      │
-│                              │                                      │
-│  ┌──────────────┐      ┌────┴─────┐                                │
-│  │  NPL Engine  │◄─────│ Gateway  │                                │
-│  │  ToolPolicy  │      │          │                                │
-│  │  SvcRegistry │      └────┬─────┘                                │
-│  └──────────────┘           │                                      │
-│                              │                                      │
-├──────────────────────────────┼──────────────────────────────────────┤
-│  backend-net                 │                                      │
-│                              │                                      │
-│  ┌──────────┐  ┌──────────┐ │ ┌──────────┐                        │
-│  │ DuckDuck │  │  GitHub   │◄┘ │  Slack   │  ...                   │
-│  │ Go MCP   │  │  MCP      │   │  MCP     │                        │
-│  └──────────┘  └──────────┘   └──────────┘                        │
-└─────────────────────────────────────────────────────────────────────┘
+                         ┌──────────────┐
+                         │   Keycloak   │
+                         │   (OIDC)     │
+                         └──────┬───────┘
+                                │
+   Agents / Users ──────► ┌─────┴──────┐        ┌──────────────┐
+   (JWT auth)              │  Gateway   │◄──────►│  NPL Engine  │
+                           │  MCP Proxy │        │  (Policies)  │
+                           └─────┬──────┘        └──────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              │                  │                   │
+        ┌─────┴─────┐    ┌──────┴─────┐     ┌──────┴──────┐
+        │ DuckDuckGo │    │   GitHub   │     │   Gemini    │ ...
+        │ MCP Server │    │ MCP Server │     │ MCP Server  │
+        └───────────┘    └────────────┘     └─────────────┘
 ```
 
-**Network isolation**: Agents can only reach the Gateway and Keycloak. Upstream MCPs are isolated on backend-net. NPL Engine is on policy-net. The Gateway spans all three.
-
-See [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md) for the full architecture document.
-
-## Agent Connectivity
-
-| Endpoint | Transport | Best For |
-|----------|-----------|----------|
-| `POST /mcp` | Streamable HTTP | MCP Inspector, LangChain, ADK, Sligo.ai |
-| `WS /mcp/ws` | WebSocket | Streaming agents, long-running connections |
-| `GET /sse` | SSE | Legacy MCP clients, browser-based EventSource |
-
-All endpoints accept standard MCP JSON-RPC messages and return the same responses. All require JWT authentication (via Bearer token or OAuth 2.0 flow).
+**Network isolation**: Agents can only reach the Gateway and Keycloak. Upstream MCPs are isolated on backend-net. NPL Engine is on policy-net. The Gateway spans all three networks.
 
 ## Components
 
-| Component | Role | Network |
-|-----------|------|---------|
-| **Gateway** | Transparent MCP proxy — authenticates, checks policy, forwards | public, policy, backend |
-| **NPL Engine** | Policy evaluation via ServiceRegistry & per-service ToolPolicy | policy |
-| **Keycloak** | OIDC authentication provider | public |
-| **Upstream MCPs** | Docker containers running MCP servers (DuckDuckGo, GitHub, etc.) | backend |
-
-## Features
-
-### Transparent Proxy
-- Gateway discovers tools from upstream MCP services
-- Tool namespacing: `duckduckgo.search`, `github.create_issue`
-- Lazy connection: upstream sessions created on first tool call
-- Fail-closed: all requests denied if NPL is unavailable
-
-### NPL Policy Enforcement (V3 - Per-User Access Control)
-- **ServiceRegistry** — controls which services are enabled/disabled org-wide
-- **ToolPolicy** (per service) — granular per-tool access control (service-level)
-- **UserRegistry** — tracks registered users/agents **[NEW]**
-- **UserToolAccess** (per user) — per-user tool access control **[NEW]**
-- Dual-layer enforcement: service-level + user-level checks
-- Default-deny: tools must be explicitly enabled AND granted to users
-- Wildcard support: `["*"]` grants all tools for a service
-- Audit trail via NPL request counting and access logs
-- See [docs/USER_ACCESS_CONTROL.md](docs/USER_ACCESS_CONTROL.md) for full details
-
-### Authentication & OAuth 2.0
-- Keycloak OIDC with role-based access (admin, agent, user)
-- **Full OAuth 2.0 authorization code flow** with PKCE for browser-based clients
-- OAuth discovery endpoints: `/.well-known/oauth-protected-resource` (RFC 9728), `/.well-known/oauth-authorization-server` (RFC 8414)
-- Dynamic client registration via `/register` (RFC 7591)
-- Gateway proxies `/authorize` and `/token` to Keycloak (no direct Keycloak exposure needed)
-- `WWW-Authenticate` header on 401 responses triggers automatic OAuth in compliant clients
-- MCP Inspector connects via OAuth — just click Connect, log in, done
-
-### Multi-Transport Upstream Support
-- **STDIO** — Gateway spawns Docker containers on-demand (`docker run -i --rm`)
-- **Streamable HTTP** — Direct HTTP POST to upstream MCP servers
-- **WebSocket** — Persistent WebSocket connections to upstream MCPs
-- Configured per-service in `services.yaml` via the `type` field (`MCP_STDIO`, `MCP_HTTP`, `MCP_WS`)
+| Component | Role |
+|-----------|------|
+| **Gateway** | Transparent MCP proxy -- authenticates, checks policy, injects credentials, forwards |
+| **NPL Engine** | Policy evaluation via ServiceRegistry, ToolPolicy, UserToolAccess |
+| **Keycloak** | OIDC authentication provider with user/role management |
+| **Credential Proxy** | Fetches secrets from Vault, injects into upstream MCP calls |
+| **Vault** | Secret storage (API keys, tokens, passwords) |
+| **TUI** | Interactive CLI wizard for managing the Gateway |
+| **Upstream MCPs** | Docker/NPM/HTTP MCP servers (DuckDuckGo, GitHub, Gemini, etc.) |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker & Docker Compose
-- JDK 17+ (for building from source)
-- Node.js 18+ (for TUI wizard)
+- Node.js 18+ (for TUI wizard and MCP Inspector)
 
-### Run with Docker Compose
+### 1. Start the Stack
 
 ```bash
 cd deployments
 docker compose up -d
 
-# Wait for services to be healthy
+# Wait for all services to be healthy
 docker compose ps
 ```
 
-### Bootstrap NPL
-
-Use the TUI wizard to create protocol instances:
+### 2. Start the TUI Wizard
 
 ```bash
 cd tui
@@ -117,57 +62,183 @@ npm install
 npm start
 ```
 
-Select "NPL Bootstrap" from the menu to create ServiceRegistry and ToolPolicy instances.
+Log in with admin credentials (`admin` / `Welcome123`).
+
+### 3. First-Time Setup
+
+The TUI guides you through:
+
+1. **NPL Bootstrap** -- Creates protocol instances (ServiceRegistry, UserRegistry)
+2. **Add a service** -- e.g., Quick Start > DuckDuckGo, or search Docker Hub
+3. **Enable the service** -- Activates it in NPL ServiceRegistry
+4. **Enable tools** -- Select which tools to activate in NPL ToolPolicy
+5. **Register users** -- Add Keycloak users for Gateway access
+6. **Grant tool access** -- Assign tools to users via NPL UserToolAccess
+7. **Set up credentials** (optional) -- Store API keys in Vault via TUI
+
+### 4. Connect with MCP Inspector
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+- **Transport**: Streamable HTTP
+- **URL**: `http://localhost:8000/mcp`
+- **Authentication**: OAuth (redirects to Keycloak login)
+- Log in as a registered user (e.g., `jarvis` / `Welcome123`)
 
 ### Access UIs
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Keycloak Admin | http://localhost:11000 | admin / welcome |
-| NPL Inspector | http://localhost:8080 | admin / Welcome123 |
+| NPL Inspector | http://localhost:12100 | admin / Welcome123 |
 
-### MCP Inspector (with OAuth)
+## Agent Connectivity
+
+| Endpoint | Transport | Best For |
+|----------|-----------|----------|
+| `POST /mcp` | Streamable HTTP | MCP Inspector, LangChain, ADK |
+| `WS /mcp/ws` | WebSocket | Streaming agents, long-running connections |
+| `GET /sse` | SSE | Legacy MCP clients, browser EventSource |
+
+All endpoints require JWT authentication (Bearer token or OAuth 2.0 flow).
+
+## NPL Policy Enforcement
+
+NPL is the **runtime source of truth** for all policy decisions. The TUI and `services.yaml` are the declarative configuration layer -- all changes are synced to NPL atomically.
+
+### Protocol Hierarchy
+
+```
+ServiceRegistry              Which services are enabled org-wide
+    │
+ToolPolicy (per service)     Which tools are enabled per service
+    │
+UserRegistry                 Which users/agents are registered
+    │
+UserToolAccess (per user)    Which tools each user can access
+    │
+CredentialInjectionPolicy    Which credentials to inject per request
+```
+
+### Policy Check Flow
+
+```
+1. Agent → Gateway           POST /mcp: tools/call "duckduckgo.search"
+2. Gateway                   Validates JWT (identity, roles)
+3. Gateway                   Parses namespace: service=duckduckgo, tool=search
+4. Gateway → NPL             ServiceRegistry: is duckduckgo enabled?
+5. Gateway → NPL             ToolPolicy: is "search" enabled?
+6. Gateway → NPL             UserToolAccess: does user have access?
+7. NPL → Gateway             Allowed / Denied
+8. Gateway → Upstream MCP    Forward tools/call (if allowed)
+9. Upstream → Gateway        Result
+10. Gateway → Agent          JSON-RPC response
+```
+
+**Fail-closed**: If NPL is unavailable, all requests are denied.
+
+## Credential Injection
+
+Secrets (API keys, tokens) are stored in Vault and injected transparently at runtime.
+
+### Two Credential Scopes
+
+| Scope | Vault Path Pattern | Use Case |
+|-------|-------------------|----------|
+| **Tenant-level** | `secret/data/tenants/{tenant}/services/SERVICE/...` | Shared org credentials (e.g., company Slack workspace) |
+| **User-level** | `secret/data/tenants/{tenant}/users/{user}/SERVICE/...` | Personal credentials (e.g., individual GitHub tokens) |
+
+### Injection Flow
+
+1. Admin stores secrets in Vault via TUI (choose tenant-level or user-level scope)
+2. At runtime, the JWT provides `{tenant}` and `{user}` values
+3. Gateway resolves credential name via NPL CredentialInjectionPolicy
+4. Credential Proxy fetches from Vault, injects as environment variables or headers
+
+See [docs/CREDENTIAL_INJECTION.md](docs/CREDENTIAL_INJECTION.md) for architecture details.
+
+## TUI Wizard
+
+The interactive CLI manages all Gateway operations with atomic operations and rollback:
 
 ```bash
-npx @modelcontextprotocol/inspector
+cd tui && npm start
 ```
 
-In the Inspector UI:
-1. **Transport Type**: Streamable HTTP
-2. **URL**: `http://localhost:8000/mcp`
-3. **Connection Type**: Direct
-4. Click **Connect** — you'll be redirected to Keycloak to log in
-5. Sign in with `admin` / `Welcome123`
-6. You're connected with a valid OAuth token — no manual token management
+### Capabilities
 
-> **Tip**: If you see "Failed to construct headers: Invalid name", open **Authentication** and delete any stale custom headers.
+- **Service management** -- Add, enable/disable, remove services (Docker Hub, NPM, custom)
+- **Tool management** -- Enable/disable individual tools per service
+- **User management** -- Register/deregister Keycloak users, grant/revoke tool access
+- **Credential management** -- Create credential mappings, choose scope, store secrets in Vault
+- **Gateway configuration** -- Sync config to/from NPL, export/import YAML
+- **Container control** -- Pull, start, stop Docker containers
 
-## Message Flow
+### Atomic Operations
 
-### Successful Request (duckduckgo.search)
+All TUI operations that modify state are **atomic with rollback**:
 
+1. Changes are written to `services.yaml`
+2. NPL is synced via the Gateway
+3. If NPL sync fails, `services.yaml` is rolled back and an error is shown
+4. Success is only reported when NPL confirms
+
+> **Principle**: "If the engine doesn't confirm, you cannot write to services.yaml."
+
+## Configuration
+
+### services.yaml
+
+Defines upstream MCP services, their tools, and user access:
+
+```yaml
+services:
+  - name: "duckduckgo"
+    displayName: "DuckDuckGo"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/duckduckgo"
+    tools:
+      - name: "search"
+        enabled: true
+
+user_access:
+  users:
+    - userId: "jarvis@acme.com"
+      keycloakId: "..."
+      tools:
+        duckduckgo:
+          - "search"
 ```
-1. Agent → Gateway         POST /mcp: tools/call {name: "duckduckgo.search"}
-2. Gateway                 Validates JWT → identity, roles
-3. Gateway                 Parses namespace → service=duckduckgo, tool=search
-4. Gateway → NPL Engine    ToolPolicy.checkAccess("search", agent-id)
-5. NPL Engine → Gateway    Allowed ✓
-6. Gateway → Upstream MCP  Forward tools/call {name: "search"} to duckduckgo container
-7. Upstream → Gateway      Result with search data
-8. Gateway → Agent         JSON-RPC result
+
+### credentials.yaml
+
+Maps credential names to Vault paths and injection targets:
+
+```yaml
+credentials:
+  google_gemini:
+    vault_path: secret/data/tenants/{tenant}/services/gemini/api
+    injection:
+      type: env
+      mapping:
+        api_key: GEMINI_API_KEY
 ```
 
-### Denied Request (disabled tool)
+### Environment Variables (Gateway)
 
-```
-1. Agent → Gateway         POST /mcp: tools/call {name: "slack.send_message"}
-2. Gateway                 Validates JWT
-3. Gateway → NPL Engine    ToolPolicy.checkAccess("send_message", agent-id)
-4. NPL Engine → Gateway    Denied ✗ (tool not enabled)
-5. Gateway → Agent         Error: POLICY_DENIED
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NPL_URL` | `http://npl-engine:12000` | NPL Engine URL |
+| `KEYCLOAK_URL` | `http://keycloak:11000` | Keycloak URL (internal) |
+| `KEYCLOAK_EXTERNAL_URL` | `http://keycloak:11000` | Keycloak URL (browser-facing) |
+| `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
+| `DEV_MODE` | `false` | Bypass NPL policy checks |
+| `SERVICES_CONFIG_PATH` | `/app/configs/services.yaml` | Path to services config |
 
-   ❌ Request never reaches upstream — blocked at policy layer
-```
+> **Note**: For local dev with Docker, add `127.0.0.1 keycloak` to `/etc/hosts` so both the browser and Docker containers resolve the same hostname.
 
 ## Project Structure
 
@@ -175,70 +246,40 @@ In the Inspector UI:
 noumena-mcp-gateway/
 ├── gateway/                 # MCP proxy server (Kotlin/Ktor)
 │   └── src/main/kotlin/
-│       ├── Application.kt   # Main entry, routing, SSE/WebSocket
+│       ├── Application.kt   # Routing, OAuth, SSE/WebSocket
 │       ├── server/          # McpServerHandler (proxy logic)
-│       ├── policy/          # NplClient (ToolPolicy checks)
-│       ├── upstream/        # UpstreamRouter, UpstreamSessionManager
-│       └── auth/            # JWT validation helpers
+│       ├── policy/          # NplClient (NPL policy checks)
+│       ├── upstream/        # UpstreamRouter, SessionManager
+│       ├── credentials/     # UserContext, CredentialProxyClient
+│       └── auth/            # JWT validation
 │
-├── shared/                  # Shared config loaders and models
+├── credential-proxy/        # Credential injection service
+│   └── src/main/kotlin/     # VaultClient, CredentialSelector
 │
 ├── npl/                     # NPL protocol definitions
 │   └── src/main/npl-1.0/
 │       ├── registry/        # ServiceRegistry
-│       └── services/        # ToolPolicy (per-service access control)
+│       ├── services/        # ToolPolicy
+│       ├── users/           # UserRegistry, UserToolAccess
+│       └── policies/        # CredentialInjectionPolicy
 │
-├── deployments/             # Docker Compose & demo scripts
-│   ├── docker-compose.yml   # Main stack (3-tier network isolation)
-│   └── docker-compose.mcp.yml  # Upstream MCP containers
-│
-├── tui/                     # MCP Gateway Wizard (CLI)
+├── tui/                     # Gateway Wizard (interactive CLI)
 │   └── src/
-│       ├── cli.ts           # Main wizard (Clack-based)
+│       ├── cli.ts           # Main wizard
 │       └── lib/             # Config, API, Docker clients
 │
-├── configs/                 # Service configurations
-│   └── services.yaml        # Upstream MCP service definitions
+├── configs/                 # Runtime configuration
+│   ├── services.yaml        # Service & user definitions
+│   ├── credentials.yaml     # Credential mappings
+│   └── gateway.yaml         # Gateway settings
+│
+├── deployments/             # Docker Compose
+│   └── docker-compose.yml   # Full stack with network isolation
 │
 ├── keycloak-provisioning/   # Terraform for Keycloak setup
 ├── integration-tests/       # Integration test suite
-└── docs/                    # Architecture documentation
+└── docs/                    # Documentation
 ```
-
-## MCP Gateway Wizard (TUI)
-
-An interactive CLI for managing MCP Gateway services:
-
-```bash
-cd tui
-npm install
-npm start
-```
-
-Features:
-- **Service management** — Enable/disable services (syncs with NPL policy)
-- **Container control** — Pull, start, stop Docker containers for MCP servers
-- **Tool management** — Enable/disable individual tools per service
-- **Docker Hub search** — Find and add MCP servers from the `mcp/*` namespace
-- **NPL Bootstrap** — Create ServiceRegistry and per-service ToolPolicy instances
-
-See [tui/README.md](tui/README.md) for detailed documentation.
-
-## Configuration
-
-### Environment Variables (Gateway)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NPL_URL` | `http://npl-engine:12000` | NPL Engine URL |
-| `KEYCLOAK_URL` | `http://keycloak:11000` | Keycloak URL (internal, for JWT validation & token proxy) |
-| `KEYCLOAK_EXTERNAL_URL` | `http://keycloak:11000` | Keycloak URL (browser-facing, for OAuth redirects) |
-| `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
-| `KEYCLOAK_ISSUER` | auto | JWT issuer URL |
-| `DEV_MODE` | `false` | Bypass NPL policy checks |
-| `SERVICES_CONFIG_PATH` | `/app/configs/services.yaml` | Path to services config |
-
-> **Note**: `KEYCLOAK_EXTERNAL_URL` must be reachable by the user's browser. For local dev with Docker, add `127.0.0.1 keycloak` to `/etc/hosts` so both the browser and Docker containers resolve the same hostname.
 
 ## Building from Source
 
@@ -261,6 +302,19 @@ docker compose build
 ./gradlew :integration-tests:test
 ```
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/ARCHITECTURE_V2.md) | Full architecture: transparent proxy, message flows, OAuth |
+| [Credential Injection](docs/CREDENTIAL_INJECTION.md) | Credential injection system design and Vault integration |
+| [User Access Control](docs/USER_ACCESS_CONTROL.md) | Per-user/agent tool access control via NPL |
+| [NPL as Source of Truth](docs/NPL_AS_SOURCE_OF_TRUTH.md) | NPL as runtime source of truth for policies |
+| [Declarative NPL Sync](docs/DECLARATIVE_NPL_SYNC.md) | YAML-to-NPL declarative sync model |
+| [NPL Party Strategy](docs/NPL_PARTY_ASSIGNMENT_STRATEGY.md) | Party assignment strategy across protocols |
+| [TUI Credential Management](docs/TUI_CREDENTIAL_MANAGEMENT.md) | Credential management via TUI |
+| [TUI Add Service Guide](docs/TUI_ADD_SERVICE_GUIDE.md) | Adding MCP services via TUI |
+
 ## License
 
-Copyright 2025 Noumena Digital AG. All rights reserved.
+Copyright 2025-2026 Noumena Digital AG. All rights reserved.

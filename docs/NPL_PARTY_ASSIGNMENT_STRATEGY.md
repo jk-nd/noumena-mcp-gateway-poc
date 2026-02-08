@@ -233,7 +233,7 @@ docker compose up -d
 3. Navigate to protocol instance (e.g., ToolPolicy for "gemini")
 4. Check **Parties** section:
    - `pAdmin` should show `role: admin`
-   - `pAgent` should show `role: agent` (NOT `admin`)
+   - `pGateway` should show `role: gateway`
 
 ### Via NPL API
 
@@ -247,7 +247,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   "@id": "...",
   "@parties": {
     "pAdmin": { "role": "admin" },
-    "pAgent": { "role": "agent" }
+    "pGateway": { "role": "gateway" }
   },
   ...
 }
@@ -299,5 +299,5 @@ CredentialPolicy:   { "pAdmin": { "role": "admin" },
 ## References
 
 - [NPL Party Documentation](https://docs.noumenadigital.com/npl/parties/)
-- [MCP Gateway Architecture](./ARCHITECTURE.md)
+- [MCP Gateway Architecture](./ARCHITECTURE_V2.md)
 - [Keycloak Provisioning](../keycloak-provisioning/terraform.tf)

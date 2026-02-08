@@ -27,13 +27,24 @@ The TUI now includes comprehensive credential management, allowing you to config
 - Test credentials for any service
 - Remove credential mappings
 
+## Credential Scopes
+
+When adding credentials, the TUI prompts you to choose a **credential scope**:
+
+| Scope | Description | Vault Path Pattern | Example |
+|-------|------------|-------------------|---------|
+| **Tenant-level** | One API key shared by all users in the organization | `secret/data/tenants/{tenant}/services/SERVICE/...` | Company Slack workspace token |
+| **User-level** | Each user has their own API key | `secret/data/tenants/{tenant}/users/{user}/SERVICE/...` | Personal GitHub tokens |
+
+**At runtime**, the JWT provides `{tenant}` and `{user}` values. The Credential Proxy interpolates the Vault path and fetches the appropriate secret.
+
 ## How to Use
 
 ### Access Credential Management
 
 1. Start the TUI:
    ```bash
-   cd tui && npm run dev
+   cd tui && npm start
    ```
 
 2. Navigate to: **System > Manage credentials**
@@ -456,9 +467,9 @@ Future: Custom injection patterns via NPL
 
 ## Related Documentation
 
-- [CREDENTIAL_INJECTION.md](./CREDENTIAL_INJECTION.md) - Complete architecture
-- [CREDENTIAL_INJECTION_QUICKSTART.md](./CREDENTIAL_INJECTION_QUICKSTART.md) - CLI setup
-- [CREDENTIAL_INJECTION_VERIFIED.md](./CREDENTIAL_INJECTION_VERIFIED.md) - Test results
+- [CREDENTIAL_INJECTION.md](./CREDENTIAL_INJECTION.md) - Architecture and system design
+- [USER_ACCESS_CONTROL.md](./USER_ACCESS_CONTROL.md) - Per-user tool access control
+- [TUI_ADD_SERVICE_GUIDE.md](./TUI_ADD_SERVICE_GUIDE.md) - Adding MCP services
 
 ---
 

@@ -307,7 +307,7 @@ Governs whether a specific tool call is allowed:
 
 ```npl
 @api
-protocol[pAdmin, pAgent] ToolPolicy(
+protocol[pAdmin, pGateway] ToolPolicy(
     var serviceName: Text
 ) {
     initial state active;
@@ -323,7 +323,7 @@ protocol[pAdmin, pAgent] ToolPolicy(
         // Add or update rule
     };
 
-    permission[pAgent] checkToolAccess(
+    permission[pGateway] checkToolAccess(
         toolName: Text,
         agentType: Text,
         userName: Text
@@ -333,17 +333,17 @@ protocol[pAdmin, pAgent] ToolPolicy(
 };
 ```
 
-### CredentialMapping (Future — Not in POC)
+### CredentialInjectionPolicy
 
-For the POC, credential resolution uses **convention-based Vault paths** — the Credential Proxy computes the path from `(service, user)` without involving NPL. This keeps the architecture simple and avoids an extra NPL round-trip on every tool call.
+NPL governs credential selection at runtime. The `CredentialInjectionPolicy` protocol determines which credential to use for each request, while the Credential Proxy handles the actual Vault fetch and injection. NPL never sees or handles the credentials themselves.
 
-In a future version, NPL may govern credential access for:
-- Dynamic revocation (alice revokes an agent's access to her credentials in real-time)
-- Multi-party approval (manager must approve before agent gets production credentials)
-- Variant selection (read-only vs full access based on agent type or context)
-- Audit trail of every credential access decision
+**Two credential scopes:**
+- **Tenant-level**: Shared across all users in an organization (e.g., company Slack workspace)
+  - Vault path: `secret/data/tenants/{tenant}/services/SERVICE/...`
+- **User-level**: Per-user credentials (e.g., personal GitHub tokens)
+  - Vault path: `secret/data/tenants/{tenant}/users/{user}/SERVICE/...`
 
-The Vault path convention is designed to support this upgrade path — NPL would gate access and optionally select the variant, while the Credential Proxy still handles the actual Vault fetch and injection. NPL would never see or handle the credentials themselves.
+At runtime, the JWT provides `{tenant}` and `{user}` values, and the Credential Proxy interpolates the Vault path accordingly.
 
 ### Runtime Instance Lifecycle
 
@@ -475,65 +475,29 @@ All server-to-server. Agent is not involved and never sees any tokens.
 |-----------|------------|
 | Gateway | Kotlin, Ktor, SSE/WebSocket |
 | NPL Engine | Noumena Platform |
-| Credential Proxy | TBD (Kotlin or Go) |
-| Secrets | HashiCorp Vault (per tenant) |
+| Credential Proxy | Kotlin, Ktor |
+| Secrets | HashiCorp Vault |
 | Auth | Keycloak (OIDC) |
-| Upstream MCP | Docker containers (any MCP server) |
+| Upstream MCP | Docker containers / NPM packages (any MCP server) |
 | TUI | TypeScript, @clack/prompts |
 | Container Orchestration | Docker Compose |
 
 ---
 
-## POC Scope
-
-The POC implements the core proxy architecture with these simplifications:
-
-| Concern | POC Approach | Full Version |
-|---------|-------------|-------------|
-| Credential injection | Stub — Docker MCP containers handle their own auth via env | Full Vault integration with per-user OAuth |
-| Token refresh | Not needed (container env credentials) | Automatic refresh with concurrency control |
-| OAuth user onboarding | Not needed | Browser-based consent flow |
-| Reverse flow sanitization | Trust upstream | Sanitize credential-like content |
-| Upstream session lifecycle | Close on agent disconnect | TTL, reconnection, persistence |
-| Multi-tenancy | Single tenant | Separate Vault per tenant |
-
-### POC Build Order
-
-1. Refactor Gateway into transparent MCP proxy — route to upstream MCPs by namespace
-2. Bidirectional streaming — SSE/WebSocket end-to-end
-3. Namespaced tool aggregation — `tools/list` returns `{service}.{tool}` from ServiceRegistry
-4. NPL policy on proxy path — intercept `tools/call`, check ToolPolicy, forward or deny
-5. Credential Proxy stub — pass-through to upstream Docker MCP containers
-6. Network isolation — Docker networks for each tier
-
 ---
 
-## Comparison: Current vs Target Architecture
-
-### Current (v1)
-
-```
-Agent → Gateway (owns tool schemas, dispatches)
-          → NPL (policy check)
-          → RabbitMQ → Executor → Vault → STDIO MCP subprocess
-```
-
-- Gateway owns tool definitions in services.yaml
-- Executor spawns STDIO subprocesses
-- Indirect flow via RabbitMQ
-- Single transport model
-
-### Target (v2)
+## Current Architecture (V2)
 
 ```
 Agent → Gateway (transparent proxy, intercepts)
-          → NPL (policy check + credential mapping)
+          → NPL (policy check + credential selection)
           → Credential Proxy → Vault (credential fetch + inject)
           → Upstream MCP container (direct connection)
 ```
 
 - Gateway discovers tools from upstream MCPs
-- Direct MCP-to-MCP connections (SSE/WebSocket/Streamable HTTP)
-- No RabbitMQ (direct proxy, not async dispatch)
+- Direct MCP-to-MCP connections (STDIO/Streamable HTTP/WebSocket)
 - Bidirectional streaming for notifications
 - Credential injection isolated from Gateway and agents
+- NPL as runtime source of truth for all policy decisions
+- Atomic TUI operations with rollback on NPL sync failure

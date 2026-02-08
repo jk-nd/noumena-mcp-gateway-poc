@@ -1,25 +1,25 @@
 # NOUMENA MCP Gateway Wizard
 
-Interactive CLI for managing MCP Gateway services. Powered by [@clack/prompts](https://github.com/natemoo-re/clack).
+Interactive CLI for managing MCP Gateway services, users, and credentials. Powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ## Features
 
-- **Service-centric navigation** - Services displayed as main menu items with status indicators
-- **Enable/disable services** - Updates config and syncs with NPL ServiceRegistry
-- **Multi-select tool management** - Use SPACE to select tools, ENTER to apply
-- **Container control** - Pull Docker images and manage HTTP service containers
-- **Search Docker Hub** - Find and add MCP servers with search functionality
-- **Add custom images** - Support for local or private registry Docker images
-- **Safe deletion** - Stops container and removes from NPL before deleting
-- **Real-time status** - Gateway connection and container status indicators
+- **Service management** - Add, enable/disable, remove services with NPL sync
+- **Tool management** - Enable/disable individual tools per service
+- **User management** - Register/deregister Keycloak users, grant/revoke tool access
+- **Credential management** - Store secrets in Vault, configure tenant-level or user-level scopes
+- **Container control** - Pull Docker images, manage HTTP service containers
+- **Docker Hub search** - Find and add MCP servers from the `mcp/*` namespace
+- **Atomic operations** - All state changes sync to NPL with automatic rollback on failure
+- **Real-time status** - Gateway connection, container, and NPL sync indicators
 
 ## Status Indicators
 
 | Symbol | Meaning |
 |--------|---------|
-| `✓` | Service/tool enabled |
+| `●` | Service/tool enabled |
 | `–` | Service/tool disabled |
-| `■` | Docker image pulled and ready |
+| `■` | Docker image pulled and ready (green) |
 | `·` | Docker image not pulled |
 | `▶` | Container running (HTTP services only) |
 
@@ -135,7 +135,9 @@ tui/
 3. **NPL Policy**: Controls which services are allowed (enable = allowed, disable = denied)
 4. **Wizard**: Manages all three layers through a unified interface
 
-## NPL Integration (V2)
+## NPL Integration
+
+All TUI operations are **atomic with rollback**: if the NPL sync fails, `services.yaml` changes are reverted and an error is displayed.
 
 When you enable a service:
 - Service is registered in NPL ServiceRegistry
@@ -146,7 +148,12 @@ When you disable a service:
 - Service is removed from NPL ServiceRegistry
 - Requests to that service will be denied by policy
 
-Tool-level enabling syncs with ToolPolicy — only explicitly enabled tools pass the policy check.
+When you manage users:
+- Users are registered/deregistered in NPL UserRegistry
+- Tool access is granted/revoked via NPL UserToolAccess
+- Changes are synced to Keycloak for authentication
+
+Tool-level enabling syncs with ToolPolicy -- only explicitly enabled tools pass the policy check.
 
 ## Container Management
 
