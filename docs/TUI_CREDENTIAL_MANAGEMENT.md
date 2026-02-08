@@ -7,6 +7,9 @@ The TUI now includes comprehensive credential management, allowing you to config
 ## Features
 
 ### 🎯 Guided Credential Setup
+- **Smart Service Detection**: Automatically detects common services (Gemini, GitHub, Slack, OpenAI, etc.)
+- **Canonical Paths**: Suggests industry-standard Vault paths for known services
+- **Intelligent Env Vars**: Auto-generates correct environment variable names (e.g., `GEMINI_API_KEY`)
 - Interactive prompts for all credential configuration
 - No manual YAML editing required
 - No Vault CLI commands needed
@@ -34,6 +37,21 @@ The TUI now includes comprehensive credential management, allowing you to config
    ```
 
 2. Navigate to: **System > Manage credentials**
+
+### Supported Common Services
+
+The TUI automatically recognizes and provides canonical configurations for:
+
+| Service | Credential Name | Vault Path | Env Var |
+|---------|----------------|------------|---------|
+| **Google Gemini** | `gemini`, `google_gemini` | `secret/data/tenants/{tenant}/users/{user}/gemini/api` | `GEMINI_API_KEY` |
+| **GitHub** | `github`, `personal_github`, `work_github` | `secret/data/tenants/{tenant}/users/{user}/github/personal` | `GITHUB_TOKEN` |
+| **Slack** | `slack`, `prod_slack` | `secret/data/tenants/{tenant}/users/{user}/slack/workspace` | `SLACK_TOKEN` |
+| **OpenAI** | `openai` | `secret/data/tenants/{tenant}/users/{user}/openai/api` | `OPENAI_API_KEY` |
+| **Anthropic** | `anthropic` | `secret/data/tenants/{tenant}/users/{user}/anthropic/api` | `ANTHROPIC_API_KEY` |
+| **Database** | `database` | `secret/data/tenants/{tenant}/users/{user}/database/credentials` | `DB_USER`, `DB_PASS` |
+
+💡 **Tip**: When naming your credential, use or include these service names (e.g., `my_gemini`, `production_github`) and the TUI will automatically suggest the correct paths and environment variables!
 
 ---
 

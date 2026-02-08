@@ -1899,6 +1899,15 @@ async function credentialManagementFlow(): Promise<void> {
   console.log(noumena.textDim(`  Services with credentials: ${servicesWithCreds}/${services.length}`));
   console.log();
   
+  // Show quick guide if first time
+  if (credCount === 0) {
+    console.log(noumena.success("  💡 Quick Start Guide:"));
+    console.log(noumena.textDim("     1. Add credential - Define how to fetch secrets from Vault"));
+    console.log(noumena.textDim("     2. Configure service - Map a service to use the credential"));
+    console.log(noumena.textDim("     3. Test injection - Verify it works before making real calls"));
+    console.log();
+  }
+  
   const action = await p.select({
     message: "Select action:",
     options: [
@@ -1925,6 +1934,97 @@ async function credentialManagementFlow(): Promise<void> {
   }
 }
 
+// Service configuration lookup table for common services
+const SERVICE_CONFIGS: Record<string, {
+  pathSuffix: string;
+  envVarPrefix: string;
+  fields: Array<{ vaultField: string; envVar: string }>;
+  description: string;
+}> = {
+  gemini: {
+    pathSuffix: "gemini/api",
+    envVarPrefix: "GEMINI",
+    fields: [{ vaultField: "api_key", envVar: "GEMINI_API_KEY" }],
+    description: "Google Gemini AI API",
+  },
+  google_gemini: {
+    pathSuffix: "gemini/api",
+    envVarPrefix: "GEMINI",
+    fields: [{ vaultField: "api_key", envVar: "GEMINI_API_KEY" }],
+    description: "Google Gemini AI API",
+  },
+  github: {
+    pathSuffix: "github/personal",
+    envVarPrefix: "GITHUB",
+    fields: [{ vaultField: "token", envVar: "GITHUB_TOKEN" }],
+    description: "GitHub API",
+  },
+  work_github: {
+    pathSuffix: "github/work",
+    envVarPrefix: "GITHUB",
+    fields: [{ vaultField: "token", envVar: "GITHUB_TOKEN" }],
+    description: "GitHub API (work account)",
+  },
+  personal_github: {
+    pathSuffix: "github/personal",
+    envVarPrefix: "GITHUB",
+    fields: [{ vaultField: "token", envVar: "GITHUB_TOKEN" }],
+    description: "GitHub API (personal account)",
+  },
+  slack: {
+    pathSuffix: "slack/workspace",
+    envVarPrefix: "SLACK",
+    fields: [{ vaultField: "token", envVar: "SLACK_TOKEN" }],
+    description: "Slack API",
+  },
+  prod_slack: {
+    pathSuffix: "slack/prod",
+    envVarPrefix: "SLACK",
+    fields: [{ vaultField: "token", envVar: "SLACK_TOKEN" }],
+    description: "Slack API (production)",
+  },
+  openai: {
+    pathSuffix: "openai/api",
+    envVarPrefix: "OPENAI",
+    fields: [{ vaultField: "api_key", envVar: "OPENAI_API_KEY" }],
+    description: "OpenAI API",
+  },
+  anthropic: {
+    pathSuffix: "anthropic/api",
+    envVarPrefix: "ANTHROPIC",
+    fields: [{ vaultField: "api_key", envVar: "ANTHROPIC_API_KEY" }],
+    description: "Anthropic Claude API",
+  },
+  database: {
+    pathSuffix: "database/credentials",
+    envVarPrefix: "DB",
+    fields: [
+      { vaultField: "username", envVar: "DB_USER" },
+      { vaultField: "password", envVar: "DB_PASS" },
+    ],
+    description: "Database credentials",
+  },
+};
+
+/**
+ * Detect service from credential name and return canonical config
+ */
+function detectService(credentialName: string): typeof SERVICE_CONFIGS[string] | null {
+  // Direct match
+  if (SERVICE_CONFIGS[credentialName]) {
+    return SERVICE_CONFIGS[credentialName];
+  }
+  
+  // Partial match (e.g., "my_gemini" contains "gemini")
+  for (const [key, config] of Object.entries(SERVICE_CONFIGS)) {
+    if (credentialName.includes(key)) {
+      return config;
+    }
+  }
+  
+  return null;
+}
+
 /**
  * Add new credential mapping
  */
@@ -1933,28 +2033,52 @@ async function addCredentialFlow(): Promise<void> {
   console.log(noumena.purple("  Add Credential Mapping"));
   console.log(noumena.textDim("  Create a new credential with Vault integration"));
   console.log();
+  console.log(noumena.textDim("  💡 Common services: gemini, github, slack, openai, anthropic"));
+  console.log();
   
   // Step 1: Credential name
   const credentialName = await p.text({
     message: "Credential name:",
-    placeholder: "e.g., google_gemini, personal_github",
+    placeholder: "e.g., google_gemini, work_github, prod_slack",
     validate: (value) => {
       if (!value) return "Credential name is required";
-      if (!/^[a-z0-9_]+$/.test(value)) return "Use lowercase letters, numbers, and underscores only";
+      if (!/^[a-z0-9_]+$/.test(value)) return "Use lowercase, numbers, and underscores only";
       return undefined;
     },
   });
   
   if (p.isCancel(credentialName)) return;
   
-  // Step 2: Vault path template
+  // Detect service and provide smart defaults
+  const detectedService = detectService(String(credentialName));
+  
+  if (detectedService) {
+    console.log();
+    console.log(noumena.success(`  ✓ Detected: ${detectedService.description}`));
+    console.log(noumena.textDim(`  Using canonical configuration for this service`));
+    console.log();
+  }
+  
+  // Step 2: Vault path template (with better suggestion)
+  const suggestedPath = detectedService
+    ? `secret/data/tenants/{tenant}/users/{user}/${detectedService.pathSuffix}`
+    : `secret/data/tenants/{tenant}/users/{user}/${String(credentialName).replace(/_/g, "/")}`;
+  
+  console.log(noumena.textDim("  📁 Vault path templates:"));
+  console.log(noumena.textDim("     • User-specific: secret/data/tenants/{tenant}/users/{user}/SERVICE/api"));
+  console.log(noumena.textDim("     • Service-wide:  secret/data/tenants/{tenant}/services/SERVICE/env"));
+  console.log();
+  
   const vaultPath = await p.text({
     message: "Vault path template:",
-    placeholder: "secret/data/tenants/{tenant}/users/{user}/service/name",
-    initialValue: `secret/data/tenants/{tenant}/users/{user}/${String(credentialName).replace(/_/g, "/")}`,
+    placeholder: "Use suggested path or enter custom",
+    initialValue: suggestedPath,
     validate: (value) => {
       if (!value) return "Vault path is required";
       if (!value.startsWith("secret/data/")) return "Path should start with 'secret/data/'";
+      if (!value.includes("{tenant}") || !value.includes("{user}")) {
+        return "Path should include {tenant} and {user} for multi-tenancy";
+      }
       return undefined;
     },
   });
@@ -1972,34 +2096,74 @@ async function addCredentialFlow(): Promise<void> {
   
   if (p.isCancel(injectionType)) return;
   
-  // Step 4: Field mappings
+  // Step 4: Field mappings (with smart suggestions)
   console.log();
-  console.log(noumena.textDim("  Define field mappings (Vault field → Injection target)"));
-  console.log(noumena.textDim("  Press Enter with empty field name when done"));
-  console.log();
+  console.log(noumena.textDim("  🔑 Define field mappings (Vault field → Injection target)"));
   
   const fieldMapping: Record<string, string> = {};
   
-  while (true) {
-    const vaultField = await p.text({
-      message: `Vault field name (${Object.keys(fieldMapping).length} added):`,
-      placeholder: "e.g., api_key, token, username",
+  // If we detected the service, suggest its standard fields
+  if (detectedService && detectedService.fields.length > 0) {
+    console.log(noumena.textDim(`  Standard fields for ${detectedService.description}:`));
+    detectedService.fields.forEach(f => {
+      console.log(noumena.textDim(`    • ${f.vaultField} → ${f.envVar}`));
+    });
+    console.log();
+    
+    const useStandard = await p.confirm({
+      message: "Use standard field mappings?",
+      initialValue: true,
     });
     
-    if (p.isCancel(vaultField)) return;
-    if (!vaultField) break; // Done adding fields
-    
-    const targetName = await p.text({
-      message: `  → ${injectionType === "env" ? "Environment variable" : "Header"} name:`,
-      placeholder: injectionType === "env" ? "e.g., GEMINI_API_KEY, GITHUB_TOKEN" : "e.g., X-API-Key, Authorization",
-      initialValue: injectionType === "env" ? String(vaultField).toUpperCase() : String(vaultField),
-    });
-    
-    if (p.isCancel(targetName)) return;
-    if (!targetName) continue;
-    
-    fieldMapping[String(vaultField)] = String(targetName);
-    p.log.success(`  Added: ${vaultField} → ${targetName}`);
+    if (!p.isCancel(useStandard) && useStandard) {
+      // Use the standard mappings
+      detectedService.fields.forEach(f => {
+        fieldMapping[f.vaultField] = f.envVar;
+      });
+      console.log();
+      p.log.success(`  ✓ Added ${detectedService.fields.length} standard field(s)`);
+    } else {
+      console.log();
+      console.log(noumena.textDim("  Define custom field mappings (press Enter with empty field to finish)"));
+      console.log();
+    }
+  } else {
+    console.log(noumena.textDim("  Common fields: api_key, token, username, password"));
+    console.log(noumena.textDim("  Press Enter with empty field name when done"));
+    console.log();
+  }
+  
+  // Allow adding custom fields (or all fields if not using standard)
+  if (Object.keys(fieldMapping).length === 0 || detectedService === null) {
+    while (true) {
+      const vaultField = await p.text({
+        message: `Vault field name (${Object.keys(fieldMapping).length} added):`,
+        placeholder: "e.g., api_key, token, username, password",
+      });
+      
+      if (p.isCancel(vaultField)) return;
+      if (!vaultField) break; // Done adding fields
+      
+      // Smart env var suggestion based on field name and detected service
+      let suggestedEnvVar = String(vaultField).toUpperCase();
+      if (detectedService && injectionType === "env") {
+        // Use service prefix for better naming
+        const fieldName = String(vaultField).toUpperCase();
+        suggestedEnvVar = `${detectedService.envVarPrefix}_${fieldName}`;
+      }
+      
+      const targetName = await p.text({
+        message: `  → ${injectionType === "env" ? "Environment variable" : "Header"} name:`,
+        placeholder: injectionType === "env" ? "e.g., GEMINI_API_KEY, GITHUB_TOKEN" : "e.g., X-API-Key, Authorization",
+        initialValue: suggestedEnvVar,
+      });
+      
+      if (p.isCancel(targetName)) return;
+      if (!targetName) continue;
+      
+      fieldMapping[String(vaultField)] = String(targetName);
+      p.log.success(`  ✓ Added: ${vaultField} → ${targetName}`);
+    }
   }
   
   if (Object.keys(fieldMapping).length === 0) {
@@ -2049,12 +2213,17 @@ async function storeSecretsInVaultFlow(
 ): Promise<void> {
   console.log();
   console.log(noumena.purple("  Store Secrets in Vault"));
+  console.log(noumena.textDim("  Securely store credential values for this mapping"));
   console.log();
   
   // Ask for tenant and user
+  console.log(noumena.textDim("  💡 For development, use: tenant=default, user=alice"));
+  console.log();
+  
   const tenantId = await p.text({
     message: "Tenant ID:",
     initialValue: "default",
+    validate: (v) => v ? undefined : "Tenant ID is required",
   });
   
   if (p.isCancel(tenantId)) return;
@@ -2062,6 +2231,7 @@ async function storeSecretsInVaultFlow(
   const userId = await p.text({
     message: "User ID:",
     initialValue: "alice",
+    validate: (v) => v ? undefined : "User ID is required",
   });
   
   if (p.isCancel(userId)) return;
@@ -2072,7 +2242,7 @@ async function storeSecretsInVaultFlow(
     .replace("{user}", String(userId));
   
   console.log();
-  console.log(noumena.textDim(`  Vault path: ${vaultPath}`));
+  console.log(noumena.success(`  ✓ Vault path: ${vaultPath}`));
   console.log();
   
   // Collect secret values

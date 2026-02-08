@@ -31,23 +31,34 @@ Log in with admin credentials when prompted.
 
 **Navigate to:** `System > Manage credentials > Add credential`
 
-**Follow the prompts:**
+**Follow the prompts - the TUI now auto-detects Gemini:**
 
 ```
-Credential name: google_gemini
+💡 Common services: gemini, github, slack, openai, anthropic
+
+Credential name: gemini
+  ✓ Detected: Google Gemini AI API
+  Using canonical configuration for this service
+
+📁 Vault path templates:
+   • User-specific: secret/data/tenants/{tenant}/users/{user}/SERVICE/api
+   • Service-wide:  secret/data/tenants/{tenant}/services/SERVICE/env
 
 Vault path: secret/data/tenants/{tenant}/users/{user}/gemini/api
-(or press Enter to use default)
+  (canonical path auto-suggested ✓)
 
 Injection type: Environment variables
 
-Field mappings:
-  Vault field: api_key
-  → Environment variable: GEMINI_API_KEY
-  (Press Enter with empty field to finish)
+🔑 Standard fields for Google Gemini AI API:
+  • api_key → GEMINI_API_KEY
+
+Use standard field mappings? Yes
+  ✓ Added 1 standard field(s)
 
 ✓ Credential mapping saved
 ```
+
+**💡 Pro tip:** Just type `gemini` as the name and the TUI auto-fills everything correctly!
 
 ---
 
@@ -58,16 +69,20 @@ Field mappings:
 ```
 Store secrets in Vault now? Yes
 
+💡 For development, use: tenant=default, user=alice
+
 Tenant ID: default
 User ID: alice
+
+✓ Vault path: secret/data/tenants/default/users/alice/gemini/api
 
 Enter api_key: ********************* (paste your Gemini API key)
 
 ✓ Secrets stored in Vault
-✓ Credential 'google_gemini' is ready to use
+✓ Credential 'gemini' is ready to use
 ```
 
-**That's it for credentials!** ✅
+**That's it for credentials!** ✅ The TUI guided you through the entire setup with smart suggestions!
 
 ---
 
