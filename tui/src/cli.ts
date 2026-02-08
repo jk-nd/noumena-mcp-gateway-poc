@@ -1733,17 +1733,21 @@ function filterSystemUsers(users: KeycloakUser[]): KeycloakUser[] {
 }
 
 /**
- * User management main menu.
- * Shows a single flat list of all Keycloak users (minus system accounts).
- * Each user shows their role and tool access status.
- * Selecting a user auto-provisions their local config if needed.
+ * User management main menu (V3 Architecture).
+ * 
+ * Keycloak is the source of truth for identity (who exists).
+ * NPL tracks who is "registered for the Gateway" (authorization).
+ * services.yaml is a configuration export, not the source of truth.
+ * 
+ * Flow:
+ * 1. Query Keycloak for all users (identity source)
+ * 2. Check NPL registration status (authorization)
+ * 3. Show registration actions (register/deregister from Gateway)
+ * 4. Show identity actions (create/delete in Keycloak)
  */
 async function userManagementFlow(): Promise<void> {
   while (true) {
-    // Load users from services.yaml (source of truth)
-    const localUsers = getAllUsers();
-    
-    // Load all Keycloak users to check authentication status
+    // 1. Load all Keycloak users (source of truth for identity)
     let keycloakUsers: KeycloakUser[] = [];
     let keycloakError = "";
     try {
@@ -1752,17 +1756,19 @@ async function userManagementFlow(): Promise<void> {
       keycloakError = `${err}`;
     }
 
-    // Build a map of Keycloak users by ID
-    const keycloakById = new Map(keycloakUsers.map(u => [u.id, u]));
+    // 2. Load services.yaml users (for tool access configuration)
+    const localUsers = getAllUsers();
+    const localUsersByEmail = new Map(localUsers.map(u => [u.userId, u]));
 
-    // Check NPL registration status for each user
+    // 3. Check NPL registration status for each Keycloak user
     const nplRegistered = new Set<string>();
     try {
       const token = await getKeycloakToken();
-      for (const user of localUsers) {
-        const accessId = await findUserToolAccess(token, user.userId);
+      for (const kcUser of keycloakUsers) {
+        if (!kcUser.email) continue;
+        const accessId = await findUserToolAccess(token, kcUser.email);
         if (accessId) {
-          nplRegistered.add(user.userId);
+          nplRegistered.add(kcUser.email);
         }
       }
     } catch (err) {
@@ -1772,44 +1778,52 @@ async function userManagementFlow(): Promise<void> {
     console.clear();
     console.log();
     console.log(noumena.purple("  User Management"));
-    console.log(noumena.textDim(`  ${localUsers.length} user(s) configured in services.yaml`));
     console.log();
-    console.log(noumena.textDim("  💡 Keycloak: Identity (who you are) | NPL: Authorization (what you can do)"));
-    console.log(noumena.textDim("  • KC = registered in Keycloak | NPL = registered in NPL"));
+    console.log(noumena.textDim("  💡 Keycloak: Identity (who you are) | Gateway: Authorization (what you can do)"));
+    console.log(noumena.textDim("  • Users in Keycloak can be registered for Gateway access (→ NPL + services.yaml)"));
+    console.log();
+    console.log(noumena.textDim(`  ${keycloakUsers.length} user(s) in Keycloak`));
     if (keycloakError) {
       console.log(noumena.warning(`  ⚠ Keycloak error: ${keycloakError.substring(0, 60)}`));
     }
     console.log();
 
-    // Build user list from services.yaml with detailed status
-    const userOptions: { value: string; label: string; hint?: string }[] = localUsers.map(u => {
-      const kcUser = keycloakById.get(u.keycloakId);
-      const email = kcUser?.email || "(no email)";
-      const role = kcUser?.attributes?.role?.[0] || "user";
-      const kcStatus = kcUser ? "KC" : "";
-      const nplStatus = nplRegistered.has(u.userId) ? "NPL" : "";
-      const registrations = [kcStatus, nplStatus].filter(s => s).join("+") || "none";
+    // Build user list from Keycloak with Gateway registration status
+    const userOptions: { value: string; label: string; hint?: string }[] = keycloakUsers.map(kcUser => {
+      const email = kcUser.email || "(no email)";
+      const role = kcUser.attributes?.role?.[0] || "user";
+      const localUser = localUsersByEmail.get(email);
       
-      const serviceCount = Object.keys(u.tools).length;
-      const totalTools = Object.values(u.tools).reduce((sum, t) => sum + t.length, 0);
-      const toolInfo = totalTools > 0 ? `${totalTools} tools` : "no tools";
+      // Registration status
+      const isRegisteredInNpl = nplRegistered.has(email);
+      const isInConfig = !!localUser;
+      const registrationIcon = (isRegisteredInNpl && isInConfig) ? noumena.success("✓") : noumena.grayDim("○");
+      const registrationStatus = (isRegisteredInNpl && isInConfig) 
+        ? noumena.success("Registered")
+        : noumena.grayDim("Not registered");
+      
+      // Tool access count
+      const serviceCount = localUser ? Object.keys(localUser.tools).length : 0;
+      const totalTools = localUser ? Object.values(localUser.tools).reduce((sum, t) => sum + t.length, 0) : 0;
+      const toolInfo = totalTools > 0 ? `${totalTools} tools` : "no tools yet";
 
       return {
-        value: `user:${u.userId}`,
-        label: `  ${u.displayName || u.userId} ${noumena.textDim(`(${u.userId}, ${role}, ${registrations})`)}`,
-        hint: `${email} | ${toolInfo}`,
+        value: `user:${kcUser.id}`,
+        label: `${registrationIcon}  ${kcUser.firstName || ""} ${kcUser.lastName || email} ${noumena.textDim(`(${role})`)}`,
+        hint: `${email} | ${registrationStatus} | ${toolInfo}`,
       };
     });
 
     const allOptions: { value: string; label: string; hint?: string }[] = [
       { value: "back", label: noumena.textDim("← Back") },
       ...userOptions,
-      { value: "create", label: noumena.purple("+ Create new user"), hint: "Create in Keycloak + register in NPL + add to services.yaml" },
+      { value: "separator", label: noumena.textDim("───────────────────"), hint: "" },
+      { value: "create", label: noumena.purple("+ Create new Keycloak user"), hint: "Add user to identity system" },
     ];
 
     const action = await p.select({
       message: "Select a user or action:",
-      options: allOptions,
+      options: allOptions.filter(o => o.value !== "separator"),
     });
 
     if (p.isCancel(action) || action === "back") {
@@ -1817,36 +1831,11 @@ async function userManagementFlow(): Promise<void> {
     }
 
     if (typeof action === "string" && action.startsWith("user:")) {
-      const userId = action.replace("user:", "");
-      const local = localUsers.find(u => u.userId === userId);
-      if (!local) continue;
+      const keycloakId = action.replace("user:", "");
+      const kcUser = keycloakUsers.find(u => u.id === keycloakId);
+      if (!kcUser || !kcUser.email) continue;
 
-      const kcUser = keycloakById.get(local.keycloakId);
-      
-      // If user exists in services.yaml but not Keycloak, show warning
-      if (!kcUser && !keycloakError) {
-        console.log();
-        console.log(noumena.warning(`  Warning: User '${userId}' not found in Keycloak`));
-        console.log(noumena.textDim(`  Keycloak ID: ${local.keycloakId}`));
-        console.log();
-        await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-        continue;
-      }
-
-      // User detail/management flow - using services.yaml user
-      {
-        const existingUser = local;
-        const newUser: UserToolAccess = {
-          userId: existingUser.userId,
-          keycloakId: existingUser.keycloakId,
-          displayName: existingUser.displayName,
-          createdAt: existingUser.createdAt,
-          tools: existingUser.tools,
-          vaultPaths: existingUser.vaultPaths || {},
-        };
-      }
-
-      await userActionsFlow(local);
+      await userActionsFlowV3(kcUser, localUsersByEmail.get(kcUser.email));
     } else if (action === "create") {
       await createUserFlow();
     }
@@ -1957,7 +1946,259 @@ async function createUserFlow(): Promise<void> {
 }
 
 /**
- * User actions menu
+ * User actions menu (V3 Architecture).
+ * Keycloak user is the source, localUser may or may not exist.
+ */
+async function userActionsFlowV3(kcUser: KeycloakUser, localUser: UserToolAccess | undefined): Promise<void> {
+  const email = kcUser.email || "(no email)";
+  const role = kcUser.attributes?.role?.[0] || "user";
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
+  
+  console.log();
+  console.log(noumena.purple(`  ${displayName}`));
+  console.log(noumena.textDim(`  Email: ${email}`));
+  console.log(noumena.textDim(`  Role: ${role}`));
+  console.log(noumena.textDim(`  Keycloak ID: ${kcUser.id}`));
+  console.log();
+  
+  // Check registration status
+  const isRegistered = !!localUser;
+  let isInNpl = false;
+  try {
+    const token = await getKeycloakToken();
+    const accessId = await findUserToolAccess(token, email);
+    isInNpl = !!accessId;
+  } catch {
+    // NPL check failed
+  }
+  
+  if (isRegistered && isInNpl) {
+    const serviceCount = Object.keys(localUser.tools).length;
+    const toolCount = Object.values(localUser.tools).reduce((sum, tools) => sum + tools.length, 0);
+    console.log(noumena.success(`  ✓ Registered for Gateway`));
+    console.log(noumena.textDim(`    Access: ${serviceCount} services, ${toolCount} tools`));
+  } else if (isInNpl && !isRegistered) {
+    console.log(noumena.warning(`  ⚠ Registered in NPL but not in services.yaml (inconsistent state)`));
+  } else if (isRegistered && !isInNpl) {
+    console.log(noumena.warning(`  ⚠ In services.yaml but not in NPL (inconsistent state)`));
+  } else {
+    console.log(noumena.grayDim(`  ○ Not registered for Gateway`));
+  }
+  console.log();
+
+  // Build action options based on registration status
+  const actionOptions: Array<{ value: string; label: string; hint?: string }> = [
+    { value: "back", label: noumena.textDim("← Back") },
+  ];
+  
+  if (isRegistered) {
+    actionOptions.push(
+      { value: "tools", label: "Edit tool access", hint: "Grant/revoke tools" },
+      { value: "view", label: "View all access", hint: "Show detailed permissions" },
+      { value: "deregister", label: noumena.warning("Deregister from Gateway"), hint: "Remove from NPL + services.yaml" }
+    );
+  } else {
+    actionOptions.push(
+      { value: "register", label: noumena.success("Register for Gateway"), hint: "Add to NPL + services.yaml" }
+    );
+  }
+  
+  actionOptions.push(
+    { value: "separator", label: noumena.textDim("───────────────"), hint: "" },
+    { value: "delete", label: noumena.purpleDim("Delete from Keycloak"), hint: "Remove identity (+ cascade to NPL)" }
+  );
+
+  const action = await p.select({
+    message: "Action:",
+    options: actionOptions.filter(o => o.value !== "separator"),
+  });
+
+  if (p.isCancel(action) || action === "back") {
+    return;
+  }
+
+  if (action === "register") {
+    await registerUserForGatewayFlow(kcUser);
+  } else if (action === "deregister") {
+    if (localUser) {
+      await deregisterUserFromGatewayFlow(kcUser, localUser);
+    }
+  } else if (action === "tools") {
+    if (localUser) {
+      await editUserToolAccessFlow(localUser);
+    }
+  } else if (action === "view") {
+    if (localUser) {
+      await viewUserAccessFlow(localUser);
+    }
+  } else if (action === "delete") {
+    await deleteUserFromKeycloakFlow(kcUser, localUser);
+  }
+}
+
+/**
+ * Register a Keycloak user for Gateway access (add to NPL + services.yaml)
+ */
+async function registerUserForGatewayFlow(kcUser: KeycloakUser): Promise<void> {
+  const email = kcUser.email || "";
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
+  
+  const confirmed = await p.confirm({
+    message: `Register ${noumena.purple(displayName)} for Gateway access?`,
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Register in NPL
+    s.start("Registering in NPL...");
+    await registerUserInNpl(email);
+    s.stop(noumena.success("Registered in NPL"));
+
+    // Step 2: Add to services.yaml
+    s.start("Saving to configuration...");
+    const newUser: UserToolAccess = {
+      userId: email,
+      keycloakId: kcUser.id,
+      displayName,
+      createdAt: new Date().toISOString(),
+      tools: {},
+      vaultPaths: {},
+    };
+    
+    const success = addUser(newUser);
+    if (success) {
+      s.stop(noumena.success("Configuration updated"));
+      p.log.success(`User registered: ${email}`);
+      p.log.info("Use 'Edit tool access' to grant tools to this user");
+    } else {
+      s.stop(noumena.purpleDim("Failed to update configuration"));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Deregister a user from Gateway (remove from NPL + services.yaml, keep in Keycloak)
+ */
+async function deregisterUserFromGatewayFlow(kcUser: KeycloakUser, localUser: UserToolAccess): Promise<void> {
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || localUser.userId;
+  
+  const confirmed = await p.confirm({
+    message: `Deregister ${noumena.purple(displayName)} from Gateway? (Keycloak account will remain)`,
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Remove from NPL
+    s.start("Removing from NPL...");
+    try {
+      await removeUserFromNpl(localUser.userId);
+      s.stop(noumena.success("Removed from NPL"));
+    } catch {
+      s.stop(noumena.textDim("NPL removal skipped (not found)"));
+    }
+
+    // Step 2: Remove from services.yaml
+    s.start("Removing from configuration...");
+    const success = removeUserFromConfig(localUser.userId);
+    if (success) {
+      s.stop(noumena.success("Removed from configuration"));
+      p.log.success(`User deregistered: ${localUser.userId}`);
+      p.log.info("User can still authenticate via Keycloak but has no Gateway access");
+    } else {
+      s.stop(noumena.purpleDim("Failed to update configuration"));
+    }
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * Delete a user from Keycloak (cascade delete from NPL + services.yaml)
+ */
+async function deleteUserFromKeycloakFlow(kcUser: KeycloakUser, localUser: UserToolAccess | undefined): Promise<void> {
+  const email = kcUser.email || "(no email)";
+  const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
+  
+  console.log();
+  console.log(noumena.warning("  ⚠ WARNING: This will delete the user's identity!"));
+  console.log(noumena.textDim("  • Keycloak account will be removed"));
+  console.log(noumena.textDim("  • NPL registration will be removed (if exists)"));
+  console.log(noumena.textDim("  • services.yaml entry will be removed (if exists)"));
+  console.log();
+  
+  const confirmed = await p.confirm({
+    message: `Delete ${noumena.purple(displayName)} from Keycloak?`,
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return;
+  }
+
+  const s = p.spinner();
+
+  try {
+    // Step 1: Remove from NPL (if registered)
+    if (localUser) {
+      s.start("Removing from NPL...");
+      try {
+        await removeUserFromNpl(localUser.userId);
+        s.stop(noumena.success("Removed from NPL"));
+      } catch {
+        s.stop(noumena.textDim("NPL removal skipped (not found)"));
+      }
+    }
+
+    // Step 2: Delete from Keycloak
+    if (kcUser.id) {
+      s.start("Deleting from Keycloak...");
+      try {
+        await deleteKeycloakUser(kcUser.id);
+        s.stop(noumena.success("Deleted from Keycloak"));
+      } catch (error) {
+        s.stop(noumena.warning("Failed to delete from Keycloak"));
+        p.log.warn(`${error}`);
+      }
+    } else {
+      s.stop(noumena.warning("Cannot delete from Keycloak (missing ID)"));
+    }
+
+    // Step 3: Remove from config (if exists)
+    if (localUser) {
+      s.start("Removing from configuration...");
+      const success = removeUserFromConfig(localUser.userId);
+      if (success) {
+        s.stop(noumena.success("Removed from configuration"));
+      } else {
+        s.stop(noumena.purpleDim("Failed to update configuration"));
+      }
+    }
+    
+    p.log.success(`User deleted: ${email}`);
+  } catch (error) {
+    s.stop(noumena.purpleDim("Failed"));
+    p.log.error(`${error}`);
+  }
+}
+
+/**
+ * User actions menu (legacy, kept for compatibility)
  */
 async function userActionsFlow(user: UserToolAccess): Promise<void> {
   console.log();

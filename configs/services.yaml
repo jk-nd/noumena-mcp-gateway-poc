@@ -49,7 +49,7 @@ services:
   - name: "duckduckgo"
     displayName: "DuckDuckGo"
     type: "MCP_STDIO"
-    enabled: false
+    enabled: true
     command: "docker run -i --rm mcp/duckduckgo"
     args: []
     requiresCredentials: false
