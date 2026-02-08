@@ -811,13 +811,3 @@ user_access:
         slack:
           - "*"
       vaultPaths: {}
-    - userId: "peter@acme.com"
-      keycloakId: "616552e1-51a9-45c5-8472-3cea98ba5c7e"
-      displayName: "Peter Pan"
-      createdAt: "2026-02-08T17:18:48.359Z"
-      tools:
-        slack:
-          - "*"
-        gemini:
-          - "gemini_default"
-      vaultPaths: {}

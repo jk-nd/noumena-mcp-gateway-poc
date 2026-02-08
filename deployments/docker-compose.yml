@@ -231,7 +231,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - NPL_URL=http://npl-engine:12000
-      - KEYCLOAK_URL=http://localhost:11000
+      - KEYCLOAK_URL=http://keycloak:11000
       - KEYCLOAK_REALM=mcpgateway
       - KEYCLOAK_CLIENT_ID=mcpgateway
       # Issuer must match what Keycloak puts in tokens (KC_HOSTNAME=keycloak)

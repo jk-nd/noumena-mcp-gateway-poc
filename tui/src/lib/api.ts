@@ -493,6 +493,7 @@ export async function bootstrapNpl(): Promise<{
   // 6. Sync users from services.yaml user_access section
   const usersSynced: string[] = [];
   const users = config.user_access?.users || [];
+  const configUserIds = new Set(users.map(u => u.userId));
 
   for (const user of users) {
     try {
@@ -506,6 +507,35 @@ export async function bootstrapNpl(): Promise<{
       console.error(`Failed to sync user ${user.userId}:`, error);
       // Continue with other users
     }
+  }
+
+  // 7. Cleanup orphaned users: Remove users in NPL but not in services.yaml
+  try {
+    const nplUsers = await getAllUsersFromNpl(token);
+    const orphanedUsers = nplUsers.filter(userId => !configUserIds.has(userId));
+    
+    for (const orphanedUser of orphanedUsers) {
+      try {
+        console.log(`Removing orphaned user from NPL: ${orphanedUser}`);
+        await removeUserFromNpl(orphanedUser);
+        
+        // Also delete their UserToolAccess instance
+        const accessId = await findUserToolAccess(token, orphanedUser);
+        if (accessId) {
+          // Delete the protocol instance
+          await fetch(`${NPL_URL}/npl/users/UserToolAccess/${accessId}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to remove orphaned user ${orphanedUser}:`, error);
+        // Continue with other orphaned users
+      }
+    }
+  } catch (error) {
+    console.error('Failed to cleanup orphaned users:', error);
+    // Not critical - continue
   }
 
   return {
@@ -1303,6 +1333,38 @@ export async function registerUserInNpl(userId: string): Promise<void> {
     const error = await response.text();
     throw new Error(`Failed to register user in NPL: ${error}`);
   }
+}
+
+/**
+ * Get all registered users from NPL UserRegistry
+ */
+async function getAllUsersFromNpl(token: string): Promise<string[]> {
+  const registryId = await findUserRegistry(token);
+
+  if (!registryId) {
+    return [];
+  }
+
+  const response = await fetch(
+    `${NPL_URL}/npl/users/UserRegistry/${registryId}/getAllUsers`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (!response.ok) {
+    console.error('Failed to get users from NPL:', await response.text());
+    return [];
+  }
+
+  const result = await response.json();
+  // NPL returns Set as array
+  return Array.isArray(result) ? result : [];
 }
 
 /**
