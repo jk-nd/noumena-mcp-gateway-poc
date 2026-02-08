@@ -158,7 +158,7 @@ services:
       - "8080:8080"
     environment:
       - NPL_ENGINE_URL=http://localhost:12001
-      - KEYCLOAK_URL=http://localhost:11000
+      - KEYCLOAK_URL=http://keycloak:11000
       - KEYCLOAK_REALM=mcpgateway
       - KEYCLOAK_CLIENT_ID=mcpgateway
     depends_on:
@@ -231,7 +231,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - NPL_URL=http://npl-engine:12000
-      - KEYCLOAK_URL=http://localhost:11000
+      - KEYCLOAK_URL=http://keycloak:11000
       - KEYCLOAK_REALM=mcpgateway
       - KEYCLOAK_CLIENT_ID=mcpgateway
       # Issuer must match what Keycloak puts in tokens (KC_HOSTNAME=keycloak)
@@ -280,7 +280,7 @@ services:
       dockerfile: integration-tests/Dockerfile
     environment:
       - NPL_URL=http://npl-engine:12000
-      - KEYCLOAK_URL=http://localhost:11000
+      - KEYCLOAK_URL=http://keycloak:11000
       - GATEWAY_URL=http://gateway:8080
     depends_on:
       npl-engine:
@@ -308,6 +308,15 @@ services:
 # Upstream MCPs are isolated from agents, NPL, and secrets.
 # Only Credential Proxy has Vault access.
 # ─────────────────────────────────────────────────────────────────────────
+networks:
+  public-net:
+    driver: bridge
+  policy-net:
+    driver: bridge
+  secrets-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
 
   # CORS proxy for NPL Engine (needed for Inspector browser access)
   npl-cors-proxy:
@@ -321,13 +330,3 @@ services:
       - public-net
     depends_on:
       - npl-engine
-
-networks:
-  public-net:
-    driver: bridge
-  policy-net:
-    driver: bridge
-  secrets-net:
-    driver: bridge
-  backend-net:
-    driver: bridge

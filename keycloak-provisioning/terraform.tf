@@ -24,6 +24,11 @@ resource "keycloak_realm" "master" {
 # MCP Gateway Realm
 # ============================================================================
 
+import {
+  to = keycloak_realm.mcpgateway
+  id = "mcpgateway"
+}
+
 resource "keycloak_realm" "mcpgateway" {
   realm             = "mcpgateway"
   enabled           = true
@@ -31,6 +36,7 @@ resource "keycloak_realm" "mcpgateway" {
   display_name_html = "<b>MCP Gateway</b>"
 
   access_code_lifespan = "30m"
+  access_token_lifespan = "30m"  # Token lifetime for development
   ssl_required         = "none"
   password_policy      = "length(8)"
 
@@ -276,13 +282,13 @@ resource "keycloak_user" "alice" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# Bob - engineer, regular user
-resource "keycloak_user" "bob" {
+# Regular User
+resource "keycloak_user" "user" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "bob"
-  email      = "bob@acme.com"
-  first_name = "Bob"
-  last_name  = "Martinez"
+  username   = "user"
+  email      = "user@acme.com"
+  first_name = "Regular"
+  last_name  = "User"
   enabled    = true
 
   attributes = {
@@ -298,17 +304,17 @@ resource "keycloak_user" "bob" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# Research Agent - autonomous AI agent for research tasks
-resource "keycloak_user" "research_agent" {
+# Charlie McDonald (was created via TUI, now in Terraform)
+resource "keycloak_user" "charlie" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "research-agent"
-  email      = "research-agent@acme.com"
-  first_name = "Research"
-  last_name  = "Agent"
+  username   = "charlie"
+  email      = "charlie@acme.com"
+  first_name = "Charlie"
+  last_name  = "McDonald"
   enabled    = true
 
   attributes = {
-    "role"         = "agent"
+    "role"         = "user"
     "organization" = "acme"
   }
 

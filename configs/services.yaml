@@ -777,28 +777,22 @@ user_access:
       duckduckgo:
         - "search"
   users:
-    - userId: "admin@acme.com"
-      keycloakId: "aa0e467f-68b6-4a85-9057-4e809a66452c"
+    - userId: "admin"
+      keycloakId: "aab2bfec-ebcc-43a3-99c8-052fe8f2637f"
       displayName: "Admin User"
       createdAt: "2026-02-07T20:26:16.025Z"
       tools: {}
       vaultPaths: {}
-    - userId: "user@acme.com"
-      keycloakId: "4eb414c4-7a23-41e4-b803-61ab0caee153"
-      displayName: "Regular User"
-      createdAt: "2026-02-07T20:26:20.548Z"
-      tools: {}
-      vaultPaths: {}
-    - userId: "agent@acme.com"
-      keycloakId: "2bec753b-b5be-4a2c-9a68-1f9f5621993f"
+    - userId: "agent"
+      keycloakId: "15c6a6d0-768b-4f21-8350-930826cb1c2d"
       displayName: "AI Agent"
       createdAt: "2026-02-07T20:56:13.671Z"
       tools:
         slack:
           - "*"
       vaultPaths: {}
-    - userId: "charlie@acme.com"
-      keycloakId: "3c54ae83-107c-4531-9940-3b4e76d380d8"
+    - userId: "charlie"
+      keycloakId: "07284f62-739c-4f5c-afce-92e64b689d83"
       displayName: "Charlie McDonald"
       createdAt: "2026-02-07T21:41:17.408Z"
       tools:
@@ -807,11 +801,23 @@ user_access:
         github:
           - "*"
       vaultPaths: {}
-    - userId: "baff072a-5325-4d8d-bdb1-4e2ad2c4c514"
-      keycloakId: "baff072a-5325-4d8d-bdb1-4e2ad2c4c514"
+    - userId: "alice"
+      keycloakId: "e3dc940d-b42d-4a18-a237-488261e9df20"
       displayName: "Alice Chen"
       createdAt: "2026-02-08T12:44:34.784Z"
       tools:
         gemini:
           - "*"
+        slack:
+          - "*"
+      vaultPaths: {}
+    - userId: "peter@acme.com"
+      keycloakId: "616552e1-51a9-45c5-8472-3cea98ba5c7e"
+      displayName: "Peter Pan"
+      createdAt: "2026-02-08T17:18:48.359Z"
+      tools:
+        slack:
+          - "*"
+        gemini:
+          - "gemini_default"
       vaultPaths: {}

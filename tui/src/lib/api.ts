@@ -292,7 +292,10 @@ async function createToolPolicy(
   serviceName: string
 ): Promise<string | null> {
   const createPayload = {
-    "@parties": {},
+    "@parties": {
+      "pAdmin": { "role": "admin" },
+      "pAgent": { "role": "agent" }
+    },
     policyServiceName: serviceName,
   };
 
@@ -384,7 +387,7 @@ export async function bootstrapNpl(): Promise<{
   registryId: string;
   servicesEnabled: string[];
   userRegistryCreated: boolean;
-  usersCreated: string[];
+  usersSynced: string[];
 }> {
   const token = await getKeycloakToken();
 
@@ -401,7 +404,11 @@ export async function bootstrapNpl(): Promise<{
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ "@parties": {} }),
+        body: JSON.stringify({ 
+          "@parties": {
+            "pAdmin": { "role": "admin" }
+          }
+        }),
       }
     );
 
@@ -489,21 +496,17 @@ export async function bootstrapNpl(): Promise<{
   }
 
   // 6. Sync users from services.yaml user_access section
-  const usersCreated: string[] = [];
+  const usersSynced: string[] = [];
   const users = config.user_access?.users || [];
 
   for (const user of users) {
     try {
       // Register user in UserRegistry (if not already)
-      try {
-        await registerUserInNpl(user.userId);
-      } catch {
-        // User may already be registered
-      }
+      await registerUserInNpl(user.userId);
 
       // Sync tool access
       await syncUserAccessToNpl(user.userId, user.tools);
-      usersCreated.push(user.userId);
+      usersSynced.push(user.userId);
     } catch (error) {
       console.error(`Failed to sync user ${user.userId}:`, error);
       // Continue with other users
@@ -516,7 +519,7 @@ export async function bootstrapNpl(): Promise<{
     registryId,
     servicesEnabled: enabledServiceNames,
     userRegistryCreated,
-    usersCreated,
+    usersSynced,
   };
 }
 
@@ -1194,19 +1197,22 @@ export async function searchKeycloakUsersByEmail(email: string): Promise<Keycloa
 async function findUserRegistry(token: string): Promise<string | null> {
   try {
     const response = await fetch(
-      `${NPL_URL}/npl/users/UserRegistry/?fields=@id`,
+      `${NPL_URL}/npl/users/UserRegistry/`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
+          Accept: "application/json",
         },
       }
     );
 
-    if (response.ok) {
-      const data = await response.json();
-      if (data.length > 0) {
-        return data[0]["@id"];
-      }
+    if (!response.ok) return null;
+
+    const text = await response.text();
+    const clean = text.replace(/[\x00-\x1f]/g, "");
+    const data = JSON.parse(clean);
+    if (data.items && data.items.length > 0) {
+      return data.items[0]["@id"] || null;
     }
   } catch (error) {
     console.error("Error finding UserRegistry:", error);
@@ -1227,7 +1233,11 @@ async function createUserRegistry(token: string): Promise<string> {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ "@parties": {} }),
+      body: JSON.stringify({ 
+        "@parties": {
+          "pAdmin": { "role": "admin" }
+        }
+      }),
     }
   );
 
@@ -1243,12 +1253,45 @@ async function createUserRegistry(token: string): Promise<string> {
 /**
  * Register a user in NPL UserRegistry
  */
+/**
+ * Check if user is already registered in NPL UserRegistry
+ */
+async function isUserRegisteredInNpl(registryId: string, token: string, userId: string): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `${NPL_URL}/npl/users/UserRegistry/${registryId}/isUserRegistered`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ userId }),
+      }
+    );
+
+    if (response.ok) {
+      const result = await response.json();
+      return result === true || result.value === true;
+    }
+  } catch (error) {
+    console.error(`Error checking if user ${userId} is registered:`, error);
+  }
+  return false;
+}
+
 export async function registerUserInNpl(userId: string): Promise<void> {
   const token = await getKeycloakToken();
   let registryId = await findUserRegistry(token);
 
   if (!registryId) {
     registryId = await createUserRegistry(token);
+  }
+
+  // Check if user is already registered
+  const alreadyRegistered = await isUserRegisteredInNpl(registryId, token, userId);
+  if (alreadyRegistered) {
+    return; // Skip - user already registered
   }
 
   const response = await fetch(
@@ -1301,10 +1344,12 @@ export async function removeUserFromNpl(userId: string): Promise<void> {
 /**
  * Find UserToolAccess protocol instance for a specific user
  */
-async function findUserToolAccess(token: string, userId: string): Promise<string | null> {
+export async function findUserToolAccess(token: string, userId: string): Promise<string | null> {
   try {
+    // NPL doesn't support filtering by constructor params via URL query
+    // So we query all UserToolAccess and filter client-side
     const response = await fetch(
-      `${NPL_URL}/npl/users/UserToolAccess/?userId=${encodeURIComponent(userId)}&fields=@id`,
+      `${NPL_URL}/npl/users/UserToolAccess/`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -1314,8 +1359,12 @@ async function findUserToolAccess(token: string, userId: string): Promise<string
 
     if (response.ok) {
       const data = await response.json();
-      if (data.length > 0) {
-        return data[0]["@id"];
+      // Find the UserToolAccess with matching userId
+      const items = data.items || [];
+      for (const item of items) {
+        if (item.userId === userId) {
+          return item["@id"];
+        }
       }
     }
   } catch (error) {
@@ -1338,7 +1387,11 @@ async function createUserToolAccess(token: string, userId: string): Promise<stri
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
-        "@parties": {},
+        "@parties": {
+          "pAdmin": { "role": "admin" },
+          "pUser": { "userId": userId },  // Bind pUser to the actual user
+          "pGateway": { "role": "agent" }
+        },
         userId,
       }),
     }

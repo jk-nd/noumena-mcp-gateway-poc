@@ -239,8 +239,9 @@ class NplClient {
         userAccessIds[userId]?.let { return it }
 
         try {
-            val encodedUserId = java.net.URLEncoder.encode(userId, "UTF-8")
-            val listResponse = client.get("$nplUrl/npl/users/UserToolAccess/?userId=$encodedUserId") {
+            // NPL doesn't support filtering by constructor params via URL query
+            // So we query all UserToolAccess and filter client-side
+            val listResponse = client.get("$nplUrl/npl/users/UserToolAccess/") {
                 header("Authorization", "Bearer $agentToken")
             }
 
@@ -250,18 +251,22 @@ class NplClient {
             val listBody = Json.parseToJsonElement(responseText).jsonObject
             val items = listBody["items"]?.jsonArray ?: return null
 
-            // Should be exactly one UserToolAccess per userId
-            if (items.isNotEmpty()) {
-                val obj = items[0].jsonObject
-                val id = obj["@id"]?.jsonPrimitive?.content
-                if (id != null) {
-                    userAccessIds[userId] = id
-                    logger.info { "Found UserToolAccess for user '$userId': $id" }
-                    return id
+            // Find the UserToolAccess with matching userId
+            for (item in items) {
+                val obj = item.jsonObject
+                val objectUserId = obj["userId"]?.jsonPrimitive?.content
+                if (objectUserId == userId) {
+                    val id = obj["@id"]?.jsonPrimitive?.content
+                    if (id != null) {
+                        userAccessIds[userId] = id
+                        logger.info { "Found UserToolAccess for user '$userId': $id" }
+                        return id
+                    }
                 }
             }
+            logger.debug { "No UserToolAccess found with userId='$userId' (searched ${items.size} objects)" }
         } catch (e: Exception) {
-            logger.debug { "No UserToolAccess found for user '$userId': ${e.message}" }
+            logger.debug { "Error finding UserToolAccess for user '$userId': ${e.message}" }
         }
 
         return null
