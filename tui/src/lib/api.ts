@@ -294,10 +294,10 @@ async function createToolPolicy(
   const createPayload = {
     "@parties": {
       "pAdmin": {
-        "claims": { "role": "admin" }
+        "claims": { "role": ["admin"] }
       },
       "pGateway": {
-        "claims": { "role": "gateway" }
+        "claims": { "role": ["gateway"] }
       }
     },
     policyServiceName: serviceName,
@@ -411,7 +411,7 @@ export async function bootstrapNpl(): Promise<{
         body: JSON.stringify({ 
           "@parties": {
             "pAdmin": {
-              "claims": { "role": "admin" }
+              "claims": { "role": ["admin"] }
             }
           }
         }),
@@ -1242,7 +1242,7 @@ async function createUserRegistry(token: string): Promise<string> {
       body: JSON.stringify({ 
         "@parties": {
           "pAdmin": {
-            "claims": { "role": "admin" }
+            "claims": { "role": ["admin"] }
           }
         }
       }),
@@ -1397,10 +1397,10 @@ async function createUserToolAccess(token: string, userId: string): Promise<stri
       body: JSON.stringify({
         "@parties": {
           "pAdmin": {
-            "claims": { "role": "admin" }
+            "claims": { "role": ["admin"] }
           },
           "pGateway": {
-            "claims": { "role": "gateway" }
+            "claims": { "role": ["gateway"] }
           }
         },
         userId,
