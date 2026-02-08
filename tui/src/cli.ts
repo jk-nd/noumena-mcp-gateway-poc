@@ -154,7 +154,13 @@ async function adminLogin(): Promise<boolean> {
 }
 
 /**
- * NPL Bootstrap flow - creates ServiceRegistry, ToolPolicy, and UserToolAccess instances.
+ * NPL Sync flow - syncs services.yaml state to NPL Engine (ServiceRegistry, ToolPolicy, UserToolAccess).
+ * 
+ * This is an UPDATE/SYNC operation, not overwrite:
+ * - Checks if entities exist (creates only if missing)
+ * - Syncs enabled services and tools from services.yaml
+ * - Syncs user access permissions
+ * - Safe to run multiple times
  *
  * V3 Architecture:
  *   1. ServiceRegistry — tracks which services are enabled
@@ -164,9 +170,9 @@ async function adminLogin(): Promise<boolean> {
  */
 async function nplBootstrapFlow(): Promise<void> {
   console.log();
-  console.log(noumena.purple("  NPL Bootstrap"));
-  console.log(noumena.textDim("  Ensures ServiceRegistry, ToolPolicy, and UserToolAccess instances exist."));
-  console.log(noumena.textDim("  Syncs services, tools, and user access from services.yaml."));
+  console.log(noumena.purple("  Sync NPL"));
+  console.log(noumena.textDim("  Syncs services, tools, and user access from services.yaml to NPL Engine."));
+  console.log(noumena.textDim("  This is an UPDATE operation - it won't overwrite existing data, only syncs changes."));
   console.log();
 
   const s = p.spinner();
@@ -207,10 +213,18 @@ async function nplBootstrapFlow(): Promise<void> {
     } else {
       p.log.info("No users configured in services.yaml");
     }
+
+    // Pause so user can read the output
+    console.log();
+    console.log(noumena.success("  ✓ NPL is now in sync with services.yaml"));
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   } catch (error) {
-    s.stop(noumena.purpleDim("Bootstrap failed"));
+    s.stop(noumena.purpleDim("Sync failed"));
     p.log.error(`${error}`);
     p.log.info("Make sure the NPL Engine is running and Keycloak is provisioned.");
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   }
 }
 
@@ -442,7 +456,7 @@ async function mainMenu(): Promise<boolean> {
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
     { value: "viewconfig", label: "  View services.yaml", hint: "Show current configuration" },
     { value: "editconfig", label: "  Edit services.yaml", hint: `Opens ${process.env.EDITOR || "nano"}` },
-    { value: "bootstrap", label: `  NPL Bootstrap  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: nplReady ? "NPL synced" : "Needs sync" },
+    { value: "bootstrap", label: `  Sync NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: nplReady ? "NPL synced" : "Sync services.yaml → NPL" },
     { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Config changed — reload needed" : "Up to date" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
@@ -2837,7 +2851,7 @@ async function main() {
       await bootstrapNpl();
       p.log.success("NPL bootstrapped automatically");
     } catch {
-      p.log.warn("NPL auto-bootstrap failed (engine may not be running). You can retry from System > NPL Bootstrap.");
+      p.log.warn("NPL auto-sync failed (engine may not be running). You can retry from System > Sync NPL.");
     }
   }
 

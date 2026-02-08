@@ -751,6 +751,24 @@ services:
           properties: {}
           required: []
         enabled: true
+  - name: "gemini"
+    displayName: "Google Gemini"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-google-gemini"
+    requiresCredentials: true
+    description: "Google Gemini AI API for text generation and chat"
+    tools:
+      - name: "gemini_default"
+        description: "Default tool for gemini - run 'Discover tools' to find actual tools"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true
 user_access:
   default_template:
     enabled: true
@@ -787,5 +805,13 @@ user_access:
         duckduckgo:
           - "*"
         github:
+          - "*"
+      vaultPaths: {}
+    - userId: "baff072a-5325-4d8d-bdb1-4e2ad2c4c514"
+      keycloakId: "baff072a-5325-4d8d-bdb1-4e2ad2c4c514"
+      displayName: "Alice Chen"
+      createdAt: "2026-02-08T12:44:34.784Z"
+      tools:
+        gemini:
           - "*"
       vaultPaths: {}
