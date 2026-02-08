@@ -1,90 +1,21 @@
-# Default MCP Service Configuration
-# This is the factory default configuration for the Gateway.
-# Use "Reset to Defaults" in the TUI to restore this configuration.
+# Gateway Configuration Template
+# Fresh system starts with NO pre-configured services or users
+# Admins use TUI to:
+#   1. Search and add MCP services (Docker Hub, NPM, templates)
+#   2. Register Keycloak users for Gateway access
+#   3. Grant per-user tool access
 
-services:
-  - name: "duckduckgo"
-    displayName: "DuckDuckGo"
-    type: "MCP_STDIO"
-    enabled: true
-    command: "docker run -i --rm mcp/duckduckgo"
-    args: []
-    requiresCredentials: false
-    description: "Web search capabilities through DuckDuckGo, with content fetching."
-    tools:
-      - name: "search"
-        description: "Search DuckDuckGo and return formatted results."
-        inputSchema:
-          type: "object"
-          properties:
-            query:
-              type: "string"
-              description: "The search query string"
-            max_results:
-              type: "integer"
-              description: "Maximum number of results to return (default: 10)"
-          required:
-            - "query"
-        enabled: true
-      - name: "fetch_content"
-        description: "Fetch and parse content from a webpage URL."
-        inputSchema:
-          type: "object"
-          properties:
-            url:
-              type: "string"
-              description: "The webpage URL to fetch content from"
-          required:
-            - "url"
-        enabled: true
-
-  - name: "github"
-    displayName: "Github"
-    type: "MCP_STDIO"
-    enabled: false
-    command: "docker run -i --rm mcp/github"
-    args: []
-    requiresCredentials: false
-    description: "Tools for interacting with the GitHub API"
-    tools:
-      - name: "search_repositories"
-        description: "Search for GitHub repositories"
-        inputSchema:
-          type: "object"
-          properties:
-            query:
-              type: "string"
-              description: "Search query"
-          required:
-            - "query"
-        enabled: false
-
-  - name: "slack"
-    displayName: "Slack"
-    type: "MCP_STDIO"
-    enabled: true
-    command: "docker run -i --rm mcp/slack"
-    args: []
-    requiresCredentials: false
-    description: "Interact with Slack Workspaces over the Slack API."
-    tools:
-      - name: "slack_default"
-        description: "Default tool for slack - run 'Discover tools' to find actual tools"
-        inputSchema:
-          type: "object"
-          properties: {}
-          required: []
-        enabled: true
+services: []
+  # No services configured by default
+  # Use TUI → "Add MCP service" to discover and add services
 
 user_access:
   default_template:
-    enabled: true
-    description: "Default tool access for new users (basic search only)"
-    tools:
-      duckduckgo:
-        - "search"
+    enabled: false
+    description: "Default access template (disabled - grant explicit per-user access)"
+    tools: {}
   
   users: []
-    # Users are registered manually via TUI
-    # Keycloak users: admin, gateway (system accounts), jarvis, alice, bob
-    # Use TUI "Manage users & tool access" to register and grant tool access
+    # No users registered by default
+    # Keycloak has: admin, gateway (system), jarvis, alice, bob (provisioned)
+    # Use TUI → "Manage users & tool access" to register users and grant access
