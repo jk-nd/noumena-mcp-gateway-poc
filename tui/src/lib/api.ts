@@ -760,13 +760,26 @@ export async function disableServiceInNpl(serviceName: string): Promise<void> {
 
 /**
  * Sync a service's enabled state with NPL ServiceRegistry
+ * When enabling, also creates ToolPolicy if it doesn't exist
  */
 export async function syncServiceWithNpl(
   serviceName: string,
   enabled: boolean
 ): Promise<void> {
   if (enabled) {
+    // Enable in ServiceRegistry
     await enableServiceInNpl(serviceName);
+    
+    // Create ToolPolicy if it doesn't exist (required for tool management)
+    const token = await getKeycloakToken();
+    let policyId = await findToolPolicyForService(token, serviceName);
+    
+    if (!policyId) {
+      policyId = await createToolPolicy(token, serviceName);
+      console.log(`[syncServiceWithNpl] Created ToolPolicy for ${serviceName}: ${policyId}`);
+    } else {
+      console.log(`[syncServiceWithNpl] ToolPolicy already exists for ${serviceName}: ${policyId}`);
+    }
   } else {
     await disableServiceInNpl(serviceName);
   }
@@ -1418,7 +1431,7 @@ async function createUserRegistry(token: string): Promise<string> {
 /**
  * Check if user is already registered in NPL UserRegistry
  */
-async function isUserRegisteredInNpl(registryId: string, token: string, userId: string): Promise<boolean> {
+export async function isUserRegisteredInNpl(registryId: string, token: string, userId: string): Promise<boolean> {
   try {
     const response = await fetch(
       `${NPL_URL}/npl/users/UserRegistry/${registryId}/isUserRegistered`,
@@ -1532,6 +1545,21 @@ export async function removeUserFromNpl(userId: string): Promise<void> {
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to remove user from NPL: ${error}`);
+  }
+}
+
+/**
+ * Check if user is registered in NPL UserRegistry (simpler check)
+ */
+export async function isUserInNpl(userId: string): Promise<boolean> {
+  try {
+    const token = await getKeycloakToken();
+    const registryId = await findUserRegistry(token);
+    if (!registryId) return false;
+    
+    return await isUserRegisteredInNpl(registryId, token, userId);
+  } catch {
+    return false;
   }
 }
 
