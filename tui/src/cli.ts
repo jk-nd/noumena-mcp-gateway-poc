@@ -3143,14 +3143,29 @@ async function manageUserServiceAccessFlow(
     const s = p.spinner();
 
     if (action === "grant_all") {
-      s.start(`Granting all ${service.displayName} tools...`);
+      // Backup current state for rollback
+      const originalTools = {...freshUser.tools};
+      
+      s.start(`Granting all ${service.displayName} tools and syncing to NPL...`);
+      
+      // Apply change to services.yaml
       grantAllToolsToUser(freshUser.userId, service.name);
+      
       try {
         await grantAllToolsForServiceInNpl(freshUser.userId, service.name);
-        s.stop(noumena.success("All tools granted and synced to NPL"));
+        s.stop(noumena.success("✓ All tools granted and synced to NPL"));
       } catch (err) {
-        s.stop(noumena.warning(`All tools granted locally (NPL sync failed: ${err})`));
-        console.log(noumena.textDim("  Run 'Import from YAML' from main menu to sync"));
+        s.stop(noumena.error("✗ NPL sync failed"));
+        
+        // ROLLBACK: Restore original state
+        const user = getUser(freshUser.userId);
+        if (user) {
+          user.tools = originalTools;
+          updateUser(freshUser.userId, user);
+        }
+        
+        p.log.error("Failed to sync to NPL - changes rolled back");
+        p.log.error(`${err}`);
       }
       continue;
     }
@@ -3162,14 +3177,29 @@ async function manageUserServiceAccessFlow(
       });
 
       if (!p.isCancel(confirmed) && confirmed) {
-        s.start("Revoking access...");
+        // Backup current state for rollback
+        const originalTools = {...freshUser.tools};
+        
+        s.start("Revoking access and syncing to NPL...");
+        
+        // Apply change to services.yaml
         revokeServiceFromUser(freshUser.userId, service.name);
+        
         try {
           await revokeServiceInNpl(freshUser.userId, service.name);
-          s.stop(noumena.success("Service access revoked and synced to NPL"));
+          s.stop(noumena.success("✓ Service access revoked and synced to NPL"));
         } catch (err) {
-          s.stop(noumena.warning(`Service access revoked locally (NPL sync failed: ${err})`));
-          console.log(noumena.textDim("  Run 'Import from YAML' from main menu to sync"));
+          s.stop(noumena.error("✗ NPL sync failed"));
+          
+          // ROLLBACK: Restore original state
+          const user = getUser(freshUser.userId);
+          if (user) {
+            user.tools = originalTools;
+            updateUser(freshUser.userId, user);
+          }
+          
+          p.log.error("Failed to sync to NPL - changes rolled back");
+          p.log.error(`${err}`);
         }
       }
       continue;
