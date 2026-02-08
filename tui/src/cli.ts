@@ -278,14 +278,16 @@ async function exportToYamlFlow(): Promise<void> {
  * 
  * This will:
  * 1. Re-provision Keycloak (runs Terraform)
- * 2. Restore default services.yaml
- * 3. Import services.yaml to NPL
+ * 2. Query Keycloak for actual user IDs
+ * 3. Restore default services.yaml with actual IDs
+ * 4. Import services.yaml to NPL
  */
 async function resetToDefaultsFlow(): Promise<void> {
   console.log();
   console.log(noumena.purple("  Reset to Defaults (Factory Reset)"));
   console.log();
   console.log(noumena.textDim("  🔄 Re-provisions Keycloak (Terraform)"));
+  console.log(noumena.textDim("  🔍 Queries Keycloak for user IDs"));
   console.log(noumena.textDim("  📄 Restores default services.yaml"));
   console.log(noumena.textDim("  🔄 Imports services.yaml to NPL"));
   console.log();
@@ -326,7 +328,33 @@ async function resetToDefaultsFlow(): Promise<void> {
     return;
   }
 
-  // Step 2: Restore default services.yaml
+  // Step 2: Query Keycloak for actual user IDs
+  const userIdSpinner = p.spinner();
+  userIdSpinner.start("Querying Keycloak for user IDs...");
+  
+  let userIdMap: Record<string, string> = {};
+  try {
+    const kcUsers = await listKeycloakUsers();
+    
+    // Map username -> keycloakId
+    for (const user of kcUsers) {
+      if (user.username && user.id) {
+        userIdMap[user.username] = user.id;
+      }
+    }
+    
+    userIdSpinner.stop(noumena.success("User IDs fetched"));
+    p.log.info(`Found: jarvis=${userIdMap['jarvis']?.substring(0, 8)}..., alice=${userIdMap['alice']?.substring(0, 8)}..., bob=${userIdMap['bob']?.substring(0, 8)}...`);
+  } catch (err: any) {
+    userIdSpinner.stop(noumena.purpleDim("Failed to query Keycloak"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("You may need to wait for Keycloak to fully start, then retry.");
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    return;
+  }
+
+  // Step 3: Restore default services.yaml with actual IDs
   const yamlSpinner = p.spinner();
   yamlSpinner.start("Restoring default services.yaml...");
   
@@ -335,13 +363,24 @@ async function resetToDefaultsFlow(): Promise<void> {
     const defaultConfigPath = configPath.replace("services.yaml", "services.yaml.default");
     
     // Read default config
-    const defaultYaml = readFileSync(defaultConfigPath, "utf-8");
+    let defaultYaml = readFileSync(defaultConfigPath, "utf-8");
+    
+    // Replace placeholder IDs with actual Keycloak IDs
+    if (userIdMap['jarvis']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_JARVIS_ID/g, userIdMap['jarvis']);
+    }
+    if (userIdMap['alice']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_ALICE_ID/g, userIdMap['alice']);
+    }
+    if (userIdMap['bob']) {
+      defaultYaml = defaultYaml.replace(/PLACEHOLDER_BOB_ID/g, userIdMap['bob']);
+    }
     
     // Write to services.yaml
     const fs = await import("fs/promises");
     await fs.writeFile(configPath, defaultYaml, "utf-8");
     
-    yamlSpinner.stop(noumena.success("Default services.yaml restored"));
+    yamlSpinner.stop(noumena.success("Default services.yaml restored with actual user IDs"));
   } catch (err: any) {
     yamlSpinner.stop(noumena.purpleDim("Failed to restore default services.yaml"));
     p.log.error(`Error: ${err.message || err}`);
@@ -350,7 +389,7 @@ async function resetToDefaultsFlow(): Promise<void> {
     return;
   }
 
-  // Step 3: Import services.yaml to NPL
+  // Step 4: Import services.yaml to NPL
   const nplSpinner = p.spinner();
   nplSpinner.start("Importing default config to NPL...");
   
