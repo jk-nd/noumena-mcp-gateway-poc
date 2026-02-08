@@ -811,3 +811,9 @@ user_access:
         slack:
           - "*"
       vaultPaths: {}
+    - userId: "alice@acme.com"
+      keycloakId: "3a3fa5b3-06d4-4c2b-b7f2-22fbced50e4e"
+      displayName: "Alice Chen"
+      createdAt: "2026-02-08T19:04:30.328Z"
+      tools: {}
+      vaultPaths: {}

@@ -1756,6 +1756,28 @@ async function userManagementFlow(): Promise<void> {
       keycloakError = `${err}`;
     }
 
+    // Filter out system accounts (admin and gateway service)
+    // These should not be registered as regular Gateway users
+    const isSystemAccount = (user: KeycloakUser): boolean => {
+      const username = user.username?.toLowerCase() || "";
+      const email = user.email?.toLowerCase() || "";
+      const roles = user.attributes?.role || [];
+      
+      // Filter by username
+      if (username === "admin" || username === "agent") return true;
+      
+      // Filter by email
+      if (email === "admin@acme.com" || email === "agent@acme.com") return true;
+      
+      // Filter by role (admin or gateway system role)
+      if (roles.includes("admin") || roles.includes("gateway")) return true;
+      
+      return false;
+    };
+    
+    const regularUsers = keycloakUsers.filter(u => !isSystemAccount(u));
+    const systemUsers = keycloakUsers.filter(u => isSystemAccount(u));
+
     // 2. Load services.yaml users (for tool access configuration)
     const localUsers = getAllUsers();
     const localUsersByEmail = new Map(localUsers.map(u => [u.userId, u]));
@@ -1764,7 +1786,7 @@ async function userManagementFlow(): Promise<void> {
     const nplRegistered = new Set<string>();
     try {
       const token = await getKeycloakToken();
-      for (const kcUser of keycloakUsers) {
+      for (const kcUser of regularUsers) {
         if (!kcUser.email) continue;
         const accessId = await findUserToolAccess(token, kcUser.email);
         if (accessId) {
@@ -1782,14 +1804,14 @@ async function userManagementFlow(): Promise<void> {
     console.log(noumena.textDim("  💡 Keycloak: Identity (who you are) | Gateway: Authorization (what you can do)"));
     console.log(noumena.textDim("  • Users in Keycloak can be registered for Gateway access (→ NPL + services.yaml)"));
     console.log();
-    console.log(noumena.textDim(`  ${keycloakUsers.length} user(s) in Keycloak`));
+    console.log(noumena.textDim(`  ${regularUsers.length} user(s) in Keycloak (${systemUsers.length} system accounts hidden)`));
     if (keycloakError) {
       console.log(noumena.warning(`  ⚠ Keycloak error: ${keycloakError.substring(0, 60)}`));
     }
     console.log();
 
     // Build user list from Keycloak with Gateway registration status
-    const userOptions: { value: string; label: string; hint?: string }[] = keycloakUsers.map(kcUser => {
+    const userOptions: { value: string; label: string; hint?: string }[] = regularUsers.map(kcUser => {
       const email = kcUser.email || "(no email)";
       const role = kcUser.attributes?.role?.[0] || "user";
       const localUser = localUsersByEmail.get(email);
