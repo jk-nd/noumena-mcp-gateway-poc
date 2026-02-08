@@ -292,14 +292,7 @@ async function createToolPolicy(
   serviceName: string
 ): Promise<string | null> {
   const createPayload = {
-    "@parties": {
-      "pAdmin": {
-        "claims": { "role": ["admin"] }
-      },
-      "pGateway": {
-        "claims": { "role": ["gateway"] }
-      }
-    },
+    "@parties": {},  // Let rules.yml auto-assign based on JWT
     policyServiceName: serviceName,
   };
 
@@ -409,11 +402,7 @@ export async function bootstrapNpl(): Promise<{
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ 
-          "@parties": {
-            "pAdmin": {
-              "claims": { "role": ["admin"] }
-            }
-          }
+          "@parties": {}  // Let rules.yml auto-assign based on JWT
         }),
       }
     );
@@ -1240,11 +1229,7 @@ async function createUserRegistry(token: string): Promise<string> {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ 
-        "@parties": {
-          "pAdmin": {
-            "claims": { "role": ["admin"] }
-          }
-        }
+        "@parties": {}  // Let rules.yml auto-assign based on JWT
       }),
     }
   );
@@ -1395,14 +1380,7 @@ async function createUserToolAccess(token: string, userId: string): Promise<stri
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
-        "@parties": {
-          "pAdmin": {
-            "claims": { "role": ["admin"] }
-          },
-          "pGateway": {
-            "claims": { "role": ["gateway"] }
-          }
-        },
+        "@parties": {},  // Let rules.yml auto-assign based on JWT
         userId,
       }),
     }
