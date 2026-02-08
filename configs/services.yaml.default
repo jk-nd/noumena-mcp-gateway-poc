@@ -84,41 +84,7 @@ user_access:
       duckduckgo:
         - "search"
   
-  users:
-    # System accounts (DO NOT REGISTER as regular Gateway users):
-    # - admin (Keycloak admin account)
-    # - gateway (Gateway backend service account)
-    
-    # ---- Default Users ----
-    
-    # Jarvis - AI Agent (autonomous tool user)
-    - userId: "jarvis"
-      keycloakId: "PLACEHOLDER_JARVIS_ID"
-      displayName: "Jarvis AI Agent"
-      createdAt: "2026-02-08T00:00:00.000Z"
-      tools:
-        duckduckgo:
-          - "*"
-        slack:
-          - "*"
-      vaultPaths: {}
-    
-    # Alice - Product Manager
-    - userId: "alice"
-      keycloakId: "PLACEHOLDER_ALICE_ID"
-      displayName: "Alice Chen"
-      createdAt: "2026-02-08T00:00:00.000Z"
-      tools:
-        duckduckgo:
-          - "*"
-      vaultPaths: {}
-    
-    # Bob - Developer
-    - userId: "bob"
-      keycloakId: "PLACEHOLDER_BOB_ID"
-      displayName: "Bob Smith"
-      createdAt: "2026-02-08T00:00:00.000Z"
-      tools:
-        duckduckgo:
-          - "search"
-      vaultPaths: {}
+  users: []
+    # Users are registered manually via TUI
+    # Keycloak users: admin, gateway (system accounts), jarvis, alice, bob
+    # Use TUI "Manage users & tool access" to register and grant tool access

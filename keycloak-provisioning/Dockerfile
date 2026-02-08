@@ -1,8 +1,5 @@
 FROM hashicorp/terraform:1.10
 
-# Install curl and jq for API calls and JSON parsing
-RUN apk add --no-cache curl jq
-
 WORKDIR /terraform
 COPY providers.tf terraform.tf /terraform/
 COPY *.sh /
