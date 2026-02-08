@@ -1246,16 +1246,16 @@ async function mainMenu(): Promise<boolean> {
   );
   console.log(
     noumena.textDim("  ") +
-    noumena.success("✓") + noumena.textDim(" enabled  ") +
+    noumena.success("●") + noumena.textDim(" enabled  ") +
     noumena.grayDim("–") + noumena.textDim(" disabled  ") +
-    noumena.warning("■") + noumena.textDim(" image ready  ") +
+    noumena.success("■") + noumena.textDim(" image ready  ") +
     noumena.grayDim("·") + noumena.textDim(" not pulled")
   );
   console.log();
 
   // ── Build service options with status indicators ──
   const serviceOptions: { value: string; label: string; hint?: string }[] = services.map(service => {
-    const statusIcon = service.enabled ? noumena.success("✓") : noumena.grayDim("–");
+    const statusIcon = service.enabled ? noumena.success("●") : noumena.grayDim("–");
     const imageName = getDockerImageName(service);
     let containerIcon = "";
     if (imageName) {
@@ -1265,12 +1265,12 @@ async function mainMenu(): Promise<boolean> {
         if (running) {
           containerIcon = noumena.success(" ▶");
         } else if (pulled) {
-          containerIcon = noumena.warning(" ■");
+          containerIcon = noumena.success(" ■");
         } else {
           containerIcon = noumena.grayDim(" ·");
         }
       } else {
-        containerIcon = pulled ? noumena.warning(" ■") : noumena.grayDim(" ·");
+        containerIcon = pulled ? noumena.success(" ■") : noumena.grayDim(" ·");
       }
     }
     const enabledTools = service.tools.filter(t => t.enabled !== false).length;
