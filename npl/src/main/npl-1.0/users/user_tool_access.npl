@@ -23,23 +23,27 @@ struct VaultPathMapping {
 /**
  * UserToolAccess - Per-user/agent tool access control.
  *
- * Each user gets their own UserToolAccess protocol instance.
- * Admin grants/revokes specific tools for this user.
- * Gateway queries this protocol to enforce per-user access.
+ * Each tool user (human or AI) gets their own UserToolAccess protocol instance.
+ * Admin grants/revokes specific tools for this user via TUI or API.
+ * Gateway queries this protocol to enforce per-user access at runtime.
+ *
+ * Architecture note: Tool users (humans and AI agents) are treated identically
+ * from a governance perspective. Both need tool access grants, both are subject
+ * to the same policies. User delegation (human authorizing AI to act on their
+ * behalf) is handled by a separate authorization layer, not tool governance.
  *
  * Features:
  *   - Per-service, per-tool access control
  *   - Wildcard support: "*" means all tools for a service
- *   - Vault path storage for per-user credentials (future)
+ *   - Vault path storage for per-user credentials
  *   - Request counting for audit
  *
- * @party pAdmin Organization administrator
- * @party pUser The user/agent this access control applies to
- * @party pGateway Gateway service checking access
- * @param userId The user identifier (e.g., "alice@acme.com")
+ * @party pAdmin Organization administrator who manages tool grants
+ * @party pGateway Gateway system service performing runtime access checks
+ * @param userId The tool user identifier (e.g., "alice", "agent-x")
  */
 @api
-protocol[pAdmin, pUser, pGateway] UserToolAccess(
+protocol[pAdmin, pGateway] UserToolAccess(
     var userId: Text
 ) {
     initial state active;
@@ -174,11 +178,12 @@ protocol[pAdmin, pUser, pGateway] UserToolAccess(
     
     /**
      * Get all tools the user has access to for a specific service.
+     * Called by admin/TUI to display user's access.
      * @param serviceName The service name
      * @return Set of tool names (may contain "*" for wildcard)
      */
     @api
-    permission[pAdmin | pUser] getToolsForService(serviceName: Text) returns Set<Text> | active {
+    permission[pAdmin] getToolsForService(serviceName: Text) returns Set<Text> | active {
         var existingEntry = serviceAccess.findFirstOrNone(function(entry: ServiceToolAccess) -> entry.serviceName == serviceName);
         
         if (existingEntry.isPresent()) {
@@ -190,10 +195,11 @@ protocol[pAdmin, pUser, pGateway] UserToolAccess(
     
     /**
      * Get all services the user has access to.
+     * Called by admin/TUI to display user's access.
      * @return List of service names
      */
     @api
-    permission[pAdmin | pUser] getAllServices() returns List<Text> | active {
+    permission[pAdmin] getAllServices() returns List<Text> | active {
         return serviceAccess.map(function(entry: ServiceToolAccess) -> entry.serviceName);
     };
     

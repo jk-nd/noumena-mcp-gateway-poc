@@ -294,7 +294,7 @@ async function createToolPolicy(
   const createPayload = {
     "@parties": {
       "pAdmin": { "role": "admin" },
-      "pAgent": { "role": "agent" }
+      "pGateway": { "role": "gateway" }
     },
     policyServiceName: serviceName,
   };
@@ -1389,8 +1389,7 @@ async function createUserToolAccess(token: string, userId: string): Promise<stri
       body: JSON.stringify({
         "@parties": {
           "pAdmin": { "role": "admin" },
-          "pUser": { "userId": userId },  // Bind pUser to the actual user
-          "pGateway": { "role": "agent" }
+          "pGateway": { "role": "gateway" }
         },
         userId,
       }),

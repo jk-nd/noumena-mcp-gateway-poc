@@ -14,61 +14,62 @@ Always explicitly assign parties when creating protocol instances:
 // ✅ CORRECT
 "@parties": {
   "pAdmin": { "role": "admin" },
-  "pAgent": { "role": "agent" }
+  "pGateway": { "role": "gateway" }
 }
 
 // ❌ WRONG - NPL auto-assigns ALL claims from creator's JWT
 "@parties": {}
 ```
 
-### 2. **Three Party Types**
+### 2. **Two Party Types**
 
 | Type | Example | JWT Binding | Use Case |
 |------|---------|-------------|----------|
-| **Role-based** | `pAdmin`, `pAgent`, `pAuditor` | `{"role": "admin"}` | Generic service roles |
-| **User-specific** | `pUser` | `{"userId": "alice"}` | User's own protocol instance |
-| **Empty** | (admin-only) | `{"role": "admin"}` | Management protocols |
+| **Role-based** | `pAdmin`, `pGateway`, `pAuditor` | `{"role": "admin"}` | System service roles |
+| **Admin-only** | Single `pAdmin` | `{"role": "admin"}` | Management protocols |
+
+**Note**: We removed user-specific parties (`pUser`). Users don't call NPL directly - they interact via TUI/API, which uses admin credentials. The Gateway checks policies on behalf of users using the `userId` parameter, not as a party.
 
 ## Protocol-Specific Assignments
 
-### ToolPolicy - `protocol[pAdmin, pAgent]`
+### ToolPolicy - `protocol[pAdmin, pGateway]`
 
-**Purpose**: Per-service tool access control (admin manages, gateway checks)
+**Purpose**: Per-service tool access control (admin manages, gateway enforces)
 
 ```typescript
 "@parties": {
-  "pAdmin": { "role": "admin" },    // Manages policy (enable/disable tools)
-  "pAgent": { "role": "agent" }     // Gateway checks tool access at runtime
+  "pAdmin": { "role": "admin" },      // Manages policy (enable/disable tools)
+  "pGateway": { "role": "gateway" }   // Gateway system service checks at runtime
 }
 ```
 
 **Permissions**:
 - `pAdmin`: `enableTool()`, `disableTool()`, `suspendPolicy()`
-- `pAgent`: `checkAccess()`, `getEnabledTools()`
+- `pGateway`: `checkAccess()`, `getEnabledTools()`
 
 ---
 
-### UserToolAccess - `protocol[pAdmin, pUser, pGateway]`
+### UserToolAccess - `protocol[pAdmin, pGateway]`
 
-**Purpose**: Per-user tool access control
+**Purpose**: Per-tool-user access control (humans and AI treated identically)
 
 ```typescript
 "@parties": {
-  "pAdmin": { "role": "admin" },           // Manages user's access
-  "pUser": { "userId": "<actual-user>" },  // The user themselves (e.g., "alice")
-  "pGateway": { "role": "agent" }          // Gateway checks access at runtime
+  "pAdmin": { "role": "admin" },        // Manages user's tool access
+  "pGateway": { "role": "gateway" }     // Gateway enforces at runtime
 }
 ```
 
-**⚠️ Critical**: `pUser` is **user-specific**, NOT a role:
-- Alice's instance: `"pUser": { "userId": "alice" }`
-- Bob's instance: `"pUser": { "userId": "bob" }`
-- Agent's instance: `"pUser": { "userId": "agent" }`
+**Architectural Note**: We removed the `pUser` party. Tool users (humans like "alice", AI agents like "agent-x") don't call NPL directly. Instead:
+- **Admin/TUI** manages access using `pAdmin` permissions
+- **Gateway** enforces access using `pGateway` permissions
+- The `userId` parameter identifies whose access this protocol instance governs
+
+This design treats humans and AI identically from a governance perspective. User delegation (human authorizing AI) is a separate authorization layer concern.
 
 **Permissions**:
-- `pAdmin`: `grantTool()`, `revokeTool()`, `revokeAllAccess()`
-- `pUser`: `getToolsForService()`, `getAllServices()` (user can view their own access)
-- `pGateway`: `hasAccess()`, `getVaultPath()` (runtime checks)
+- `pAdmin`: `grantTool()`, `revokeTool()`, `revokeAllAccess()`, `getToolsForService()`, `getAccessList()`
+- `pGateway`: `hasAccess()`, `getVaultPath()` (runtime enforcement)
 
 ---
 
@@ -109,14 +110,14 @@ Always explicitly assign parties when creating protocol instances:
 ```typescript
 "@parties": {
   "pAdmin": { "role": "admin" },      // Manages credential selection rules
-  "pGateway": { "role": "agent" },    // Gateway selects credentials at runtime
+  "pGateway": { "role": "gateway" },  // Gateway selects credentials at runtime
   "pAuditor": { "role": "auditor" }   // Future: read-only audit access
 }
 ```
 
 **Permissions**:
 - `pAdmin`: `addInjectionRule()`, `removeInjectionRule()`
-- `pGateway`: `selectCredential()` (runtime)
+- `pGateway`: `selectCredential()` (runtime enforcement)
 - `pAuditor`: `getRulesForService()`, `getStatistics()` (read-only)
 
 ---
@@ -142,26 +143,31 @@ Each user/service JWT should have a `role` claim:
 | Role | Keycloak User | Purpose |
 |------|---------------|---------|
 | `admin` | `admin@acme.com` | TUI management, NPL protocol administration |
-| `agent` | `gateway-service` | Gateway service account for runtime policy checks |
-| `user` | Regular users | End users with tool access (bound via `userId`) |
+| `gateway` | `agent` (username) | Gateway system service for runtime policy enforcement |
 | `auditor` | Future | Read-only security auditing |
+
+**Note**: Tool users (humans and AI) don't have a "role" claim in this sense. They're identified by `userId` (e.g., "alice", "agent-x") and have UserToolAccess protocol instances governing their tool access.
 
 ### Gateway Service Account
 
-The Gateway should authenticate as a **service principal** with `role: agent`:
+The Gateway authenticates as a **system service** with `role: gateway`:
 
 ```json
 {
   "sub": "<gateway-service-account-id>",
-  "client_id": "mcpgateway",
-  "role": "agent"                     // ← Gateway role
+  "preferred_username": "agent",      // Username (backward compat)
+  "email": "agent@acme.com",
+  "role": "gateway",                  // ← System service role
+  "organization": "acme"
 }
 ```
 
 This allows the Gateway to call:
-- `ToolPolicy.checkAccess()` as `pAgent`
+- `ToolPolicy.checkAccess()` as `pGateway`
 - `UserToolAccess.hasAccess()` as `pGateway`
 - `CredentialInjectionPolicy.selectCredential()` as `pGateway`
+
+**Note**: The Keycloak username is still "agent" for backward compatibility, but the `role` attribute is "gateway" to match the NPL party model.
 
 ---
 
@@ -172,16 +178,18 @@ This allows the Gateway to call:
 | Party | Can Manage | Can Execute | Can View |
 |-------|-----------|-------------|----------|
 | **pAdmin** | ✅ Policies, Users, Services | ❌ (admin operations only) | ✅ Everything |
-| **pAgent/pGateway** | ❌ No management | ✅ Runtime checks | ✅ Operational data |
-| **pUser** | ❌ No management | ❌ No gateway ops | ✅ Own access only |
+| **pGateway** | ❌ No management | ✅ Runtime enforcement | ✅ Operational data |
 | **pAuditor** | ❌ No management | ❌ No execution | ✅ Read-only audit |
+
+**Note**: Tool users (humans and AI) don't have direct NPL party representation. They interact via TUI/API (as admin) or have policies enforced by Gateway (as pGateway).
 
 ### Why This Matters
 
-1. **Principle of Least Privilege**: Gateway can't enable/disable tools, only check them
-2. **User Privacy**: Users can view their own access, not others'
-3. **Auditability**: Clear separation between management and runtime operations
-4. **Security**: Compromised gateway ≠ compromised policy management
+1. **Principle of Least Privilege**: Gateway can't enable/disable tools, only enforce them
+2. **System vs. User Separation**: Gateway is a system service, not a user
+3. **Uniform Governance**: Humans and AI treated identically as "tool users"
+4. **Auditability**: Clear separation between management and runtime operations
+5. **Security**: Compromised gateway ≠ compromised policy management
 
 ---
 
@@ -271,18 +279,20 @@ ServiceRegistry:    { "pAdmin": { "role": "admin" } }
 UserRegistry:       { "pAdmin": { "role": "admin" } }
 
 // Admin + Gateway protocols
-ToolPolicy:         { "pAdmin": { "role": "admin" }, "pAgent": { "role": "agent" } }
+ToolPolicy:         { "pAdmin": { "role": "admin" }, 
+                      "pGateway": { "role": "gateway" } }
 
-// Admin + User + Gateway protocols  
 UserToolAccess:     { "pAdmin": { "role": "admin" }, 
-                      "pUser": { "userId": "<user>" },    // ← USER-SPECIFIC
-                      "pGateway": { "role": "agent" } }
+                      "pGateway": { "role": "gateway" } }
+                    // userId param identifies whose access (not a party)
 
 // Admin + Gateway + Auditor protocols
 CredentialPolicy:   { "pAdmin": { "role": "admin" }, 
-                      "pGateway": { "role": "agent" },
+                      "pGateway": { "role": "gateway" },
                       "pAuditor": { "role": "auditor" } }
 ```
+
+**Key Insight**: Tool users (humans like "alice", AI like "agent-x") are NOT parties. They're identified by the `userId` parameter in UserToolAccess. The Gateway enforces policies on their behalf.
 
 ---
 

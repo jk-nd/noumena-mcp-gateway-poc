@@ -234,17 +234,18 @@ resource "keycloak_user_roles" "admin_realm_management" {
   ]
 }
 
-# AI Agent - can invoke tools within delegated permissions
+# Gateway Service Account - System service with role=gateway for NPL policy checks
+# Note: Username is "agent" for backward compatibility, but role is "gateway"
 resource "keycloak_user" "agent" {
   realm_id   = keycloak_realm.mcpgateway.id
   username   = "agent"
   email      = "agent@acme.com"
-  first_name = "AI"
-  last_name  = "Agent"
+  first_name = "Gateway"
+  last_name  = "Service"
   enabled    = true
 
   attributes = {
-    "role"         = "agent"
+    "role"         = "gateway"  # Gateway system service role
     "organization" = "acme"
   }
 

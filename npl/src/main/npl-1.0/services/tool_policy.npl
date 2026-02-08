@@ -27,11 +27,11 @@ struct ToolAccessRule {
  *   - Credential mapping governance
  *
  * @party pAdmin Organization administrator
- * @party pAgent AI agent / Gateway making requests
+ * @party pGateway Gateway system service performing runtime policy checks
  * @param policyServiceName The upstream service this policy governs (e.g., "duckduckgo")
  */
 @api
-protocol[pAdmin, pAgent] ToolPolicy(
+protocol[pAdmin, pGateway] ToolPolicy(
     var policyServiceName: Text
 ) {
     initial state active;
@@ -74,14 +74,14 @@ protocol[pAdmin, pAgent] ToolPolicy(
 
     /**
      * Check if a tool call is allowed.
-     * Called by the Gateway (as pAgent) before forwarding to upstream.
+     * Called by the Gateway system service before forwarding to upstream.
      *
      * @param toolName The tool being called
-     * @param callerIdentity The user/agent identity (for future per-user rules)
+     * @param callerIdentity The user/agent identity (for logging/audit)
      * @return true if access is allowed
      */
     @api
-    permission[pAgent] checkAccess(
+    permission[pGateway] checkAccess(
         toolName: Text,
         callerIdentity: Text
     ) returns Boolean | active {
@@ -103,7 +103,7 @@ protocol[pAdmin, pAgent] ToolPolicy(
      * @return Set of enabled tool names
      */
     @api
-    permission[pAdmin | pAgent] getEnabledTools() returns Set<Text> | active, suspended {
+    permission[pAdmin | pGateway] getEnabledTools() returns Set<Text> | active, suspended {
         return enabledTools;
     };
 
@@ -112,7 +112,7 @@ protocol[pAdmin, pAgent] ToolPolicy(
      * @return Total number of policy checks
      */
     @api
-    permission[pAdmin | pAgent] getRequestCount() returns Number | active, suspended {
+    permission[pAdmin | pGateway] getRequestCount() returns Number | active, suspended {
         return requestCounter;
     };
 

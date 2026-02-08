@@ -18,19 +18,20 @@ private val logger = KotlinLogging.logger {}
  * Client for NPL Engine policy checks.
  *
  * V3 Architecture:
- *   - Gateway uses agent-level credentials to call per-service ToolPolicy instances
- *   - Each service has its own ToolPolicy instance (created via TUI bootstrap)
- *   - Per-user UserToolAccess instances provide user-level access control - NEW
+ *   - Gateway authenticates as system service (role=gateway)
+ *   - Each service has its own ToolPolicy instance (service-level governance)
+ *   - Each tool user has their own UserToolAccess instance (user-level governance)
+ *   - Tool users (humans and AI) are treated identically from governance perspective
  *   - The Gateway never holds admin credentials
  *   - Fail-closed: if NPL is unavailable, requests are denied
  *
  * Policy check flow:
- *   1. Get agent token from Keycloak
- *   2. Find ToolPolicy instance for the service (service-level policy)
- *   3. Call checkAccess permission on ToolPolicy
- *   4. Find UserToolAccess instance for the user (user-level policy) - NEW
- *   5. Call hasAccess permission on UserToolAccess - NEW
- *   6. Return allow/deny result
+ *   1. Get gateway service token from Keycloak (role=gateway)
+ *   2. Find ToolPolicy instance for the service (service-level check)
+ *   3. Call checkAccess permission on ToolPolicy as pGateway
+ *   4. Find UserToolAccess instance for the tool user (user-level check)
+ *   5. Call hasAccess permission on UserToolAccess as pGateway
+ *   6. Return allow/deny result (both checks must pass)
  */
 class NplClient {
 
@@ -124,7 +125,8 @@ class NplClient {
     }
 
     /**
-     * Get an agent token from Keycloak.
+     * Get a gateway service token from Keycloak.
+     * The Gateway authenticates as a system service (role=gateway).
      */
     private suspend fun getAgentToken(): String {
         val response = client.submitForm(
@@ -132,8 +134,8 @@ class NplClient {
             formParameters = parameters {
                 append("grant_type", "password")
                 append("client_id", "mcpgateway")
-                append("username", agentUsername)
-                append("password", agentPassword)
+                append("username", agentUsername)  // TODO: Rename to gatewayUsername
+                append("password", agentPassword)  // TODO: Rename to gatewayPassword
             }
         )
 
