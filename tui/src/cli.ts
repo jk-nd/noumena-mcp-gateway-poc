@@ -237,9 +237,22 @@ async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<vo
       p.log.info("No users configured in services.yaml");
     }
 
-    // Pause so user can read the output
     console.log();
     console.log(noumena.success("  ✓ NPL now matches services.yaml"));
+
+    // Auto-reload Gateway to apply NPL changes
+    s.start("Reloading Gateway...");
+    try {
+      await reloadGatewayConfig();
+      s.stop(noumena.success("Gateway reloaded"));
+      configDirty = false;
+    } catch (err: any) {
+      s.stop(noumena.purpleDim("Gateway reload failed"));
+      p.log.warn("NPL updated but Gateway reload failed - use 'Reload Gateway' manually");
+      configDirty = true;
+    }
+
+    // Pause so user can read the output
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   } catch (error) {
@@ -248,6 +261,7 @@ async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<vo
     p.log.info("Make sure the NPL Engine is running and Keycloak is provisioned.");
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    configDirty = true;
   }
 }
 
@@ -380,6 +394,18 @@ async function resetToDefaultsFlow(): Promise<void> {
     nplSpinner.stop(noumena.purpleDim("NPL import failed"));
     p.log.error(`Error: ${err.message || err}`);
     p.log.info("You can retry import from the System menu.");
+  }
+
+  // Step 5: Reload Gateway
+  nplSpinner.start("Reloading Gateway...");
+  try {
+    await reloadGatewayConfig();
+    nplSpinner.stop(noumena.success("Gateway reloaded"));
+    configDirty = false;
+  } catch (err: any) {
+    nplSpinner.stop(noumena.purpleDim("Gateway reload failed"));
+    p.log.warn("You may need to restart Gateway manually");
+    configDirty = true;
   }
 
   // Done!
@@ -1258,7 +1284,7 @@ async function mainMenu(): Promise<boolean> {
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
     { value: "config", label: "  Configuration Manager", hint: "Manage services.yaml, Import/Export, Backups" },
-    { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Config changed — reload needed" : "Up to date" },
+    { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Manual reload needed" : "Auto-reloads after imports" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
 
@@ -2488,9 +2514,30 @@ async function editConfigFlow(): Promise<void> {
 }
 
 /**
- * Reload Gateway configuration
+ * Reload Gateway configuration (manual fallback)
+ * 
+ * Gateway automatically reloads after:
+ * - Import from YAML
+ * - Edit and Apply
+ * - Reset to Factory Defaults
+ * 
+ * Use this only when:
+ * - Auto-reload failed
+ * - Manual edits made outside TUI
+ * - Recovery after Gateway restart
  */
 async function reloadGatewayFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Reload Gateway"));
+  console.log();
+  console.log(noumena.textDim("  Manual reload for edge cases:"));
+  console.log(noumena.textDim("  • Auto-reload failed after import"));
+  console.log(noumena.textDim("  • Manual YAML edits outside TUI"));
+  console.log(noumena.textDim("  • Recovery after Gateway restart"));
+  console.log();
+  console.log(noumena.textDim("  Note: Gateway auto-reloads after Import/Edit operations"));
+  console.log();
+
   const s = p.spinner();
   s.start("Reloading Gateway configuration...");
 
@@ -2498,9 +2545,17 @@ async function reloadGatewayFlow(): Promise<void> {
     await reloadGatewayConfig();
     s.stop(noumena.success("Gateway configuration reloaded"));
     configDirty = false;
-  } catch {
+    
+    console.log();
+    p.log.success("✓ Gateway now has fresh NPL cache and services.yaml");
+  } catch (err: any) {
     s.stop(noumena.purpleDim("Failed to reload Gateway config"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("Check that Gateway is running and try again");
   }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
 }
 
 // ============================================================================
