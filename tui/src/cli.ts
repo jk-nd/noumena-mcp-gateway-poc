@@ -167,35 +167,45 @@ async function adminLogin(): Promise<boolean> {
 }
 
 /**
- * Import from YAML - sync services.yaml to NPL (V3 Architecture).
+ * Sync Gateway Configuration to NPL
  * 
- * This is a DECLARATIVE sync with confirmation:
+ * Loads services.yaml into NPL for policy enforcement.
+ * 
+ * When to use:
+ * - FIRST TIME: After fresh deployment (Gateway auto-runs this on first startup)
+ * - AFTER EDITS: When you manually edit services.yaml and want to apply changes
+ * - AFTER TUI CHANGES: TUI automatically syncs after user/service modifications
+ * 
+ * This is a DECLARATIVE sync:
  * - services.yaml defines the desired state (services, tools, users)
- * - This function makes NPL match that state
- * - ADDS services/tools/users from YAML (if not in NPL)
- * - REMOVES services/tools/users from NPL (if not in YAML)
+ * - NPL state is updated to match YAML
+ * - ADDS services/tools/users from YAML to NPL
+ * - REMOVES services/tools/users from NPL not in YAML
  * 
- * KEYCLOAK SEPARATION: This does NOT create/delete Keycloak users!
- * - Keycloak users must be managed separately (Terraform or Keycloak Admin UI)
- * - This only syncs NPL permissions for existing Keycloak users
- * 
- * V3 Architecture:
- *   1. ServiceRegistry — tracks which services are enabled
- *   2. ToolPolicy (per service) — per-tool access control (global)
- *   3. UserRegistry — tracks registered users/agents
- *   4. UserToolAccess (per user) — per-user tool access control
+ * IMPORTANT: This does NOT touch Keycloak - only syncs NPL permissions!
  */
 async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<void> {
+  const nplReady = await isNplBootstrapped();
+  
   if (!skipConfirmation) {
     console.log();
-    console.log(noumena.purple("  Import from YAML → NPL"));
+    console.log(noumena.purple("  Sync Gateway Configuration to NPL"));
     console.log();
-    console.log(noumena.textDim("  📄 services.yaml defines the desired state"));
-    console.log(noumena.textDim("  ✅ Adds services/tools/users from YAML to NPL"));
-    console.log(noumena.textDim("  🧹 Removes services/tools/users from NPL not in YAML"));
+    
+    if (!nplReady) {
+      console.log(noumena.textDim("  📋 First-time setup: Loading services.yaml into NPL"));
+      console.log(noumena.textDim("  🔧 NPL will enforce policies defined in services.yaml"));
+    } else {
+      console.log(noumena.textDim("  📄 Updates NPL to match services.yaml"));
+      console.log(noumena.textDim("  ✅ Adds new services/tools/users from YAML"));
+      console.log(noumena.textDim("  🧹 Removes items from NPL not in YAML"));
+    }
+    
     console.log();
-    console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will overwrite NPL state with YAML!"));
-    console.log(noumena.warning("  ⚠  DOES NOT touch Keycloak - only syncs NPL permissions!"));
+    console.log(noumena.warning("  ⚠  This syncs NPL with services.yaml (does NOT touch Keycloak)"));
+    if (nplReady) {
+      console.log(noumena.warning("  ⚠  Existing NPL state will be updated to match YAML"));
+    }
     console.log();
 
     const confirm = await p.confirm({
@@ -291,37 +301,39 @@ async function configurationManagerFlow(): Promise<void> {
 
   while (true) {
     console.log();
-    console.log(noumena.purple("  Configuration Manager"));
-    console.log(noumena.textDim("  Manage services.yaml: Import, Export, Backups, Restore"));
+    console.log(noumena.purple("  Gateway Configuration Manager"));
+    console.log(noumena.textDim("  Manage Gateway config (services.yaml): Edit, Import to NPL, Backups"));
     console.log();
+    
+    if (!nplReady) {
+      console.log(noumena.warning("  ⚠  NPL not initialized - use 'Sync Gateway Config to NPL' for first-time setup"));
+      console.log();
+    }
 
     // List available backups
     let backupFiles: string[] = [];
     try {
       const files = await fs.readdir(configDir);
       backupFiles = files
-        .filter(f => f.startsWith("services.yaml.") && (f.endsWith(".backup") || f === "services.yaml.default"))
+        .filter(f => f.startsWith("services.yaml.") && f.endsWith(".backup"))
         .sort()
         .reverse();
     } catch {
       // Ignore errors
     }
 
-    const backupCount = backupFiles.filter(f => f.endsWith(".backup")).length;
-    const hasFactory = backupFiles.includes("services.yaml.default");
+    const backupCount = backupFiles.length;
 
     const action = await p.select({
       message: "Select action:",
       options: [
         { value: "back", label: noumena.textDim("← Back") },
-        { value: "---hdr-current", label: noumena.purple("── Current Configuration ──"), hint: "" },
-        { value: "manage-current", label: "  Manage services.yaml", hint: "View, Edit, Export, Apply" },
-        { value: "---hdr-import", label: noumena.purple("── Import ──"), hint: "" },
-        { value: "import-current", label: `  Import from services.yaml  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "YAML → NPL (sync current file)" },
-        { value: "import-file", label: "  Import from file...", hint: "Choose a YAML file to import" },
-        { value: "---hdr-backups", label: noumena.purple("── Backups ──"), hint: "" },
-        { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore" },
-        { value: "view-factory", label: `  View factory defaults  ${hasFactory ? "" : noumena.grayDim("(n/a)")}`, hint: "services.yaml.default" },
+        { value: "---hdr-current", label: noumena.purple("── Gateway Configuration ──"), hint: "" },
+        { value: "manage-current", label: "  Edit services.yaml", hint: "View, Edit, Export current config" },
+        { value: "import-current", label: `  Sync Gateway Config to NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "Load services.yaml into NPL" },
+        { value: "---hdr-backups", label: noumena.purple("── Backups & Advanced ──"), hint: "" },
+        { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore backups" },
+        { value: "import-file", label: "  Import from file...", hint: "Load config from custom YAML" },
       ],
     });
 
@@ -339,13 +351,11 @@ async function configurationManagerFlow(): Promise<void> {
       await importFromYamlFlow();
     } else if (action === "import-file") {
       await importFromFileFlow();
-    } else if (action === "view-factory" && hasFactory) {
-      await viewFactoryDefaultsFlow();
     } else if (action === "view-backups") {
       if (backupCount === 0) {
-        p.log.info("No backups found. Use 'Export current config' to create backups.");
+        p.log.info("No backups found. Use 'Export' in Edit menu to create backups.");
       } else {
-        await browseBackupsFlow(backupFiles.filter(f => f.endsWith(".backup")));
+        await browseBackupsFlow(backupFiles);
       }
     }
   }
