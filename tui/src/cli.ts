@@ -156,11 +156,13 @@ async function adminLogin(): Promise<boolean> {
 }
 
 /**
- * NPL Sync flow - DECLARATIVE sync of services.yaml to NPL.
+ * Import from YAML - sync services.yaml to NPL (V3 Architecture).
  * 
- * IMPORTANT: This is DECLARATIVE sync - NPL will match services.yaml exactly!
- * - Services, tools, users IN YAML → Enabled/Registered in NPL
- * - Services, tools, users NOT IN YAML → Disabled/Removed from NPL
+ * This is a DECLARATIVE sync with confirmation:
+ * - services.yaml defines the desired state (services, tools, users)
+ * - This function makes NPL match that state
+ * - ADDS services/tools/users from YAML (if not in NPL)
+ * - REMOVES services/tools/users from NPL (if not in YAML)
  * 
  * KEYCLOAK SEPARATION: This does NOT create/delete Keycloak users!
  * - Keycloak users must be managed separately (Terraform or Keycloak Admin UI)
@@ -172,24 +174,34 @@ async function adminLogin(): Promise<boolean> {
  *   3. UserRegistry — tracks registered users/agents
  *   4. UserToolAccess (per user) — per-user tool access control
  */
-async function nplBootstrapFlow(): Promise<void> {
+async function importFromYamlFlow(): Promise<void> {
   console.log();
-  console.log(noumena.purple("  Sync NPL (Declarative)"));
+  console.log(noumena.purple("  Import from YAML → NPL"));
   console.log();
-  console.log(noumena.textDim("  📄 services.yaml is the source of truth"));
-  console.log(noumena.textDim("  ✅ Enables services/tools/users from YAML"));
-  console.log(noumena.textDim("  🧹 Disables services/tools not in YAML"));
-  console.log(noumena.textDim("  🧹 Removes users not in YAML"));
+  console.log(noumena.textDim("  📄 services.yaml defines the desired state"));
+  console.log(noumena.textDim("  ✅ Adds services/tools/users from YAML to NPL"));
+  console.log(noumena.textDim("  🧹 Removes services/tools/users from NPL not in YAML"));
   console.log();
+  console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will overwrite NPL state with YAML!"));
   console.log(noumena.warning("  ⚠  DOES NOT touch Keycloak - only syncs NPL permissions!"));
   console.log();
 
+  const confirm = await p.confirm({
+    message: "Proceed with import? This will make NPL match services.yaml.",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Import cancelled");
+    return;
+  }
+
   const s = p.spinner();
-  s.start("Bootstrapping NPL...");
+  s.start("Importing from YAML to NPL...");
 
   try {
     const result = await bootstrapNpl();
-    s.stop(noumena.success("NPL bootstrapped"));
+    s.stop(noumena.success("Import completed"));
 
     // Service-level bootstrap
     if (result.registryCreated) {
@@ -210,7 +222,7 @@ async function nplBootstrapFlow(): Promise<void> {
       p.log.info("No services enabled in services.yaml");
     }
 
-    // User-level bootstrap (new)
+    // User-level bootstrap
     if (result.userRegistryCreated) {
       p.log.success("Created UserRegistry");
     } else {
@@ -225,16 +237,141 @@ async function nplBootstrapFlow(): Promise<void> {
 
     // Pause so user can read the output
     console.log();
-    console.log(noumena.success("  ✓ NPL is now in sync with services.yaml"));
+    console.log(noumena.success("  ✓ NPL now matches services.yaml"));
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   } catch (error) {
-    s.stop(noumena.purpleDim("Sync failed"));
+    s.stop(noumena.purpleDim("Import failed"));
     p.log.error(`${error}`);
     p.log.info("Make sure the NPL Engine is running and Keycloak is provisioned.");
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
   }
+}
+
+/**
+ * Export to YAML - save current NPL state to services.yaml.
+ * 
+ * This is the inverse of Import:
+ * - Queries NPL for current state (enabled services, tools, users)
+ * - Writes this state to services.yaml
+ * - Useful for saving manual changes made through TUI
+ */
+async function exportToYamlFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Export to YAML (NPL → services.yaml)"));
+  console.log();
+  console.log(noumena.textDim("  📄 Queries NPL for current state"));
+  console.log(noumena.textDim("  💾 Saves state to services.yaml"));
+  console.log(noumena.textDim("  ✅ Preserves manual TUI changes"));
+  console.log();
+  p.log.warn("⚠  NOT YET IMPLEMENTED - Coming soon!");
+  console.log();
+  p.log.info("For now, use TUI flows to manage services and users.");
+  p.log.info("Changes are automatically saved to services.yaml.");
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+/**
+ * Reset to Defaults - factory reset for the Gateway.
+ * 
+ * This will:
+ * 1. Re-provision Keycloak (runs Terraform)
+ * 2. Restore default services.yaml
+ * 3. Import services.yaml to NPL
+ */
+async function resetToDefaultsFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Reset to Defaults (Factory Reset)"));
+  console.log();
+  console.log(noumena.textDim("  🔄 Re-provisions Keycloak (Terraform)"));
+  console.log(noumena.textDim("  📄 Restores default services.yaml"));
+  console.log(noumena.textDim("  🔄 Imports services.yaml to NPL"));
+  console.log();
+  console.log(noumena.warning("  ⚠  DESTRUCTIVE: This will delete all users and configurations!"));
+  console.log(noumena.warning("  ⚠  Default users: admin, gateway, jarvis, alice, bob"));
+  console.log();
+
+  const confirm = await p.confirm({
+    message: "Proceed with factory reset? This cannot be undone.",
+    initialValue: false,
+  });
+
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Reset cancelled");
+    return;
+  }
+
+  // Step 1: Re-provision Keycloak
+  const kcSpinner = p.spinner();
+  kcSpinner.start("Re-provisioning Keycloak...");
+  
+  try {
+    const kcResult = execSync(
+      "cd ../keycloak-provisioning && ./local.sh",
+      { 
+        encoding: "utf-8",
+        cwd: process.cwd(),
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    kcSpinner.stop(noumena.success("Keycloak re-provisioned"));
+  } catch (err: any) {
+    kcSpinner.stop(noumena.purpleDim("Keycloak provisioning failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("You may need to run './local.sh' manually in keycloak-provisioning/");
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    return;
+  }
+
+  // Step 2: Restore default services.yaml
+  const yamlSpinner = p.spinner();
+  yamlSpinner.start("Restoring default services.yaml...");
+  
+  try {
+    const configPath = getConfigPath();
+    const defaultConfigPath = configPath.replace("services.yaml", "services.yaml.default");
+    
+    // Read default config
+    const defaultYaml = readFileSync(defaultConfigPath, "utf-8");
+    
+    // Write to services.yaml
+    const fs = await import("fs/promises");
+    await fs.writeFile(configPath, defaultYaml, "utf-8");
+    
+    yamlSpinner.stop(noumena.success("Default services.yaml restored"));
+  } catch (err: any) {
+    yamlSpinner.stop(noumena.purpleDim("Failed to restore default services.yaml"));
+    p.log.error(`Error: ${err.message || err}`);
+    console.log();
+    await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    return;
+  }
+
+  // Step 3: Import services.yaml to NPL
+  const nplSpinner = p.spinner();
+  nplSpinner.start("Importing default config to NPL...");
+  
+  try {
+    const result = await bootstrapNpl();
+    nplSpinner.stop(noumena.success("NPL imported"));
+    
+    p.log.success(`✓ Synced ${result.usersSynced.length} default user(s): ${result.usersSynced.join(", ")}`);
+  } catch (err: any) {
+    nplSpinner.stop(noumena.purpleDim("NPL import failed"));
+    p.log.error(`Error: ${err.message || err}`);
+    p.log.info("You can retry import from the System menu.");
+  }
+
+  // Done!
+  console.log();
+  console.log(noumena.success("  ✓ Factory reset complete!"));
+  console.log(noumena.textDim("  Default users: jarvis, alice, bob"));
+  console.log(noumena.textDim("  Default password: admin (change in Keycloak)"));
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
 }
 
 /**
@@ -465,7 +602,9 @@ async function mainMenu(): Promise<boolean> {
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
     { value: "viewconfig", label: "  View services.yaml", hint: "Show current configuration" },
     { value: "editconfig", label: "  Edit services.yaml", hint: `Opens ${process.env.EDITOR || "nano"}` },
-    { value: "bootstrap", label: `  Sync NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: nplReady ? "NPL synced with services.yaml" : "Declarative sync: services.yaml → NPL (DOES NOT touch Keycloak)" },
+    { value: "import", label: `  Import from YAML  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "YAML → NPL (destructive, warns before overwriting)" },
+    { value: "export", label: "  Export to YAML", hint: "NPL → YAML (saves current NPL state)" },
+    { value: "reset", label: "  Reset to Defaults", hint: "Restore factory defaults (Keycloak + services.yaml + NPL)" },
     { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Config changed — reload needed" : "Up to date" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
@@ -502,14 +641,18 @@ async function mainMenu(): Promise<boolean> {
     await viewConfigFlow();
   } else if (action === "editconfig") {
     await editConfigFlow();
-  } else if (action === "bootstrap") {
-    await nplBootstrapFlow();
+  } else if (action === "import") {
+    await importFromYamlFlow();
+  } else if (action === "export") {
+    await exportToYamlFlow();
+  } else if (action === "reset") {
+    await resetToDefaultsFlow();
   } else if (action === "gateway") {
     await reloadGatewayFlow();
   }
 
   // Mark config as potentially dirty after config-modifying flows
-  if (typeof action === "string" && !["viewconfig", "bootstrap", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
+  if (typeof action === "string" && !["viewconfig", "import", "export", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
     configDirty = true;
   }
 
@@ -2378,7 +2521,7 @@ async function manageUserServiceAccessFlow(
         s.stop(noumena.success("All tools granted and synced to NPL"));
       } catch (err) {
         s.stop(noumena.warning(`All tools granted locally (NPL sync failed: ${err})`));
-        console.log(noumena.textDim("  Run 'Sync NPL' from main menu to sync"));
+        console.log(noumena.textDim("  Run 'Import from YAML' from main menu to sync"));
       }
       continue;
     }
@@ -2397,7 +2540,7 @@ async function manageUserServiceAccessFlow(
           s.stop(noumena.success("Service access revoked and synced to NPL"));
         } catch (err) {
           s.stop(noumena.warning(`Service access revoked locally (NPL sync failed: ${err})`));
-          console.log(noumena.textDim("  Run 'Sync NPL' from main menu to sync"));
+          console.log(noumena.textDim("  Run 'Import from YAML' from main menu to sync"));
         }
       }
       continue;
@@ -3157,7 +3300,7 @@ async function main() {
       await bootstrapNpl();
       p.log.success("NPL bootstrapped automatically");
     } catch {
-      p.log.warn("NPL auto-sync failed (engine may not be running). You can retry from System > Sync NPL.");
+      p.log.warn("NPL auto-sync failed (engine may not be running). You can retry from System > Import from YAML.");
     }
   }
 

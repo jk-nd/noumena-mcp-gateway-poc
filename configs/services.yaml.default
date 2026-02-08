@@ -1,0 +1,124 @@
+# Default MCP Service Configuration
+# This is the factory default configuration for the Gateway.
+# Use "Reset to Defaults" in the TUI to restore this configuration.
+
+services:
+  - name: "duckduckgo"
+    displayName: "DuckDuckGo"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/duckduckgo"
+    args: []
+    requiresCredentials: false
+    description: "Web search capabilities through DuckDuckGo, with content fetching."
+    tools:
+      - name: "search"
+        description: "Search DuckDuckGo and return formatted results."
+        inputSchema:
+          type: "object"
+          properties:
+            query:
+              type: "string"
+              description: "The search query string"
+            max_results:
+              type: "integer"
+              description: "Maximum number of results to return (default: 10)"
+          required:
+            - "query"
+        enabled: true
+      - name: "fetch_content"
+        description: "Fetch and parse content from a webpage URL."
+        inputSchema:
+          type: "object"
+          properties:
+            url:
+              type: "string"
+              description: "The webpage URL to fetch content from"
+          required:
+            - "url"
+        enabled: true
+
+  - name: "github"
+    displayName: "Github"
+    type: "MCP_STDIO"
+    enabled: false
+    command: "docker run -i --rm mcp/github"
+    args: []
+    requiresCredentials: false
+    description: "Tools for interacting with the GitHub API"
+    tools:
+      - name: "search_repositories"
+        description: "Search for GitHub repositories"
+        inputSchema:
+          type: "object"
+          properties:
+            query:
+              type: "string"
+              description: "Search query"
+          required:
+            - "query"
+        enabled: false
+
+  - name: "slack"
+    displayName: "Slack"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm mcp/slack"
+    args: []
+    requiresCredentials: false
+    description: "Interact with Slack Workspaces over the Slack API."
+    tools:
+      - name: "slack_default"
+        description: "Default tool for slack - run 'Discover tools' to find actual tools"
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
+        enabled: true
+
+user_access:
+  default_template:
+    enabled: true
+    description: "Default tool access for new users (basic search only)"
+    tools:
+      duckduckgo:
+        - "search"
+  
+  users:
+    # System accounts (DO NOT REGISTER as regular Gateway users):
+    # - admin (Keycloak admin account)
+    # - gateway (Gateway backend service account)
+    
+    # ---- Default Users ----
+    
+    # Jarvis - AI Agent (autonomous tool user)
+    - userId: "jarvis"
+      keycloakId: "PLACEHOLDER_JARVIS_ID"
+      displayName: "Jarvis AI Agent"
+      createdAt: "2026-02-08T00:00:00.000Z"
+      tools:
+        duckduckgo:
+          - "*"
+        slack:
+          - "*"
+      vaultPaths: {}
+    
+    # Alice - Product Manager
+    - userId: "alice"
+      keycloakId: "PLACEHOLDER_ALICE_ID"
+      displayName: "Alice Chen"
+      createdAt: "2026-02-08T00:00:00.000Z"
+      tools:
+        duckduckgo:
+          - "*"
+      vaultPaths: {}
+    
+    # Bob - Developer
+    - userId: "bob"
+      keycloakId: "PLACEHOLDER_BOB_ID"
+      displayName: "Bob Smith"
+      createdAt: "2026-02-08T00:00:00.000Z"
+      tools:
+        duckduckgo:
+          - "search"
+      vaultPaths: {}

@@ -62,9 +62,10 @@ users.UserToolAccess:
       claims:
         role:
           - admin
-  # Gateway system service enforces access at runtime
+  # Gateway system service and AI agents enforce/query access at runtime
   pGateway:
     set:
       claims:
         role:
           - gateway
+          - agent  # AI agents (like Jarvis) can query their own access

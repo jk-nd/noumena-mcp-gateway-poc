@@ -229,18 +229,48 @@ resource "keycloak_user_roles" "admin_realm_management" {
   ]
 }
 
-# Gateway Service Account - System service with role=gateway for NPL policy checks
-# Note: Username is "agent" for backward compatibility, but role is "gateway"
-resource "keycloak_user" "agent" {
+# ============================================================================
+# System Accounts
+# ============================================================================
+
+# Gateway Service Account - Backend system service for NPL policy enforcement
+# This is the service account used by the Gateway application itself
+resource "keycloak_user" "gateway_service" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "agent"
-  email      = "agent@acme.com"
+  username   = "gateway"
+  email      = "gateway@system.local"
   first_name = "Gateway"
   last_name  = "Service"
   enabled    = true
 
   attributes = {
     "role"         = "gateway"  # Gateway system service role
+    "organization" = "system"
+  }
+
+  initial_password {
+    value     = var.default_password
+    temporary = false
+  }
+
+  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
+}
+
+# ============================================================================
+# AI Agents - Default Demo Agent
+# ============================================================================
+
+# Jarvis - AI Agent (autonomous tool user)
+resource "keycloak_user" "jarvis" {
+  realm_id   = keycloak_realm.mcpgateway.id
+  username   = "jarvis"
+  email      = "jarvis@acme.com"
+  first_name = "Jarvis"
+  last_name  = "AI Agent"
+  enabled    = true
+
+  attributes = {
+    "role"         = "agent"  # AI agent (can use tools like a human user)
     "organization" = "acme"
   }
 
@@ -253,10 +283,10 @@ resource "keycloak_user" "agent" {
 }
 
 # ============================================================================
-# Additional Users for Demo / Testing
+# Default Users for Demo / Testing
 # ============================================================================
 
-# Alice - product manager, regular user
+# Alice - Product Manager
 resource "keycloak_user" "alice" {
   realm_id   = keycloak_realm.mcpgateway.id
   username   = "alice"
@@ -278,35 +308,13 @@ resource "keycloak_user" "alice" {
   depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
 }
 
-# Regular User
-resource "keycloak_user" "user" {
+# Bob - Developer
+resource "keycloak_user" "bob" {
   realm_id   = keycloak_realm.mcpgateway.id
-  username   = "user"
-  email      = "user@acme.com"
-  first_name = "Regular"
-  last_name  = "User"
-  enabled    = true
-
-  attributes = {
-    "role"         = "user"
-    "organization" = "acme"
-  }
-
-  initial_password {
-    value     = var.default_password
-    temporary = false
-  }
-
-  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
-}
-
-# Charlie McDonald (was created via TUI, now in Terraform)
-resource "keycloak_user" "charlie" {
-  realm_id   = keycloak_realm.mcpgateway.id
-  username   = "charlie"
-  email      = "charlie@acme.com"
-  first_name = "Charlie"
-  last_name  = "McDonald"
+  username   = "bob"
+  email      = "bob@acme.com"
+  first_name = "Bob"
+  last_name  = "Smith"
   enabled    = true
 
   attributes = {
