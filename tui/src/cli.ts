@@ -62,6 +62,7 @@ import {
   syncUserAccessToNpl,
   getKeycloakToken,
   findUserToolAccess,
+  isUserInNpl,
   type KeycloakUser,
   storeSecretInVault,
   getSecretFromVault,
@@ -2697,9 +2698,8 @@ async function userActionsFlowV3(kcUser: KeycloakUser, localUser: UserToolAccess
   const isRegistered = !!localUser;
   let isInNpl = false;
   try {
-    const token = await getKeycloakToken();
-    const accessId = await findUserToolAccess(token, email);
-    isInNpl = !!accessId;
+    // Check UserRegistry (not UserToolAccess) - users exist even without tools
+    isInNpl = await isUserInNpl(email);
   } catch {
     // NPL check failed
   }
@@ -3446,13 +3446,36 @@ async function addCredentialFlow(): Promise<void> {
   }
   
   // Step 2: Vault path template (with better suggestion)
-  const suggestedPath = detectedService
-    ? `secret/data/tenants/{tenant}/users/{user}/${detectedService.pathSuffix}`
-    : `secret/data/tenants/{tenant}/users/{user}/${String(credentialName).replace(/_/g, "/")}`;
+  // Step 2: Credential scope (tenant-level vs. user-level)
+  console.log();
+  console.log(noumena.textDim("  📊 Credential Scope:"));
+  console.log(noumena.textDim("     • Tenant-level: One API key shared by all users in the organization"));
+  console.log(noumena.textDim("     • User-level: Each user provides their own API key"));
+  console.log();
   
-  console.log(noumena.textDim("  📁 Vault path templates:"));
-  console.log(noumena.textDim("     • User-specific: secret/data/tenants/{tenant}/users/{user}/SERVICE/api"));
-  console.log(noumena.textDim("     • Service-wide:  secret/data/tenants/{tenant}/services/SERVICE/env"));
+  const credentialScope = await p.select({
+    message: "Credential scope:",
+    options: [
+      { value: "tenant", label: "Tenant-level (shared)", hint: "e.g., company Slack workspace" },
+      { value: "user", label: "User-level (per-user)", hint: "e.g., personal GitHub tokens" },
+    ],
+  });
+  
+  if (p.isCancel(credentialScope)) return;
+  
+  // Generate suggested path based on scope
+  const isTenantLevel = credentialScope === "tenant";
+  const pathBase = detectedService
+    ? detectedService.pathSuffix
+    : String(credentialName).replace(/_/g, "/");
+  
+  const suggestedPath = isTenantLevel
+    ? `secret/data/tenants/{tenant}/services/${pathBase}`
+    : `secret/data/tenants/{tenant}/users/{user}/${pathBase}`;
+  
+  console.log();
+  console.log(noumena.success(`  ✓ ${isTenantLevel ? "Tenant-level" : "User-level"} credential`));
+  console.log(noumena.textDim(`     Path: ${suggestedPath}`));
   console.log();
   
   const vaultPath = await p.text({
@@ -3462,8 +3485,12 @@ async function addCredentialFlow(): Promise<void> {
     validate: (value) => {
       if (!value) return "Vault path is required";
       if (!value.startsWith("secret/data/")) return "Path should start with 'secret/data/'";
-      if (!value.includes("{tenant}") || !value.includes("{user}")) {
-        return "Path should include {tenant} and {user} for multi-tenancy";
+      if (!value.includes("{tenant}")) return "Path should include {tenant} placeholder";
+      if (!isTenantLevel && !value.includes("{user}")) {
+        return "User-level path should include {user} placeholder";
+      }
+      if (isTenantLevel && value.includes("{user}")) {
+        return "Tenant-level path should NOT include {user} placeholder";
       }
       return undefined;
     },
@@ -3578,11 +3605,19 @@ async function addCredentialFlow(): Promise<void> {
     });
     
     if (!p.isCancel(storeNow) && storeNow) {
-      await storeSecretsInVaultFlow(String(credentialName), String(vaultPath), fieldMapping);
+      await storeSecretsInVaultFlow(
+        String(credentialName), 
+        String(vaultPath), 
+        fieldMapping, 
+        credentialScope === "tenant"
+      );
     } else {
       console.log();
       p.log.info("You can store secrets manually later:");
-      console.log(noumena.textDim(`  docker exec gateway-vault-1 vault kv put ${vaultPath.replace("{tenant}", "default").replace("{user}", "alice")} ...`));
+      const examplePath = (credentialScope === "tenant")
+        ? vaultPath.replace("{tenant}", "default")
+        : vaultPath.replace("{tenant}", "default").replace("{user}", "alice@acme.com");
+      console.log(noumena.textDim(`  docker exec gateway-vault-1 vault kv put ${examplePath} ...`));
     }
   } else {
     s.stop(noumena.purpleDim("Failed to save"));
@@ -3595,17 +3630,15 @@ async function addCredentialFlow(): Promise<void> {
 async function storeSecretsInVaultFlow(
   credentialName: string,
   vaultPathTemplate: string,
-  fieldMapping: Record<string, string>
+  fieldMapping: Record<string, string>,
+  isTenantLevel: boolean
 ): Promise<void> {
   console.log();
   console.log(noumena.purple("  Store Secrets in Vault"));
   console.log(noumena.textDim("  Securely store credential values for this mapping"));
   console.log();
   
-  // Ask for tenant and user
-  console.log(noumena.textDim("  💡 For development, use: tenant=default, user=alice"));
-  console.log();
-  
+  // Ask for tenant ID
   const tenantId = await p.text({
     message: "Tenant ID:",
     initialValue: "default",
@@ -3614,24 +3647,73 @@ async function storeSecretsInVaultFlow(
   
   if (p.isCancel(tenantId)) return;
   
-  const userId = await p.text({
-    message: "User ID:",
-    initialValue: "alice",
-    validate: (v) => v ? undefined : "User ID is required",
-  });
-  
-  if (p.isCancel(userId)) return;
-  
-  // Interpolate path
-  const vaultPath = vaultPathTemplate
-    .replace("{tenant}", String(tenantId))
-    .replace("{user}", String(userId));
-  
-  console.log();
-  console.log(noumena.success(`  ✓ Vault path: ${vaultPath}`));
-  console.log();
-  
-  // Collect secret values
+  if (isTenantLevel) {
+    // Tenant-level: Store once for all users
+    const vaultPath = vaultPathTemplate.replace("{tenant}", String(tenantId));
+    
+    console.log();
+    console.log(noumena.success(`  ✓ Tenant-level credential`));
+    console.log(noumena.textDim(`     Available to all users in tenant: ${tenantId}`));
+    console.log(noumena.textDim(`     Vault path: ${vaultPath}`));
+    console.log();
+    
+    await storeSecretsForPath(vaultPath, fieldMapping, credentialName);
+  } else {
+    // User-level: Select users and store for each
+    const config = loadConfig();
+    const users = config.user_access?.users || [];
+    
+    if (users.length === 0) {
+      p.log.warn("No users registered yet. Register users first via 'Manage users & tool access'");
+      return;
+    }
+    
+    console.log();
+    console.log(noumena.textDim(`  Select which user(s) to configure credentials for:`));
+    console.log();
+    
+    const selectedUserIds = await p.multiselect({
+      message: "Select users:",
+      options: users.map(u => ({
+        value: u.userId,
+        label: `${u.userId} (${u.displayName})`,
+      })),
+      required: true,
+    });
+    
+    if (p.isCancel(selectedUserIds) || selectedUserIds.length === 0) {
+      p.log.warn("No users selected");
+      return;
+    }
+    
+    // Store secrets for each selected user
+    for (const userId of selectedUserIds) {
+      const user = users.find(u => u.userId === userId);
+      const vaultPath = vaultPathTemplate
+        .replace("{tenant}", String(tenantId))
+        .replace("{user}", String(userId));
+      
+      console.log();
+      console.log(noumena.purple(`  Configure for: ${user?.displayName || userId}`));
+      console.log(noumena.textDim(`  Vault path: ${vaultPath}`));
+      console.log();
+      
+      await storeSecretsForPath(vaultPath, fieldMapping, credentialName);
+    }
+    
+    console.log();
+    p.log.success(`✓ Configured credentials for ${selectedUserIds.length} user(s)`);
+  }
+}
+
+/**
+ * Helper: Collect secrets and store at a specific Vault path
+ */
+async function storeSecretsForPath(
+  vaultPath: string,
+  fieldMapping: Record<string, string>,
+  credentialName: string
+): Promise<void> {
   const secretData: Record<string, string> = {};
   
   for (const [vaultField, targetName] of Object.entries(fieldMapping)) {
@@ -3652,10 +3734,9 @@ async function storeSecretsInVaultFlow(
   
   try {
     await storeSecretInVault(vaultPath, secretData);
-    s.stop(noumena.success("Secrets stored in Vault"));
-    p.log.success(`Credential '${credentialName}' is ready to use`);
+    s.stop(noumena.success("✓ Secrets stored"));
   } catch (error) {
-    s.stop(noumena.purpleDim("Failed to store secrets"));
+    s.stop(noumena.error("✗ Failed to store secrets"));
     p.log.error(`${error}`);
   }
 }
