@@ -9,21 +9,26 @@ A transparent MCP (Model Context Protocol) proxy that enables AI agents and user
                          │   Keycloak   │
                          │   (OIDC)     │
                          └──────┬───────┘
-                                │
+                                │ public-net
    Agents / Users ──────► ┌─────┴──────┐        ┌──────────────┐
    (JWT auth)              │  Gateway   │◄──────►│  NPL Engine  │
-                           │  MCP Proxy │        │  (Policies)  │
-                           └─────┬──────┘        └──────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              │                  │                   │
-        ┌─────┴─────┐    ┌──────┴─────┐     ┌──────┴──────┐
-        │ DuckDuckGo │    │   GitHub   │     │   Gemini    │ ...
-        │ MCP Server │    │ MCP Server │     │ MCP Server  │
-        └───────────┘    └────────────┘     └─────────────┘
+                           │  MCP Proxy │  policy │  (Policies)  │
+                           └──┬─────┬───┘  -net  └──────────────┘
+                              │     │
+                   secrets-net│     │backend-net
+                              │     │
+                   ┌──────────┴┐    ├──────────────────┐
+                   │ Credential│    │                   │
+                   │   Proxy   │  ┌─┴───────┐   ┌──────┴──────┐
+                   └─────┬─────┘  │DuckDuck │   │   Gemini    │ ...
+                         │        │Go  MCP  │   │  MCP Server │
+                   ┌─────┴─────┐  └─────────┘   └─────────────┘
+                   │   Vault   │
+                   │ (secrets) │
+                   └───────────┘
 ```
 
-**Network isolation**: Agents can only reach the Gateway and Keycloak. Upstream MCPs are isolated on backend-net. NPL Engine is on policy-net. The Gateway spans all three networks.
+**Four-tier network isolation**: Agents can only reach the Gateway and Keycloak (public-net). NPL Engine is on policy-net. Vault and Credential Proxy are on secrets-net. Upstream MCPs are on backend-net. The Gateway spans all four networks. No other component spans more than two.
 
 ## Components
 
@@ -92,7 +97,8 @@ npx @modelcontextprotocol/inspector
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Keycloak Admin | http://localhost:11000 | admin / welcome |
-| NPL Inspector | http://localhost:12100 | admin / Welcome123 |
+| NPL Inspector | http://localhost:8080 | admin / Welcome123 |
+| Vault UI | http://localhost:8200 | Token: dev-token |
 
 ## Agent Connectivity
 
@@ -170,6 +176,7 @@ cd tui && npm start
 ### Capabilities
 
 - **Service management** -- Add, enable/disable, remove services (Docker Hub, NPM, custom)
+- **Tool discovery** -- Discover tools from Docker and NPM/command-based services (with transient Vault credential fetch)
 - **Tool management** -- Enable/disable individual tools per service
 - **User management** -- Register/deregister Keycloak users, grant/revoke tool access
 - **Credential management** -- Create credential mappings, choose scope, store secrets in Vault
@@ -204,6 +211,17 @@ services:
       - name: "search"
         enabled: true
 
+  - name: "gemini"
+    displayName: "Google Gemini"
+    type: "MCP_STDIO"
+    enabled: true
+    command: "docker run -i --rm node:22-slim npx"
+    args: ["-y", "@houtini/gemini-mcp"]
+    requiresCredentials: true
+    tools:
+      - name: "gemini_chat"
+        enabled: true
+
 user_access:
   users:
     - userId: "jarvis@acme.com"
@@ -211,13 +229,20 @@ user_access:
       tools:
         duckduckgo:
           - "search"
+        gemini:
+          - "gemini_chat"
 ```
+
+NPM-based services use `docker run -i --rm node:22-slim npx` so they run inside a Docker container with Node.js, since the Gateway container itself has no Node.js runtime.
 
 ### credentials.yaml
 
 Maps credential names to Vault paths and injection targets:
 
 ```yaml
+mode: simple
+tenant: acme
+
 credentials:
   google_gemini:
     vault_path: secret/data/tenants/{tenant}/services/gemini/api
@@ -225,7 +250,12 @@ credentials:
       type: env
       mapping:
         api_key: GEMINI_API_KEY
+
+service_defaults:
+  gemini: google_gemini
 ```
+
+The `tenant` field is used to resolve `{tenant}` placeholders in Vault paths. The `service_defaults` section maps service names to credential names for simple mode.
 
 ### Environment Variables (Gateway)
 
@@ -237,6 +267,8 @@ credentials:
 | `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
 | `DEV_MODE` | `false` | Bypass NPL policy checks |
 | `SERVICES_CONFIG_PATH` | `/app/configs/services.yaml` | Path to services config |
+| `CREDENTIAL_PROXY_URL` | `http://credential-proxy:9002` | Credential Proxy URL |
+| `DEFAULT_TENANT_ID` | `default` | Default tenant for credential lookups |
 
 > **Note**: For local dev with Docker, add `127.0.0.1 keycloak` to `/etc/hosts` so both the browser and Docker containers resolve the same hostname.
 
