@@ -44,6 +44,7 @@ import {
   discoverMcpServers,
   imageExists,
   discoverToolsFromContainer,
+  discoverToolsFromCommand,
   discoveredToToolDefinitions,
   setAdminCredentials,
   validateCredentials,
@@ -1045,8 +1046,8 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
   
   // Other actions
   options.push({ value: "tools", label: "Manage tools", hint: `${service.tools.length} tools` });
-  if (isDocker && hasImage) {
-    options.push({ value: "discover", label: noumena.purple("Discover tools"), hint: "Query container for available tools" });
+  if ((isDocker && hasImage) || (!isDocker && service.type === "MCP_STDIO" && service.command)) {
+    options.push({ value: "discover", label: noumena.purple("Discover tools"), hint: "Query service for available tools" });
   }
   options.push({ value: "info", label: "View details" });
   options.push({ value: "delete", label: noumena.purpleDim("Delete service") });
@@ -1193,8 +1194,8 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
       console.log();
       p.log.error("Failed to pull image");
     }
-  } else if (action === "discover" && imageName) {
-    const toolCount = await discoverAndSaveTools(service.name, imageName);
+  } else if (action === "discover") {
+    const toolCount = await discoverAndSaveTools(service);
     if (toolCount > 0) {
       p.log.info("All discovered tools are disabled by default. Use 'Manage tools' to enable them.");
     }
@@ -1422,20 +1423,91 @@ async function viewServiceInfo(service: ServiceDefinition): Promise<void> {
 }
 
 /**
- * Discover tools from an MCP container and save them to config.
+ * Fetch credentials for a service from Vault, returning env vars.
+ * Returns empty object if no credentials configured or Vault unavailable.
+ */
+async function fetchCredentialsForService(serviceName: string): Promise<Record<string, string>> {
+  try {
+    const credConfig = loadCredentialsConfig();
+
+    // Look up credential name from service_defaults
+    const credentialName = credConfig.service_defaults[serviceName];
+    if (!credentialName) return {};
+
+    // Look up credential mapping
+    const credential = credConfig.credentials[credentialName];
+    if (!credential) return {};
+
+    // Resolve vault_path placeholders
+    const vaultPath = credential.vault_path
+      .replace("{tenant}", "default")
+      .replace("{user}", "admin");
+
+    // Fetch secret from Vault
+    const secrets = await getSecretFromVault(vaultPath);
+    if (!secrets) return {};
+
+    // Map Vault fields to env var names using injection mapping
+    const envVars: Record<string, string> = {};
+    if (credential.injection?.mapping) {
+      for (const [vaultField, envName] of Object.entries(credential.injection.mapping)) {
+        if (secrets[vaultField]) {
+          envVars[envName] = secrets[vaultField];
+        }
+      }
+    }
+
+    return envVars;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Discover tools from an MCP service and save them to config.
+ * Supports both Docker containers and command-based services (npx, etc.)
  * Returns the number of tools discovered.
  */
-async function discoverAndSaveTools(serviceName: string, imageName: string): Promise<number> {
+async function discoverAndSaveTools(service: ServiceDefinition): Promise<number> {
   const s = p.spinner();
-  s.start(`Discovering tools from ${imageName}...`);
+  const imageName = getDockerImageName(service);
+  const isDocker = imageName !== null;
 
-  const result = discoverToolsFromContainer(imageName);
+  let result: { success: boolean; tools: any[]; serverInfo?: { name: string; version: string }; error?: string };
+
+  if (isDocker && imageName) {
+    // Docker-based service
+    s.start(`Discovering tools from ${imageName}...`);
+    result = discoverToolsFromContainer(imageName);
+  } else if (service.command && service.type === "MCP_STDIO") {
+    // Command-based service (npx, node, python, etc.)
+    const label = service.args?.length ? `${service.command} ${service.args[0]}` : service.command;
+    s.start(`Discovering tools from ${label}...`);
+
+    // Fetch credentials from Vault if needed
+    let env: Record<string, string> = {};
+    if (service.requiresCredentials) {
+      try {
+        env = await fetchCredentialsForService(service.name);
+        if (Object.keys(env).length > 0) {
+          s.stop(noumena.success(`Fetched ${Object.keys(env).length} credential(s) from Vault`));
+          s.start(`Discovering tools from ${label}...`);
+        }
+      } catch {
+        // Continue without credentials — discovery may still work
+      }
+    }
+
+    result = discoverToolsFromCommand(service.command, service.args || [], env);
+  } else {
+    return 0;
+  }
 
   if (!result.success || result.tools.length === 0) {
     s.stop(noumena.warning(
       result.error
         ? `Could not discover tools: ${result.error}`
-        : "No tools found (container may require credentials)"
+        : "No tools found (service may require credentials)"
     ));
     return 0;
   }
@@ -1444,7 +1516,7 @@ async function discoverAndSaveTools(serviceName: string, imageName: string): Pro
   const toolDefs = discoveredToToolDefinitions(result.tools, false);
 
   // Save to config
-  const saved = updateServiceTools(serviceName, toolDefs);
+  const saved = updateServiceTools(service.name, toolDefs);
   if (saved) {
     const serverLabel = result.serverInfo
       ? ` (${result.serverInfo.name} v${result.serverInfo.version})`
@@ -1592,7 +1664,7 @@ async function searchDockerHubFlow(): Promise<void> {
   // Auto-discover tools from the container
   const imagePulled = !p.isCancel(shouldPull) && shouldPull;
   if (imagePulled || imageExists(`mcp/${server.name}`)) {
-    const toolCount = await discoverAndSaveTools(server.name, `mcp/${server.name}`);
+    const toolCount = await discoverAndSaveTools(newService);
     if (toolCount === 0) {
       // Add a default placeholder if discovery failed
       const { addTool } = await import("./lib/config.js");
@@ -2141,7 +2213,7 @@ async function addDockerServiceFlow(): Promise<void> {
 
   // Auto-discover tools from the container
   if (imageExists(imageNameStr)) {
-    const toolCount = await discoverAndSaveTools(serviceNameStr, imageNameStr);
+    const toolCount = await discoverAndSaveTools(newService);
     if (toolCount === 0) {
       const { addTool } = await import("./lib/config.js");
       addTool(serviceNameStr, {

@@ -1142,6 +1142,104 @@ export function discoverToolsFromContainer(imageName: string): {
 }
 
 /**
+ * Discover tools from an MCP service by spawning its command and querying via STDIO.
+ * Works for any command-based service (npx, node, python, etc.)
+ */
+export function discoverToolsFromCommand(
+  command: string,
+  args: string[],
+  env?: Record<string, string>
+): {
+  success: boolean;
+  tools: DiscoveredTool[];
+  serverInfo?: { name: string; version: string };
+  error?: string;
+} {
+  try {
+    const initMsg = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "noumena-tui-discovery", version: "1.0.0" },
+      },
+    });
+
+    const initializedMsg = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+
+    const toolsListMsg = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    });
+
+    const escapedArgs = args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+    const script = `(echo '${initMsg}'; sleep 1; echo '${initializedMsg}'; sleep 0.5; echo '${toolsListMsg}') | ${command} ${escapedArgs} 2>/dev/null`;
+
+    const output = execSync(script, {
+      encoding: "utf-8",
+      timeout: 30000,
+      shell: "/bin/bash",
+      env: { ...process.env, ...env },
+    }).trim();
+
+    if (!output) {
+      return { success: false, tools: [], error: "No output from command" };
+    }
+
+    const lines = output.split("\n").filter((l) => l.trim().length > 0);
+
+    let serverInfo: { name: string; version: string } | undefined;
+    let tools: DiscoveredTool[] = [];
+
+    for (const line of lines) {
+      try {
+        const response = JSON.parse(line);
+
+        if (response.id === 1 && response.result?.serverInfo) {
+          serverInfo = {
+            name: response.result.serverInfo.name || "unknown",
+            version: response.result.serverInfo.version || "unknown",
+          };
+        }
+
+        if (response.id === 2 && response.result?.tools) {
+          tools = response.result.tools.map((tool: any) => ({
+            name: tool.name,
+            description: tool.description || "No description",
+            inputSchema: {
+              type: tool.inputSchema?.type || "object",
+              properties: tool.inputSchema?.properties || {},
+              required: tool.inputSchema?.required || [],
+            },
+          }));
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return { success: true, tools, serverInfo };
+  } catch (error: any) {
+    const msg = error.message || "Unknown error";
+    if (msg.includes("timed out")) {
+      return {
+        success: false,
+        tools: [],
+        error: "Command timed out (30s)",
+      };
+    }
+    return { success: false, tools: [], error: msg.substring(0, 200) };
+  }
+}
+
+/**
  * Convert discovered tools to ToolDefinition format for config
  */
 export function discoveredToToolDefinitions(
