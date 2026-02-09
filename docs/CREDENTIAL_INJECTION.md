@@ -61,6 +61,7 @@ Edit `configs/credentials.yaml`:
 
 ```yaml
 mode: simple
+tenant: acme
 
 credentials:
   work_github:
@@ -69,7 +70,7 @@ credentials:
       type: env
       mapping:
         token: "GITHUB_TOKEN"
-  
+
   personal_github:
     vault_path: "secret/data/tenants/{tenant}/users/{user}/github/personal"
     injection:
@@ -77,11 +78,21 @@ credentials:
       mapping:
         token: "GITHUB_TOKEN"
 
+  google_gemini:
+    vault_path: "secret/data/tenants/{tenant}/services/gemini/api"
+    injection:
+      type: env
+      mapping:
+        api_key: "GEMINI_API_KEY"
+
 service_defaults:
   github: work_github
   slack: prod_slack
+  gemini: google_gemini
   duckduckgo: default
 ```
+
+The `tenant` field specifies the default tenant for Vault path resolution. The `{tenant}` placeholder in `vault_path` is replaced with this value at runtime.
 
 ### How It Works
 
@@ -288,10 +299,12 @@ credentials:
         api_key: "GITHUB_API_KEY"
 ```
 
-**Result:** Process spawned with:
+**Result:** For Docker-based STDIO services, credentials are injected as `-e` flags:
 ```bash
-GITHUB_TOKEN=ghp_xxx GITHUB_API_KEY=sk_xxx mcp-server
+docker run -i --rm -e GITHUB_TOKEN=ghp_xxx -e GITHUB_API_KEY=sk_xxx mcp/github
 ```
+
+For non-Docker processes, credentials are injected as process environment variables.
 
 ### HTTP Headers (HTTP/WebSocket Transport)
 
@@ -338,10 +351,11 @@ Edit `configs/credentials.yaml`:
 
 ```yaml
 mode: simple
+tenant: acme
 
 credentials:
   my_github:
-    vault_path: "secret/data/tenants/default/users/me/github/personal"
+    vault_path: "secret/data/tenants/{tenant}/users/me/github/personal"
     injection:
       type: env
       mapping:
@@ -519,6 +533,17 @@ cd tui && npm start
 ---
 
 ## Future Enhancements
+
+### Credential Path Standardization (TODO)
+
+The Vault path convention needs further analysis and standardization. Currently, different services may use different path structures (e.g., `tenants/{tenant}/services/{service}/api` vs `tenants/{tenant}/users/{user}/{service}/work`). Key questions to resolve:
+
+- Should all service-level credentials follow `tenants/{tenant}/services/{service}/{credential_name}`?
+- Should user-level credentials follow `tenants/{tenant}/users/{user}/{service}/{credential_name}`?
+- How should the TUI's credential onboarding flow map service names to Vault paths consistently?
+- Should the `service_defaults` mapping in `credentials.yaml` match credential names exactly, or should there be a fuzzy lookup?
+
+This analysis should align the TUI onboarding flow, the Credential Proxy's path resolution, and the Vault storage conventions.
 
 ### Planned for V3 (Enterprise)
 

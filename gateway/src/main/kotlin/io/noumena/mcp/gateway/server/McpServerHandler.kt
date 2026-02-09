@@ -26,7 +26,8 @@ private val logger = KotlinLogging.logger {}
 class McpServerHandler(
     private val nplClient: NplClient = NplClient(),
     private val upstreamRouter: UpstreamRouter,
-    private val upstreamSessionManager: UpstreamSessionManager
+    private val upstreamSessionManager: UpstreamSessionManager,
+    private val defaultTenantId: String = System.getenv("DEFAULT_TENANT_ID") ?: "default"
 ) {
     
     private val json = Json {
@@ -183,7 +184,7 @@ class McpServerHandler(
         }
 
         // Step 3: Forward to upstream MCP service with user context for credentials
-        val userContext = UserContext(userId = userId, tenantId = "default")
+        val userContext = UserContext(userId = userId, tenantId = defaultTenantId)
         val upstreamResult = upstreamSessionManager.forwardToolCall(resolved, arguments, userContext)
         val durationMs = System.currentTimeMillis() - startTime
 

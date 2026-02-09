@@ -1198,7 +1198,10 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
     const toolCount = await discoverAndSaveTools(service);
     if (toolCount > 0) {
       p.log.info("All discovered tools are disabled by default. Use 'Manage tools' to enable them.");
+    } else if (service.requiresCredentials) {
+      p.log.warn("Check that credentials are configured in Credential Management and stored in Vault.");
     }
+    await p.confirm({ message: "Press Enter to continue", initialValue: true });
   } else if (action === "tools") {
     await manageToolsForService(service);
   } else if (action === "info") {
@@ -1425,22 +1428,41 @@ async function viewServiceInfo(service: ServiceDefinition): Promise<void> {
 /**
  * Fetch credentials for a service from Vault, returning env vars.
  * Returns empty object if no credentials configured or Vault unavailable.
+ *
+ * Robust lookup: tries the exact service_defaults mapping first, then falls
+ * back to matching by service name directly, and finally by partial name
+ * match (e.g. service "gemini" finds credential "google_gemini").
  */
 async function fetchCredentialsForService(serviceName: string): Promise<Record<string, string>> {
   try {
     const credConfig = loadCredentialsConfig();
+    const creds = credConfig.credentials || {};
 
-    // Look up credential name from service_defaults
-    const credentialName = credConfig.service_defaults[serviceName];
-    if (!credentialName) return {};
+    // Step 1: service_defaults[serviceName] → exact credential lookup
+    const mappedName = credConfig.service_defaults[serviceName];
+    let credential = mappedName ? creds[mappedName] : undefined;
 
-    // Look up credential mapping
-    const credential = credConfig.credentials[credentialName];
+    // Step 2: try service name directly as credential key
+    if (!credential) {
+      credential = creds[serviceName];
+    }
+
+    // Step 3: partial match — credential name contains service name or vice versa
+    if (!credential) {
+      const candidates = Object.entries(creds).filter(
+        ([key]) => key.includes(serviceName) || serviceName.includes(key)
+      );
+      if (candidates.length === 1) {
+        credential = candidates[0][1];
+      }
+    }
+
     if (!credential) return {};
 
-    // Resolve vault_path placeholders
+    // Resolve vault_path placeholders using configured tenant
+    const tenant = credConfig.tenant || "default";
     const vaultPath = credential.vault_path
-      .replace("{tenant}", "default")
+      .replace("{tenant}", tenant)
       .replace("{user}", "admin");
 
     // Fetch secret from Vault
@@ -1492,9 +1514,13 @@ async function discoverAndSaveTools(service: ServiceDefinition): Promise<number>
         if (Object.keys(env).length > 0) {
           s.stop(noumena.success(`Fetched ${Object.keys(env).length} credential(s) from Vault`));
           s.start(`Discovering tools from ${label}...`);
+        } else {
+          s.stop(noumena.warning("No credentials found in Vault — discovery may fail"));
+          s.start(`Discovering tools from ${label} (without credentials)...`);
         }
       } catch {
-        // Continue without credentials — discovery may still work
+        s.stop(noumena.warning("Could not reach Vault — discovery may fail"));
+        s.start(`Discovering tools from ${label} (without credentials)...`);
       }
     }
 
@@ -1708,8 +1734,8 @@ const SERVICE_TEMPLATES: Record<string, {
   gemini: {
     displayName: "Google Gemini",
     description: "Google Gemini AI API for text generation and chat",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-google-gemini"],
+    command: "docker run -i --rm node:22-slim npx",
+    args: ["-y", "@houtini/gemini-mcp"],
     requiresCredentials: true,
     credentialName: "gemini",
     setupGuide: "You'll need a Gemini API key from https://aistudio.google.com/apikey",
@@ -1924,7 +1950,7 @@ async function addNpmServiceFlow(): Promise<void> {
   console.log();
   console.log(noumena.textDim("  Examples:"));
   console.log(noumena.textDim("    • @modelcontextprotocol/server-github"));
-  console.log(noumena.textDim("    • @modelcontextprotocol/server-google-gemini"));
+  console.log(noumena.textDim("    • @houtini/gemini-mcp"));
   console.log(noumena.textDim("    • my-custom-mcp-server"));
   console.log();
 
@@ -3484,10 +3510,11 @@ async function storeSecretsInVaultFlow(
   console.log(noumena.textDim("  Securely store credential values for this mapping"));
   console.log();
   
-  // Ask for tenant ID
+  // Ask for tenant ID (default from credentials.yaml)
+  const credConfig = loadCredentialsConfig();
   const tenantId = await p.text({
     message: "Tenant ID:",
-    initialValue: "default",
+    initialValue: credConfig.tenant || "default",
     validate: (v) => v ? undefined : "Tenant ID is required",
   });
   

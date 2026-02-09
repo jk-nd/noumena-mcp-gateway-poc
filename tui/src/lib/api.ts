@@ -1144,6 +1144,12 @@ export function discoverToolsFromContainer(imageName: string): {
 /**
  * Discover tools from an MCP service by spawning its command and querying via STDIO.
  * Works for any command-based service (npx, node, python, etc.)
+ *
+ * Uses a wrapper script that:
+ *  1. Starts the MCP server in the background
+ *  2. Sends the 3-message handshake via stdin
+ *  3. Collects stdout until the tools/list response arrives (or timeout)
+ *  4. Kills the server process before exiting
  */
 export function discoverToolsFromCommand(
   command: string,
@@ -1180,11 +1186,98 @@ export function discoverToolsFromCommand(
     });
 
     const escapedArgs = args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-    const script = `(echo '${initMsg}'; sleep 1; echo '${initializedMsg}'; sleep 0.5; echo '${toolsListMsg}') | ${command} ${escapedArgs} 2>/dev/null`;
 
-    const output = execSync(script, {
+    // Wrapper script: run MCP server in background, feed it messages via a
+    // named pipe, read stdout line-by-line, and exit (killing the server)
+    // as soon as we see the tools/list response (id:2) or hit 60s.
+    const script = `
+FIFO=$(mktemp -u /tmp/mcp-discovery.XXXXXX)
+mkfifo "$FIFO"
+${command} ${escapedArgs} < "$FIFO" 2>/dev/null &
+SERVER_PID=$!
+
+# Feed the three MCP messages
+(
+  sleep 2
+  echo '${initMsg}'
+  sleep 2
+  echo '${initializedMsg}'
+  sleep 1
+  echo '${toolsListMsg}'
+  sleep 30
+) > "$FIFO" &
+FEED_PID=$!
+
+# Read stdout, exit once we see the tools/list response
+SECONDS=0
+while IFS= read -r line; do
+  echo "$line"
+  if echo "$line" | grep -q '"id":2'; then
+    break
+  fi
+  if [ $SECONDS -ge 60 ]; then
+    break
+  fi
+done < /proc/$SERVER_PID/fd/1 2>/dev/null || \
+while IFS= read -r line; do
+  echo "$line"
+  if echo "$line" | grep -q '"id":2'; then
+    break
+  fi
+  if [ $SECONDS -ge 60 ]; then
+    break
+  fi
+done
+
+kill $FEED_PID 2>/dev/null
+kill $SERVER_PID 2>/dev/null
+rm -f "$FIFO"
+wait $SERVER_PID 2>/dev/null
+`;
+
+    // On macOS /proc doesn't exist — use a simpler approach:
+    // pipe messages with generous sleeps, capture all stdout, kill after.
+    const macScript = `
+OUTFILE=$(mktemp /tmp/mcp-out.XXXXXX)
+FIFO=$(mktemp -u /tmp/mcp-fifo.XXXXXX)
+mkfifo "$FIFO"
+
+${command} ${escapedArgs} < "$FIFO" > "$OUTFILE" 2>/dev/null &
+SERVER_PID=$!
+
+# Feed MCP messages with pauses for npx startup
+(
+  sleep 3
+  printf '%s\\n' '${initMsg}'
+  sleep 2
+  printf '%s\\n' '${initializedMsg}'
+  sleep 1
+  printf '%s\\n' '${toolsListMsg}'
+  sleep 5
+) > "$FIFO" &
+FEED_PID=$!
+
+# Poll for the tools/list response (id:2) or timeout at 45s
+ELAPSED=0
+while [ $ELAPSED -lt 45 ]; do
+  if grep -q '"id":2' "$OUTFILE" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
+done
+
+kill $FEED_PID 2>/dev/null
+kill $SERVER_PID 2>/dev/null
+wait $FEED_PID 2>/dev/null
+wait $SERVER_PID 2>/dev/null
+cat "$OUTFILE"
+rm -f "$OUTFILE" "$FIFO"
+`;
+
+    const output = execSync(macScript, {
       encoding: "utf-8",
-      timeout: 30000,
+      timeout: 60000,
       shell: "/bin/bash",
       env: { ...process.env, ...env },
     }).trim();
@@ -1232,7 +1325,7 @@ export function discoverToolsFromCommand(
       return {
         success: false,
         tools: [],
-        error: "Command timed out (30s)",
+        error: "Command timed out (60s)",
       };
     }
     return { success: false, tools: [], error: msg.substring(0, 200) };
@@ -1942,6 +2035,25 @@ export async function syncUserAccessToNpl(userId: string, tools: Record<string, 
 
 const VAULT_URL = process.env.VAULT_ADDR || "http://localhost:8200";
 const VAULT_TOKEN = process.env.VAULT_TOKEN || "dev-token";
+
+/**
+ * List tenant IDs from Vault's secret/metadata/tenants/ path.
+ * Returns e.g. ["acme"] — strips trailing slashes from keys.
+ */
+export async function listVaultTenants(): Promise<string[]> {
+  try {
+    const response = await fetch(`${VAULT_URL}/v1/secret/metadata/tenants/`, {
+      method: "LIST",
+      headers: { "X-Vault-Token": VAULT_TOKEN },
+    });
+    if (!response.ok) return [];
+    const result = await response.json();
+    const keys: string[] = result.data?.keys || [];
+    return keys.map((k) => k.replace(/\/$/, ""));
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Store a secret in Vault

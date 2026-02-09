@@ -245,18 +245,19 @@ The Gateway connects to upstream MCP services using the transport appropriate fo
 
 | Type | Config Value | How It Works |
 |------|-------------|--------------|
-| **STDIO** | `MCP_STDIO` | Gateway runs `docker run -i --rm <image>` and communicates via stdin/stdout. Containers are ephemeral — spawned on first tool call, destroyed after. |
+| **STDIO** | `MCP_STDIO` | Gateway runs the configured command (e.g., `docker run -i --rm <image>` or `docker run -i --rm node:22-slim npx -y <package>`) and communicates via stdin/stdout. Containers are ephemeral — spawned on first tool call, destroyed after. |
 | **HTTP** | `MCP_HTTP` | Gateway sends HTTP POST requests to the upstream's endpoint URL. Uses MCP Streamable HTTP transport. |
 | **WebSocket** | `MCP_WS` | Gateway opens a persistent WebSocket connection to the upstream's endpoint URL. |
 
 ### STDIO Transport Details
 
 For STDIO services, the Gateway:
-1. Spawns a Docker container on first tool call: `docker run -i --rm <image>`
+1. Spawns a Docker container on first tool call using the configured command (e.g., `docker run -i --rm <image>` for Docker images, or `docker run -i --rm node:22-slim npx -y <package>` for NPM packages)
 2. Communicates using the MCP SDK's `StdioClientTransport`
 3. Manages the process lifecycle (tracks PID, cleans up on shutdown)
 4. Requires Docker socket mounted in the Gateway container (`/var/run/docker.sock`)
 5. Requires Docker CLI installed in the Gateway image
+6. For services requiring credentials, injects them as `-e KEY=VALUE` Docker flags (inserted after `docker run`)
 
 ### Configuration Example
 
@@ -269,6 +270,17 @@ services:
     enabled: true
     tools:
       - name: search
+        enabled: true
+
+  - name: gemini
+    displayName: Google Gemini
+    type: MCP_STDIO
+    command: "docker run -i --rm node:22-slim npx"
+    args: ["-y", "@houtini/gemini-mcp"]
+    requiresCredentials: true
+    enabled: true
+    tools:
+      - name: gemini_chat
         enabled: true
 
   - name: github
@@ -478,7 +490,7 @@ All server-to-server. Agent is not involved and never sees any tokens.
 | Credential Proxy | Kotlin, Ktor |
 | Secrets | HashiCorp Vault |
 | Auth | Keycloak (OIDC) |
-| Upstream MCP | Docker containers / NPM packages (any MCP server) |
+| Upstream MCP | Docker containers / NPM packages via Docker-wrapped npx (any MCP server) |
 | TUI | TypeScript, @clack/prompts |
 | Container Orchestration | Docker Compose |
 

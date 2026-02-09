@@ -37,6 +37,7 @@ enum class CredentialMode {
 @Serializable
 data class CredentialConfig(
     val mode: String = "simple",
+    val tenant: String = "default",
     val credentials: Map<String, CredentialDefinition> = emptyMap(),
     val service_defaults: Map<String, String> = emptyMap(),
     val default_credential: CredentialDefinition? = null

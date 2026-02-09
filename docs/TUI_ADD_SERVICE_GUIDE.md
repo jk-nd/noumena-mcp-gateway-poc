@@ -77,7 +77,7 @@ Set up credentials now? Yes
 ```
 Select service type: NPM Package
 
-NPM package name: @modelcontextprotocol/server-google-gemini
+NPM package name: @houtini/gemini-mcp
 Service name: gemini [auto-suggested]
 Display name: Gemini [auto-filled]
 Description: MCP service: Gemini [default]
@@ -96,14 +96,16 @@ Does this service require credentials? Yes
   displayName: "Gemini"
   type: "MCP_STDIO"
   enabled: true
-  command: "npx"
+  command: "docker run -i --rm node:22-slim npx"
   args:
     - "-y"
-    - "@modelcontextprotocol/server-google-gemini"
+    - "@houtini/gemini-mcp"
   requiresCredentials: true
   description: "MCP service: Gemini"
   tools: []
 ```
+
+> **Note:** NPM-based services use the `docker run -i --rm node:22-slim npx` command pattern so the Gateway can run them inside a Docker container with Node.js available. This avoids requiring Node.js in the Gateway container itself.
 
 ---
 
@@ -162,10 +164,11 @@ Service is disabled by default. Select it to enable and configure tools.
    Main Menu → [Select service] → Enable service
    ```
 
-5. **Discover Tools** (optional, for better tool metadata)
+5. **Discover Tools** (recommended, discovers real tool metadata)
    ```
    Main Menu → [Select service] → Discover tools
    ```
+   Works for both Docker and NPM/command-based services. For services requiring credentials, the TUI fetches them transiently from Vault during discovery.
 
 ---
 
@@ -214,7 +217,7 @@ const SERVICE_TEMPLATES = {
   my_service: {
     displayName: "My Service",
     description: "What my service does",
-    command: "npx",
+    command: "docker run -i --rm node:22-slim npx",
     args: ["-y", "@myorg/mcp-server-myservice"],
     requiresCredentials: true,
     credentialName: "my_service",
@@ -223,6 +226,8 @@ const SERVICE_TEMPLATES = {
   // ... existing templates
 };
 ```
+
+> **Important:** Use `docker run -i --rm node:22-slim npx` as the command for NPM-based services (not bare `npx`), since the Gateway runs inside Docker and does not have Node.js installed.
 
 Then rebuild the TUI:
 ```bash
@@ -299,4 +304,4 @@ cd tui && npm run build
 
 ---
 
-*Last updated: Feb 8, 2026*
+*Last updated: Feb 9, 2026*

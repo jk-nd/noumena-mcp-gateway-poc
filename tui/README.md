@@ -73,7 +73,7 @@ When you select a service:
 | **Enable/Disable** | Toggle service (syncs with NPL policy) |
 | **Pull image** | Download Docker image (if not pulled) |
 | **Start/Stop container** | Control container (HTTP services only) |
-| **Discover tools** | Query container to find available tools |
+| **Discover tools** | Query service for available tools (Docker and NPM/command-based) |
 | **Manage tools** | Enable/disable individual tools |
 | **View details** | Show service configuration |
 | **Delete** | Remove service (removes from NPL and config) |
@@ -113,6 +113,9 @@ If the NPL write fails, `services.yaml` is unchanged and an error is shown. The 
 | `KEYCLOAK_URL` | `http://localhost:11000` | Keycloak URL |
 | `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
 | `KEYCLOAK_CLIENT_ID` | `mcpgateway` | Keycloak client ID |
+| `VAULT_ADDR` | `http://localhost:8200` | Vault server URL |
+| `VAULT_TOKEN` | (none) | Vault access token |
+| `CREDENTIALS_CONFIG_PATH` | `../configs/credentials.yaml` | Path to credentials config |
 
 ## Architecture
 
@@ -163,12 +166,19 @@ The wizard shows Docker image status for MCP services:
 
 ### STDIO Services (Most Common)
 
-Most MCP services use STDIO transport (`docker run -i`), including:
+Most MCP services use STDIO transport, including both Docker-based and NPM-based servers:
+
+**Docker-based examples:**
 - `mcp/duckduckgo`
 - `mcp/github`
 - `mcp/slack`
 - `mcp/fetch`
-- etc.
+
+**NPM-based examples (run via Docker-wrapped npx):**
+- `@houtini/gemini-mcp` (Google Gemini)
+- Other npm MCP packages
+
+NPM-based services use the pattern `docker run -i --rm node:22-slim npx -y <package>` so they run inside a Docker container with Node.js available, even though the Gateway container itself has no Node.js runtime.
 
 **How STDIO services work:**
 - Containers are **ephemeral** and expect stdin/stdout communication
@@ -176,11 +186,22 @@ Most MCP services use STDIO transport (`docker run -i`), including:
 - Containers automatically exit when the request completes
 - **You cannot manually start/stop STDIO containers** - they require an active stdin/stdout pipe
 - The TUI does not show start/stop options for STDIO services
+- For services requiring credentials, the Gateway injects them as `-e KEY=VALUE` Docker flags
 
 **What this means:**
-- Just pull the image and enable the service
+- For Docker services: pull the image and enable the service
+- For NPM services: just enable the service (no image pull needed)
 - The Gateway handles all container lifecycle management
 - No need to worry about starting/stopping containers
+
+### Tool Discovery
+
+The TUI can discover tools from any STDIO service:
+
+- **Docker services**: Runs the Docker image and queries via MCP JSON-RPC handshake
+- **NPM/command services**: Spawns the command with credentials (fetched transiently from Vault) and queries via the same handshake
+
+For services requiring credentials (e.g., Google Gemini needs `GEMINI_API_KEY`), the TUI fetches the API key from Vault at discovery time, holds it in memory only for the duration of the discovery, and passes it as an environment variable to the spawned process.
 
 ### HTTP Services (Less Common)
 

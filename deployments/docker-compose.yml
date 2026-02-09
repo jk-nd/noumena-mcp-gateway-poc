@@ -249,6 +249,7 @@ services:
       - SERVICES_CONFIG_PATH=/app/configs/services.yaml
       # Credential Proxy
       - CREDENTIAL_PROXY_URL=http://credential-proxy:9002
+      - DEFAULT_TENANT_ID=acme
     depends_on:
       npl-engine:
         condition: service_healthy

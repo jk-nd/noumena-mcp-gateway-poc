@@ -243,16 +243,34 @@ class UpstreamSessionManager(
         }
 
         // Step 2: Spawn process with injected credentials
-        val processBuilder = ProcessBuilder(parts)
+        // For `docker run` commands, inject credentials as -e flags (host env vars
+        // are not propagated into Docker containers). For direct commands (npx, node,
+        // python, etc.), inject as process environment variables.
+        val isDockerRun = command.startsWith("docker run")
+        val finalParts = if (isDockerRun && credentials.isNotEmpty()) {
+            // Insert -e KEY=VALUE flags right after "docker run"
+            val envFlags = credentials.flatMap { (key, value) -> listOf("-e", "$key=$value") }
+            val dockerRunIdx = parts.indexOfFirst { it == "run" }
+            val before = parts.subList(0, dockerRunIdx + 1)
+            val after = parts.subList(dockerRunIdx + 1, parts.size)
+            before + envFlags + after
+        } else {
+            parts
+        }
+
+        val processBuilder = ProcessBuilder(finalParts)
             .redirectErrorStream(false)
 
-        if (credentials.isNotEmpty()) {
+        if (credentials.isNotEmpty() && !isDockerRun) {
+            // Direct command: inject as process environment variables
             val env = processBuilder.environment()
             credentials.forEach { (key, value) ->
                 env[key] = value
                 logger.debug { "Injected credential env var: $key" }
             }
-            logger.info { "Injected ${credentials.size} credential fields for '${service.name}'" }
+        }
+        if (credentials.isNotEmpty()) {
+            logger.info { "Injected ${credentials.size} credential fields for '${service.name}' (docker=${isDockerRun})" }
         }
 
         val process = processBuilder.start()

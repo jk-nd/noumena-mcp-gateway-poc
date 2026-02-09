@@ -544,6 +544,7 @@ interface CredentialMapping {
 
 interface CredentialConfig {
   mode: string;
+  tenant: string;
   credentials: Record<string, CredentialMapping>;
   service_defaults: Record<string, string>;
   default_credential?: CredentialMapping;
@@ -565,6 +566,7 @@ export function loadCredentialsConfig(): CredentialConfig {
     // Return default structure if file doesn't exist
     return {
       mode: "simple",
+      tenant: "default",
       credentials: {},
       service_defaults: {},
     };
