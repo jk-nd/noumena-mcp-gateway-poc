@@ -135,28 +135,36 @@ Run `NPL Bootstrap` in TUI to:
 
 **Granular (per-tool):**
 ```typescript
+// 1. NPL first (source of truth)
 await grantToolInNpl(userId, "duckduckgo", "search");
-grantToolToUser(userId, "duckduckgo", "search"); // Config
+// 2. YAML second (persistent cache)
+grantToolToUser(userId, "duckduckgo", "search");
 ```
 
 **Wildcard (all tools):**
 ```typescript
+// 1. NPL first (source of truth)
 await grantAllToolsForServiceInNpl(userId, "slack");
-grantAllToolsToUser(userId, "slack"); // Config
+// 2. YAML second (persistent cache)
+grantAllToolsToUser(userId, "slack");
 ```
 
 ### Revoking Access
 
 **Per-tool:**
 ```typescript
+// 1. NPL first (source of truth)
 await revokeToolInNpl(userId, "duckduckgo", "search");
-revokeToolFromUser(userId, "duckduckgo", "search"); // Config
+// 2. YAML second (persistent cache)
+revokeToolFromUser(userId, "duckduckgo", "search");
 ```
 
 **Service-wide:**
 ```typescript
+// 1. NPL first (source of truth)
 await revokeServiceInNpl(userId, "slack");
-revokeServiceFromUser(userId, "slack"); // Config
+// 2. YAML second (persistent cache)
+revokeServiceFromUser(userId, "slack");
 ```
 
 ### Deleting a User

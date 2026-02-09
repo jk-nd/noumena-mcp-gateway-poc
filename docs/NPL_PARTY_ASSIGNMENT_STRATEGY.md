@@ -88,18 +88,20 @@ This design treats humans and AI identically from a governance perspective. User
 
 ---
 
-### ServiceRegistry - `protocol[pAdmin]`
+### ServiceRegistry - `protocol[pAdmin, pGateway]`
 
 **Purpose**: Organization-wide service enablement
 
 ```typescript
 "@parties": {
-  "pAdmin": { "role": "admin" }     // Only admin enables/disables services
+  "pAdmin": { "role": "admin" },      // Admin enables/disables services
+  "pGateway": { "role": "gateway" }   // Gateway queries enabled services at runtime
 }
 ```
 
 **Permissions**:
-- `pAdmin`: `enableService()`, `disableService()`, `isServiceEnabled()`
+- `pAdmin`: `enableService()`, `disableService()`
+- `pAdmin | pGateway`: `isServiceEnabled()`, `getEnabledServices()`
 
 ---
 
@@ -163,6 +165,7 @@ The Gateway authenticates as a **system service** with `role: gateway`:
 ```
 
 This allows the Gateway to call:
+- `ServiceRegistry.getEnabledServices()` as `pGateway`
 - `ToolPolicy.checkAccess()` as `pGateway`
 - `UserToolAccess.hasAccess()` as `pGateway`
 - `CredentialInjectionPolicy.selectCredential()` as `pGateway`
@@ -275,11 +278,13 @@ As the system evolves, you may add:
 
 ```typescript
 // Admin-only protocols
-ServiceRegistry:    { "pAdmin": { "role": "admin" } }
 UserRegistry:       { "pAdmin": { "role": "admin" } }
 
 // Admin + Gateway protocols
-ToolPolicy:         { "pAdmin": { "role": "admin" }, 
+ServiceRegistry:    { "pAdmin": { "role": "admin" },
+                      "pGateway": { "role": "gateway" } }
+
+ToolPolicy:         { "pAdmin": { "role": "admin" },
                       "pGateway": { "role": "gateway" } }
 
 UserToolAccess:     { "pAdmin": { "role": "admin" }, 

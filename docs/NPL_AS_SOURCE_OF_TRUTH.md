@@ -232,6 +232,25 @@ Tests should:
 
 ---
 
+## TUI Sync Pattern (NPL-First)
+
+The TUI follows an **NPL-first** pattern for all state changes:
+
+```
+User action in TUI
+    ↓
+1. Write to NPL                    ← Source of truth updated first
+2. If NPL succeeds → update services.yaml (persistent cache)
+3. Reload Gateway (best-effort)
+4. If YAML write fails → NPL still correct, gateway can recover on restart
+```
+
+If the NPL write fails, `services.yaml` is unchanged and an error is shown.
+
+The only exception is **YAML Import** (Configuration Manager > Import and apply from file), which intentionally overwrites NPL from a YAML file as a bulk admin operation.
+
+---
+
 ## Related Files
 
 - `gateway/src/main/kotlin/io/noumena/mcp/gateway/policy/NplClient.kt`

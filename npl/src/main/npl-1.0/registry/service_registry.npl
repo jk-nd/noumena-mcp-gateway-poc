@@ -2,22 +2,23 @@ package registry
 
 /**
  * ServiceRegistry - Master registry of available MCP services.
- * 
+ *
  * This is the organization-wide control layer. Admin enables/disables
  * entire services here. Tool protocols (like EmailTool) reference this
  * registry and check service availability before execution.
- * 
+ *
  * Fields:
  * - enabledServices: Set of enabled service identifiers (public, readable by referencing protocols)
- * 
+ *
  * @party pAdmin - Organization administrator
+ * @party pGateway - Gateway system service (read-only access for runtime queries)
  */
 @api
-protocol[pAdmin] ServiceRegistry() {
+protocol[pAdmin, pGateway] ServiceRegistry() {
     initial state active;
-    
+
     var enabledServices: Set<Text> = setOf<Text>();
-    
+
     /**
      * Enable a service for the organization.
      * @param serviceName The service identifier (e.g., "google_gmail")
@@ -26,7 +27,7 @@ protocol[pAdmin] ServiceRegistry() {
     permission[pAdmin] enableService(serviceName: Text) | active {
         enabledServices = enabledServices.with(serviceName);
     };
-    
+
     /**
      * Disable a service for the organization.
      * All tools using this service will be blocked.
@@ -36,23 +37,23 @@ protocol[pAdmin] ServiceRegistry() {
     permission[pAdmin] disableService(serviceName: Text) | active {
         enabledServices = enabledServices.without(serviceName);
     };
-    
+
     /**
      * Check if a service is enabled.
      * @param serviceName The service identifier
      * @return true if enabled
      */
     @api
-    permission[pAdmin] isServiceEnabled(serviceName: Text) returns Boolean | active {
+    permission[pAdmin | pGateway] isServiceEnabled(serviceName: Text) returns Boolean | active {
         return enabledServices.contains(serviceName);
     };
-    
+
     /**
      * Get all enabled services.
      * @return Set of enabled service identifiers
      */
     @api
-    permission[pAdmin] getEnabledServices() returns Set<Text> | active {
+    permission[pAdmin | pGateway] getEnabledServices() returns Set<Text> | active {
         return enabledServices;
     };
 }

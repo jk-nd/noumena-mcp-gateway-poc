@@ -10,7 +10,7 @@ Interactive CLI for managing MCP Gateway services, users, and credentials. Power
 - **Credential management** - Store secrets in Vault, configure tenant-level or user-level scopes
 - **Container control** - Pull Docker images, manage HTTP service containers
 - **Docker Hub search** - Find and add MCP servers from the `mcp/*` namespace
-- **Atomic operations** - All state changes sync to NPL with automatic rollback on failure
+- **NPL-first operations** - All state changes write to NPL first, then update services.yaml as persistent cache
 - **Real-time status** - Gateway connection, container, and NPL sync indicators
 
 ## Status Indicators
@@ -61,8 +61,7 @@ Select a service directly to manage it, or use these actions:
 |--------|-------------|
 | **+ Search Docker Hub** | Find and add MCP servers from the `mcp/*` namespace |
 | **+ Add custom image** | Add local or private registry Docker images |
-| **Reload config** | Reload services.yaml from disk |
-| **Reload Gateway** | Tell Gateway to reload its configuration |
+| **Configuration Manager** | View, edit, backup, import services.yaml |
 | **Quit** | Exit the wizard |
 
 ## Service Actions
@@ -89,14 +88,14 @@ When enabling a service, you're prompted to select which tools to enable:
 
 Or use **Enable all** / **Disable all** for bulk operations.
 
-### Gateway Reload
+### NPL-First Sync
 
 When you enable/disable a service or toggle individual tools, the TUI automatically:
-1. Saves the change to `services.yaml`
-2. Calls `POST /admin/services/reload` on the Gateway to refresh its cached configuration
-3. The Gateway immediately starts using the updated config for subsequent requests
+1. Writes the change to NPL (source of truth) first
+2. Updates `services.yaml` (persistent cache) on success
+3. Calls `POST /admin/services/reload` on the Gateway (best-effort)
 
-This means changes take effect instantly — no Gateway restart needed. If the reload fails (e.g. Gateway is down), the TUI warns you and the change will take effect on next Gateway restart.
+If the NPL write fails, `services.yaml` is unchanged and an error is shown. The Gateway reload is best-effort — if it fails (e.g. Gateway is down), changes take effect on next Gateway restart.
 
 ## Default Behavior
 
@@ -137,7 +136,7 @@ tui/
 
 ## NPL Integration
 
-All TUI operations are **atomic with rollback**: if the NPL sync fails, `services.yaml` changes are reverted and an error is displayed.
+All TUI operations follow the **NPL-first** pattern: NPL (source of truth) is written first, then `services.yaml` is updated as a persistent cache. If the NPL write fails, `services.yaml` remains unchanged.
 
 When you enable a service:
 - Service is registered in NPL ServiceRegistry

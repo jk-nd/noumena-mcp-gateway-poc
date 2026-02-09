@@ -242,6 +242,8 @@ services:
       # so login cookies stay on the same domain throughout the auth flow
       - KEYCLOAK_EXTERNAL_URL=http://keycloak:11000
       - GATEWAY_URL=http://gateway:8080
+      - GATEWAY_USERNAME=gateway
+      - GATEWAY_PASSWORD=Welcome123
       - DEV_MODE=false
       # Dynamic services configuration
       - SERVICES_CONFIG_PATH=/app/configs/services.yaml

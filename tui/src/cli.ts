@@ -8,7 +8,7 @@
 
 import * as p from "@clack/prompts";
 import chalk from "chalk";
-import { execSync, spawnSync } from "child_process";
+import { execSync } from "child_process";
 import { readFileSync } from "fs";
 import * as path from "path";
 import { 
@@ -91,8 +91,6 @@ const noumena = {
   grayDim: chalk.hex("#6B7280"),     // Darker gray for disabled items
 };
 
-// Track whether services.yaml has been modified since last Gateway reload
-let configDirty = false;
 
 /**
  * Display the header
@@ -267,11 +265,9 @@ async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<vo
     try {
       await reloadGatewayConfig();
       s.stop(noumena.success("Gateway reloaded"));
-      configDirty = false;
     } catch (err: any) {
       s.stop(noumena.purpleDim("Gateway reload failed"));
-      p.log.warn("NPL updated but Gateway reload failed - use 'Reload Gateway' manually");
-      configDirty = true;
+      p.log.warn("NPL updated but Gateway reload failed (gateway may not be running)");
     }
 
     // Pause so user can read the output
@@ -283,7 +279,6 @@ async function importFromYamlFlow(skipConfirmation: boolean = false): Promise<vo
     p.log.info("Make sure the NPL Engine is running and Keycloak is provisioned.");
     console.log();
     await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-    configDirty = true;
   }
 }
 
@@ -298,18 +293,12 @@ async function configurationManagerFlow(): Promise<void> {
   const path = await import("path");
   const configPath = getConfigPath();
   const configDir = path.dirname(configPath);
-  const nplReady = await isNplBootstrapped();
 
   while (true) {
     console.log();
-    console.log(noumena.purple("  Gateway Configuration Manager"));
-    console.log(noumena.textDim("  Manage Gateway config (services.yaml): Edit, Import to NPL, Backups"));
+    console.log(noumena.purple("  Configuration Manager"));
+    console.log(noumena.textDim("  Manage services.yaml: View, Edit, Backup, Import"));
     console.log();
-    
-    if (!nplReady) {
-      console.log(noumena.warning("  ⚠  NPL not initialized - use 'Sync Gateway Config to NPL' for first-time setup"));
-      console.log();
-    }
 
     // List available backups
     let backupFiles: string[] = [];
@@ -329,12 +318,13 @@ async function configurationManagerFlow(): Promise<void> {
       message: "Select action:",
       options: [
         { value: "back", label: noumena.textDim("← Back") },
-        { value: "---hdr-current", label: noumena.purple("── Gateway Configuration ──"), hint: "" },
-        { value: "manage-current", label: "  Edit services.yaml", hint: "View, Edit, Export current config" },
-        { value: "import-current", label: `  Sync Gateway Config to NPL  ${nplReady ? noumena.success("✓") : noumena.warning("⚠")}`, hint: "Load services.yaml into NPL" },
-        { value: "---hdr-backups", label: noumena.purple("── Backups & Advanced ──"), hint: "" },
-        { value: "view-backups", label: `  Browse backups  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "View and restore backups" },
-        { value: "import-file", label: "  Import from file...", hint: "Load config from custom YAML" },
+        { value: "view", label: "  View", hint: "Display current services.yaml" },
+        { value: "edit", label: "  Edit", hint: "Edit in $EDITOR, apply to NPL + Gateway" },
+        { value: "---sep1", label: noumena.grayDim("  ──────────"), hint: "" },
+        { value: "backup", label: "  Backup", hint: "Create timestamped backup" },
+        { value: "reinstate", label: `  Reinstate backup  ${backupCount > 0 ? `(${backupCount})` : noumena.grayDim("(0)")}`, hint: "Browse and restore from backup" },
+        { value: "---sep2", label: noumena.grayDim("  ──────────"), hint: "" },
+        { value: "import-file", label: "  Import and apply from file", hint: "Load external YAML, sync to NPL" },
       ],
     });
 
@@ -346,75 +336,20 @@ async function configurationManagerFlow(): Promise<void> {
       continue;
     }
 
-    if (action === "manage-current") {
-      await manageCurrentConfigFlow();
-    } else if (action === "import-current") {
-      await importFromYamlFlow();
-    } else if (action === "import-file") {
-      await importFromFileFlow();
-    } else if (action === "view-backups") {
+    if (action === "view") {
+      await viewConfigFlow();
+    } else if (action === "edit") {
+      await editAndApplyConfigFlow();
+    } else if (action === "backup") {
+      await exportToYamlFlow();
+    } else if (action === "reinstate") {
       if (backupCount === 0) {
-        p.log.info("No backups found. Use 'Export' in Edit menu to create backups.");
+        p.log.info("No backups found. Use 'Backup' to create one first.");
       } else {
         await browseBackupsFlow(backupFiles);
       }
-    }
-  }
-}
-
-/**
- * Manage Current Configuration (services.yaml) - consolidated operations
- */
-async function manageCurrentConfigFlow(): Promise<void> {
-  const fs = await import("fs/promises");
-  const path = await import("path");
-  const configPath = getConfigPath();
-
-  while (true) {
-    console.log();
-    console.log(noumena.purple("  Manage services.yaml"));
-    console.log(noumena.textDim("  View, Edit, Export, and Apply changes to current configuration"));
-    console.log();
-
-    // Check file stats
-    let fileSize = "unknown";
-    let lastModified = "unknown";
-    try {
-      const stats = await fs.stat(configPath);
-      fileSize = `${Math.round(stats.size / 1024)}KB`;
-      lastModified = stats.mtime.toLocaleString();
-    } catch {
-      // Ignore
-    }
-
-    console.log(noumena.textDim(`  File: ${path.basename(configPath)}`));
-    console.log(noumena.textDim(`  Size: ${fileSize}`));
-    console.log(noumena.textDim(`  Last modified: ${lastModified}`));
-    console.log();
-
-    const action = await p.select({
-      message: "Select action:",
-      options: [
-        { value: "back", label: noumena.textDim("← Back") },
-        { value: "view", label: "  View current config", hint: "Display services.yaml contents" },
-        { value: "export", label: "  Export (create backup)", hint: "Save timestamped backup" },
-        { value: "edit", label: noumena.warning("  Edit and apply"), hint: "Edit in $EDITOR, confirm, then apply to NPL + Gateway" },
-        { value: "restore-factory", label: noumena.purpleDim("  Restore to factory defaults"), hint: "Reset to services.yaml.default" },
-      ],
-    });
-
-    if (p.isCancel(action) || action === "back") {
-      return;
-    }
-
-    if (action === "view") {
-      await viewConfigFlow();
-    } else if (action === "export") {
-      await exportToYamlFlow();
-    } else if (action === "edit") {
-      await editAndApplyConfigFlow();
-    } else if (action === "restore-factory") {
-      await restoreFactoryConfigFlow();
+    } else if (action === "import-file") {
+      await importFromFileFlow();
     }
   }
 }
@@ -486,7 +421,7 @@ async function editAndApplyConfigFlow(): Promise<void> {
 
   if (p.isCancel(confirm) || !confirm) {
     p.log.info("Changes saved to file but NOT applied to NPL/Gateway");
-    p.log.info("Use 'Import from services.yaml' to apply later");
+    p.log.info("Use 'Import and apply from file' in Configuration Manager to apply later");
     return;
   }
 
@@ -508,12 +443,9 @@ async function editAndApplyConfigFlow(): Promise<void> {
   try {
     await reloadGatewayConfig();
     s.stop(noumena.success("Gateway reloaded"));
-    configDirty = false;
   } catch (err: any) {
     s.stop(noumena.purpleDim("Gateway reload failed"));
-    p.log.error(`Error: ${err.message || err}`);
-    p.log.info("Changes applied to NPL but Gateway may need manual restart");
-    return;
+    p.log.warn("NPL updated but gateway may not be running");
   }
 
   console.log();
@@ -521,115 +453,6 @@ async function editAndApplyConfigFlow(): Promise<void> {
   console.log();
   await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
 }
-
-/**
- * Restore to factory defaults (services.yaml.default)
- */
-async function restoreFactoryConfigFlow(): Promise<void> {
-  const fs = await import("fs/promises");
-  const configPath = getConfigPath();
-  const defaultPath = configPath.replace("services.yaml", "services.yaml.default");
-
-  console.log();
-  console.log(noumena.purple("  Restore to Factory Defaults"));
-  console.log();
-  console.log(noumena.textDim("  This will:"));
-  console.log(noumena.textDim("    1. Replace services.yaml with services.yaml.default"));
-  console.log(noumena.textDim("    2. Import to NPL (Jarvis, Alice, Bob)"));
-  console.log(noumena.textDim("    3. Reload Gateway"));
-  console.log();
-  console.log(noumena.warning("  ⚠  DESTRUCTIVE: Current services.yaml will be replaced!"));
-  console.log(noumena.warning("  ⚠  All custom services and users will be lost!"));
-  console.log();
-  console.log(noumena.textDim("  Note: This only restores the services.yaml file to factory defaults."));
-  console.log(noumena.textDim("  After restore, you should import it to NPL."));
-  console.log();
-
-  const confirm = await p.confirm({
-    message: "Restore factory defaults?",
-    initialValue: false,
-  });
-
-  if (p.isCancel(confirm) || !confirm) {
-    p.log.info("Restore cancelled");
-    return;
-  }
-
-  // Query Keycloak for user IDs (same as full reset)
-  const userIdSpinner = p.spinner();
-  userIdSpinner.start("Querying Keycloak for user IDs...");
-  
-  let userIdMap: Record<string, string> = {};
-  try {
-    const kcUsers = await listKeycloakUsers();
-    
-    for (const user of kcUsers) {
-      if (user.username && user.id) {
-        userIdMap[user.username] = user.id;
-      }
-    }
-    
-    userIdSpinner.stop(noumena.success("User IDs fetched"));
-  } catch (err: any) {
-    userIdSpinner.stop(noumena.purpleDim("Failed to query Keycloak"));
-    p.log.error(`Error: ${err.message || err}`);
-    p.log.warn("Proceeding with placeholder IDs - you may need to update manually");
-  }
-
-  // Restore default config
-  const s = p.spinner();
-  s.start("Restoring factory defaults...");
-
-  try {
-    let defaultYaml = await fs.readFile(defaultPath, "utf-8");
-    
-    // Replace placeholder IDs with actual Keycloak IDs
-    if (userIdMap['jarvis']) {
-      defaultYaml = defaultYaml.replace(/PLACEHOLDER_JARVIS_ID/g, userIdMap['jarvis']);
-    }
-    if (userIdMap['alice']) {
-      defaultYaml = defaultYaml.replace(/PLACEHOLDER_ALICE_ID/g, userIdMap['alice']);
-    }
-    if (userIdMap['bob']) {
-      defaultYaml = defaultYaml.replace(/PLACEHOLDER_BOB_ID/g, userIdMap['bob']);
-    }
-    
-    await fs.writeFile(configPath, defaultYaml, "utf-8");
-    s.stop(noumena.success("Factory defaults restored"));
-  } catch (err: any) {
-    s.stop(noumena.purpleDim("Restore failed"));
-    p.log.error(`Error: ${err.message || err}`);
-    return;
-  }
-
-  // Import to NPL
-  s.start("Importing to NPL...");
-  try {
-    await bootstrapNpl();
-    s.stop(noumena.success("NPL updated"));
-  } catch (err: any) {
-    s.stop(noumena.purpleDim("NPL import failed"));
-    p.log.error(`Error: ${err.message || err}`);
-  }
-
-  // Reload Gateway
-  s.start("Reloading Gateway...");
-  try {
-    await reloadGatewayConfig();
-    s.stop(noumena.success("Gateway reloaded"));
-    configDirty = false;
-  } catch (err: any) {
-    s.stop(noumena.purpleDim("Gateway reload failed"));
-    p.log.error(`Error: ${err.message || err}`);
-  }
-
-  console.log();
-  console.log(noumena.success("  ✓ Factory defaults restored!"));
-  console.log(noumena.textDim("  Default users: jarvis, alice, bob"));
-  console.log();
-  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-}
-
 /**
  * Import from a specific file (file picker)
  */
@@ -750,33 +573,6 @@ async function exportToYamlFlow(): Promise<void> {
   } catch (err: any) {
     s.stop(noumena.purpleDim("Backup failed"));
     p.log.error(`Error: ${err.message || err}`);
-  }
-
-  console.log();
-  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
-}
-
-/**
- * View factory defaults
- */
-async function viewFactoryDefaultsFlow(): Promise<void> {
-  const fs = await import("fs/promises");
-  const path = await import("path");
-
-  console.log();
-  console.log(noumena.purple("  Factory Defaults (services.yaml.default)"));
-  console.log();
-
-  try {
-    const configPath = getConfigPath();
-    const defaultPath = configPath.replace("services.yaml", "services.yaml.default");
-    const content = await fs.readFile(defaultPath, "utf-8");
-    
-    console.log(noumena.textDim("  ─".repeat(40)));
-    console.log(content);
-    console.log(noumena.textDim("  ─".repeat(40)));
-  } catch (err: any) {
-    p.log.error(`Error reading factory defaults: ${err.message || err}`);
   }
 
   console.log();
@@ -1153,7 +949,6 @@ async function mainMenu(): Promise<boolean> {
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
     { value: "credentials", label: "  Manage credentials", hint: "Vault & credential mapping" },
     { value: "config", label: "  Configuration Manager", hint: "Manage services.yaml, Import/Export, Backups" },
-    { value: "gateway", label: `  Reload Gateway  ${configDirty ? noumena.warning("⚠") : noumena.success("✓")}`, hint: configDirty ? "Manual reload needed" : "Auto-reloads after imports" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
 
@@ -1187,13 +982,6 @@ async function mainMenu(): Promise<boolean> {
     await credentialManagementFlow();
   } else if (action === "config") {
     await configurationManagerFlow();
-  } else if (action === "gateway") {
-    await reloadGatewayFlow();
-  }
-
-  // Mark config as potentially dirty after config-modifying flows
-  if (typeof action === "string" && !["config", "gateway", "quit"].includes(action) && !action.startsWith("---")) {
-    configDirty = true;
   }
 
   return true;
@@ -1286,38 +1074,33 @@ async function serviceActionsFlow(service: ServiceDefinition): Promise<void> {
       return;
     }
 
-    // Backup current state for rollback
-    const originalEnabled = service.enabled;
-    
     s.start(`${newEnabled ? "Enabling" : "Disabling"} and syncing to NPL...`);
-    
-    // Apply change to services.yaml
-    const success = setServiceEnabled(service.name, newEnabled);
-    
-    if (success) {
-      try {
-        // First sync to NPL
-        await reloadGatewayConfig();
-        await syncServiceWithNpl(service.name, newEnabled);
-        s.stop(noumena.success(`✓ ${service.displayName} ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
-      } catch (error) {
-        s.stop(noumena.error("✗ NPL sync failed"));
-        
-        // ROLLBACK: Restore original state
-        setServiceEnabled(service.name, originalEnabled);
-        
-        p.log.error("Failed to sync to NPL - changes rolled back");
-        p.log.error(`${error}`);
-        return; // Exit early - don't proceed to tool selection
-      }
 
-      // After enabling, go to tool selection
-      if (newEnabled && service.tools.length > 0) {
-        p.log.info("Now select which tools to enable:");
-        await manageToolsForService(service);
-      }
-    } else {
-      s.stop(noumena.purpleDim("Failed"));
+    // 1. Write to NPL (source of truth)
+    try {
+      await syncServiceWithNpl(service.name, newEnabled);
+    } catch (error) {
+      s.stop(noumena.error("✗ NPL sync failed"));
+      p.log.error(`${error}`);
+      return; // NPL failed — YAML unchanged, exit early
+    }
+
+    // 2. Update YAML (persistent cache)
+    const success = setServiceEnabled(service.name, newEnabled);
+    if (!success) {
+      s.stop(noumena.purpleDim("YAML update failed"));
+      p.log.warn("NPL updated but services.yaml write failed");
+      return;
+    }
+
+    // 3. Tell gateway to re-read YAML (best-effort)
+    try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+    s.stop(noumena.success(`✓ ${service.displayName} ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
+
+    // After enabling, go to tool selection
+    if (newEnabled && service.tools.length > 0) {
+      p.log.info("Now select which tools to enable:");
+      await manageToolsForService(service);
     }
   } else if (action === "start") {
     // Note: STDIO services may exit immediately when started in detached mode
@@ -1499,66 +1282,50 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
     }
 
     if (action === "enable_all") {
-      // Backup current state for rollback
-      const originalStates = new Map(
-        freshService.tools.map(t => [t.name, t.enabled !== false])
-      );
-      
-      // Apply changes to services.yaml
+      const s = p.spinner();
+      s.start("Syncing to NPL...");
+
+      // 1. Write to NPL (source of truth) — sync service with all tools enabled
+      try {
+        await syncServiceWithNpl(freshService.name, true);
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        p.log.error(`${error}`);
+        continue;
+      }
+
+      // 2. Update YAML (persistent cache)
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, true);
       }
-      
-      // Try to sync to NPL via Gateway reload
-      const s = p.spinner();
-      s.start("Syncing to NPL...");
-      
-      try {
-        await reloadGatewayConfig();
-        s.stop(noumena.success("✓ All tools enabled and synced to NPL"));
-      } catch (error) {
-        s.stop(noumena.error("✗ NPL sync failed"));
-        
-        // ROLLBACK: Restore original state
-        for (const tool of freshService.tools) {
-          setToolEnabled(freshService.name, tool.name, originalStates.get(tool.name) || false);
-        }
-        
-        p.log.error("Failed to sync to NPL - changes rolled back");
-        p.log.error(`${error}`);
-      }
+
+      // 3. Tell gateway to re-read YAML (best-effort)
+      try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+      s.stop(noumena.success("✓ All tools enabled and synced to NPL"));
       continue;
     }
 
     if (action === "disable_all") {
-      // Backup current state for rollback
-      const originalStates = new Map(
-        freshService.tools.map(t => [t.name, t.enabled !== false])
-      );
-      
-      // Apply changes to services.yaml
+      const s = p.spinner();
+      s.start("Syncing to NPL...");
+
+      // 1. Write to NPL (source of truth) — sync service with all tools disabled
+      try {
+        await syncServiceWithNpl(freshService.name, freshService.enabled);
+      } catch (error) {
+        s.stop(noumena.error("✗ NPL sync failed"));
+        p.log.error(`${error}`);
+        continue;
+      }
+
+      // 2. Update YAML (persistent cache)
       for (const tool of freshService.tools) {
         setToolEnabled(freshService.name, tool.name, false);
       }
-      
-      // Try to sync to NPL via Gateway reload
-      const s = p.spinner();
-      s.start("Syncing to NPL...");
-      
-      try {
-        await reloadGatewayConfig();
-        s.stop(noumena.success("✓ All tools disabled and synced to NPL"));
-      } catch (error) {
-        s.stop(noumena.error("✗ NPL sync failed"));
-        
-        // ROLLBACK: Restore original state
-        for (const tool of freshService.tools) {
-          setToolEnabled(freshService.name, tool.name, originalStates.get(tool.name) || false);
-        }
-        
-        p.log.error("Failed to sync to NPL - changes rolled back");
-        p.log.error(`${error}`);
-      }
+
+      // 3. Tell gateway to re-read YAML (best-effort)
+      try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+      s.stop(noumena.success("✓ All tools disabled and synced to NPL"));
       continue;
     }
 
@@ -1593,38 +1360,27 @@ async function manageToolsForService(service: ServiceDefinition): Promise<void> 
       continue;
     }
 
-    // Backup current state for rollback
-    const originalStates = new Map(
-      selectedTools.map(toolName => {
-        const tool = freshService?.tools.find(t => t.name === toolName);
-        return [toolName, tool ? (tool.enabled !== false) : false];
-      })
-    );
-    
-    // Apply changes to services.yaml
     const newEnabled = action === "enable";
+    const s = p.spinner();
+    s.start("Syncing to NPL...");
+
+    // 1. Write to NPL (source of truth)
+    try {
+      await syncServiceWithNpl(freshService.name, freshService.enabled);
+    } catch (error) {
+      s.stop(noumena.error("✗ NPL sync failed"));
+      p.log.error(`${error}`);
+      continue;
+    }
+
+    // 2. Update YAML (persistent cache)
     for (const toolName of selectedTools) {
       setToolEnabled(freshService.name, toolName, newEnabled);
     }
-    
-    // Try to sync to NPL via Gateway reload
-    const s = p.spinner();
-    s.start("Syncing to NPL...");
-    
-    try {
-      await reloadGatewayConfig();
-      s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
-    } catch (error) {
-      s.stop(noumena.error("✗ NPL sync failed"));
-      
-      // ROLLBACK: Restore original state
-      for (const toolName of selectedTools) {
-        setToolEnabled(freshService.name, toolName, originalStates.get(toolName) || false);
-      }
-      
-      p.log.error("Failed to sync to NPL - changes rolled back");
-      p.log.error(`${error}`);
-    }
+
+    // 3. Tell gateway to re-read YAML (best-effort)
+    try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+    s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) ${newEnabled ? "enabled" : "disabled"} and synced to NPL`));
   }
 }
 
@@ -2023,8 +1779,6 @@ async function addTemplateServiceFlow(): Promise<void> {
     return;
   }
 
-  p.log.success(`✓ Added: ${template.displayName}`);
-
   // Add placeholder tool
   const { addTool } = await import("./lib/config.js");
   addTool(String(templateName), {
@@ -2034,11 +1788,17 @@ async function addTemplateServiceFlow(): Promise<void> {
     enabled: true,
   });
 
+  // Sync enabled state to NPL (source of truth)
   try {
-    await reloadGatewayConfig();
+    await syncServiceWithNpl(String(templateName), true);
+    p.log.success(`✓ Added: ${template.displayName} (synced to NPL)`);
   } catch {
-    // Ignore
+    p.log.success(`✓ Added: ${template.displayName}`);
+    p.log.warn("NPL sync skipped (not configured or not running)");
   }
+
+  // Tell gateway to re-read YAML (best-effort)
+  try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
 
   // If requires credentials, prompt to set them up now
   if (template.requiresCredentials) {
@@ -2196,8 +1956,6 @@ async function addNpmServiceFlow(): Promise<void> {
     return;
   }
 
-  p.log.success(`✓ Added: ${displayName}`);
-
   // Add placeholder tool
   const { addTool } = await import("./lib/config.js");
   addTool(serviceNameStr, {
@@ -2207,11 +1965,17 @@ async function addNpmServiceFlow(): Promise<void> {
     enabled: true,
   });
 
+  // Sync enabled state to NPL (source of truth)
   try {
-    await reloadGatewayConfig();
+    await syncServiceWithNpl(serviceNameStr, true);
+    p.log.success(`✓ Added: ${displayName} (synced to NPL)`);
   } catch {
-    // Ignore
+    p.log.success(`✓ Added: ${displayName}`);
+    p.log.warn("NPL sync skipped (not configured or not running)");
   }
+
+  // Tell gateway to re-read YAML (best-effort)
+  try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
 
   if (requiresCreds) {
     console.log();
@@ -2424,68 +2188,6 @@ async function viewConfigFlow(): Promise<void> {
   } catch (error) {
     p.log.error(`Failed to read config: ${error}`);
   }
-}
-
-/**
- * Open services.yaml in the user's preferred editor
- */
-async function editConfigFlow(): Promise<void> {
-  const configPath = getConfigPath();
-  const editor = process.env.EDITOR || process.env.VISUAL || "nano";
-  
-  p.log.info(`Opening ${configPath} in ${editor}...`);
-  
-  try {
-    spawnSync(editor, [configPath], { stdio: "inherit" });
-    configDirty = true;
-    p.log.success("Editor closed. Use Reload Gateway to apply changes.");
-  } catch (error) {
-    p.log.error(`Failed to open editor: ${error}`);
-  }
-}
-
-/**
- * Reload Gateway configuration (manual fallback)
- * 
- * Gateway automatically reloads after:
- * - Import from YAML
- * - Edit and Apply
- * 
- * Use this only when:
- * - Auto-reload failed
- * - Manual edits made outside TUI
- * - Recovery after Gateway restart
- */
-async function reloadGatewayFlow(): Promise<void> {
-  console.log();
-  console.log(noumena.purple("  Reload Gateway"));
-  console.log();
-  console.log(noumena.textDim("  Manual reload for edge cases:"));
-  console.log(noumena.textDim("  • Auto-reload failed after import"));
-  console.log(noumena.textDim("  • Manual YAML edits outside TUI"));
-  console.log(noumena.textDim("  • Recovery after Gateway restart"));
-  console.log();
-  console.log(noumena.textDim("  Note: Gateway auto-reloads after Import/Edit operations"));
-  console.log();
-
-  const s = p.spinner();
-  s.start("Reloading Gateway configuration...");
-
-  try {
-    await reloadGatewayConfig();
-    s.stop(noumena.success("Gateway configuration reloaded"));
-    configDirty = false;
-    
-    console.log();
-    p.log.success("✓ Gateway now has fresh NPL cache and services.yaml");
-  } catch (err: any) {
-    s.stop(noumena.purpleDim("Failed to reload Gateway config"));
-    p.log.error(`Error: ${err.message || err}`);
-    p.log.info("Check that Gateway is running and try again");
-  }
-
-  console.log();
-  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
 }
 
 // ============================================================================
@@ -3143,30 +2845,23 @@ async function manageUserServiceAccessFlow(
     const s = p.spinner();
 
     if (action === "grant_all") {
-      // Backup current state for rollback
-      const originalTools = {...freshUser.tools};
-      
-      s.start(`Granting all ${service.displayName} tools and syncing to NPL...`);
-      
-      // Apply change to services.yaml
-      grantAllToolsToUser(freshUser.userId, service.name);
-      
+      s.start(`Granting all ${service.displayName} tools...`);
+
+      // 1. Write to NPL (source of truth)
       try {
         await grantAllToolsForServiceInNpl(freshUser.userId, service.name);
-        s.stop(noumena.success("✓ All tools granted and synced to NPL"));
       } catch (err) {
         s.stop(noumena.error("✗ NPL sync failed"));
-        
-        // ROLLBACK: Restore original state
-        const user = getUser(freshUser.userId);
-        if (user) {
-          user.tools = originalTools;
-          updateUser(freshUser.userId, user);
-        }
-        
-        p.log.error("Failed to sync to NPL - changes rolled back");
         p.log.error(`${err}`);
+        continue;
       }
+
+      // 2. Update YAML (persistent cache)
+      grantAllToolsToUser(freshUser.userId, service.name);
+
+      // 3. Tell gateway to re-read (best-effort)
+      try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+      s.stop(noumena.success("✓ All tools granted and synced to NPL"));
       continue;
     }
 
@@ -3177,30 +2872,23 @@ async function manageUserServiceAccessFlow(
       });
 
       if (!p.isCancel(confirmed) && confirmed) {
-        // Backup current state for rollback
-        const originalTools = {...freshUser.tools};
-        
-        s.start("Revoking access and syncing to NPL...");
-        
-        // Apply change to services.yaml
-        revokeServiceFromUser(freshUser.userId, service.name);
-        
+        s.start("Revoking access...");
+
+        // 1. Write to NPL (source of truth)
         try {
           await revokeServiceInNpl(freshUser.userId, service.name);
-          s.stop(noumena.success("✓ Service access revoked and synced to NPL"));
         } catch (err) {
           s.stop(noumena.error("✗ NPL sync failed"));
-          
-          // ROLLBACK: Restore original state
-          const user = getUser(freshUser.userId);
-          if (user) {
-            user.tools = originalTools;
-            updateUser(freshUser.userId, user);
-          }
-          
-          p.log.error("Failed to sync to NPL - changes rolled back");
           p.log.error(`${err}`);
+          continue;
         }
+
+        // 2. Update YAML (persistent cache)
+        revokeServiceFromUser(freshUser.userId, service.name);
+
+        // 3. Tell gateway to re-read (best-effort)
+        try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+        s.stop(noumena.success("✓ Service access revoked and synced to NPL"));
       }
       continue;
     }
@@ -3236,21 +2924,9 @@ async function manageUserServiceAccessFlow(
       continue;
     }
 
-    // Apply changes — save to local config first, then sync to NPL
     s.start(`${action === "grant" ? "Granting" : "Revoking"} ${selectedTools.length} tool(s)...`);
-    
-    // Step 1: Always save to local config
-    for (const toolName of selectedTools) {
-      if (action === "grant") {
-        grantToolToUser(freshUser.userId, service.name, toolName);
-      } else {
-        revokeToolFromUser(freshUser.userId, service.name, toolName);
-      }
-    }
 
-    // Step 2: Best-effort sync to NPL
-    let nplSynced = true;
-    let nplError = "";
+    // 1. Write to NPL (source of truth)
     try {
       for (const toolName of selectedTools) {
         if (action === "grant") {
@@ -3260,17 +2936,23 @@ async function manageUserServiceAccessFlow(
         }
       }
     } catch (err) {
-      nplSynced = false;
-      nplError = String(err);
+      s.stop(noumena.error("✗ NPL sync failed"));
+      p.log.error(`${err}`);
+      continue;
     }
 
-    if (nplSynced) {
-      s.stop(noumena.success(`${selectedTools.length} tool(s) ${action === "grant" ? "granted" : "revoked"} and synced to NPL`));
-    } else {
-      s.stop(noumena.warning(`${selectedTools.length} tool(s) ${action === "grant" ? "granted" : "revoked"} locally (NPL sync failed)`));
-      console.log(noumena.textDim(`  Error: ${nplError.substring(0, 100)}`));
-      console.log(noumena.textDim("  Run 'Sync NPL' from main menu to sync"));
+    // 2. Update YAML (persistent cache)
+    for (const toolName of selectedTools) {
+      if (action === "grant") {
+        grantToolToUser(freshUser.userId, service.name, toolName);
+      } else {
+        revokeToolFromUser(freshUser.userId, service.name, toolName);
+      }
     }
+
+    // 3. Tell gateway to re-read (best-effort)
+    try { await reloadGatewayConfig(); } catch { /* gateway may not be running */ }
+    s.stop(noumena.success(`${selectedTools.length} tool(s) ${action === "grant" ? "granted" : "revoked"} and synced to NPL`));
   }
 }
 

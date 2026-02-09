@@ -3,21 +3,39 @@
 # The Gateway reads this config for tool listing and upstream routing.
 
 services:
-  - name: "slack"
-    displayName: "Slack"
+  - name: "duckduckgo"
+    displayName: "Duckduckgo"
     type: "MCP_STDIO"
     enabled: true
-    command: "docker run -i --rm mcp/slack"
+    command: "docker run -i --rm mcp/duckduckgo"
     args: []
     requiresCredentials: false
-    description: "Interact with Slack Workspaces over the Slack API."
+    description: "A Model Context Protocol (MCP) server that provides web search capabilities through DuckDuckGo, w..."
     tools:
-      - name: "slack_default"
-        description: "Default tool for slack - run 'Discover tools' to find actual tools"
+      - name: "search"
+        description: "Search DuckDuckGo and return formatted results.      Args:         query: The search query string         max_results: Maximum number of results to return (default: 10)         ctx: MCP context for logging"
         inputSchema:
           type: "object"
-          properties: {}
-          required: []
+          properties:
+            query:
+              type: "string"
+              description: ""
+            max_results:
+              type: "integer"
+              description: ""
+          required:
+            - "query"
+        enabled: true
+      - name: "fetch_content"
+        description: "Fetch and parse content from a webpage URL.      Args:         url: The webpage URL to fetch content from         ctx: MCP context for logging"
+        inputSchema:
+          type: "object"
+          properties:
+            url:
+              type: "string"
+              description: ""
+          required:
+            - "url"
         enabled: true
   - name: "gemini"
     displayName: "Google Gemini"
@@ -44,10 +62,20 @@ user_access:
     tools: {}
   users:
     - userId: "jarvis@acme.com"
-      keycloakId: "e4bf61b7-67c7-44f2-90b4-5fa8b10190c8"
+      keycloakId: "14a31f3a-233a-4838-a799-4d544c08b7af"
       displayName: "Jarvis AI Agent"
-      createdAt: "2026-02-08T21:39:38.073Z"
+      createdAt: "2026-02-09T00:20:04.340Z"
       tools:
-        slack:
+        duckduckgo:
           - "*"
+      vaultPaths: {}
+    - userId: "dave@acme.com"
+      keycloakId: "bb95e6ee-a168-44cb-985d-5af2e4cae38d"
+      displayName: "Dave Beckham"
+      createdAt: "2026-02-09T00:20:46.940Z"
+      tools:
+        duckduckgo:
+          - "*"
+        gemini:
+          - "gemini_default"
       vaultPaths: {}

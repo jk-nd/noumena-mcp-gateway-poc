@@ -21,6 +21,12 @@ registry.ServiceRegistry:
       claims:
         role:
           - admin
+  # Gateway system service reads enabled services at runtime
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
 
 # ============================================================================
 # SERVICES PACKAGE - Tool Governance
@@ -62,10 +68,9 @@ users.UserToolAccess:
       claims:
         role:
           - admin
-  # Gateway system service and AI agents enforce/query access at runtime
+  # Gateway system service enforces/queries access at runtime
   pGateway:
     set:
       claims:
         role:
           - gateway
-          - agent  # AI agents (like Jarvis) can query their own access

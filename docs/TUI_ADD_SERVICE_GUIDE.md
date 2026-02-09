@@ -167,11 +167,6 @@ Service is disabled by default. Select it to enable and configure tools.
    Main Menu → [Select service] → Discover tools
    ```
 
-6. **Restart Gateway** (if needed)
-   ```
-   System → Restart Gateway
-   ```
-
 ---
 
 ## Comparison: Old vs New Flow
@@ -292,8 +287,7 @@ cd tui && npm run build
 1. Check service is enabled: `Main Menu → [Service] → Enable service`
 2. Verify credentials: `System → Manage credentials → Test injection`
 3. Grant user access: `User Management → [User] → Grant access`
-4. Restart gateway: `System → Restart Gateway`
-5. Check logs: `docker compose logs gateway --tail 50`
+4. Check logs: `docker compose logs gateway --tail 50`
 
 ---
 

@@ -38,8 +38,8 @@ class NplClient {
     private val nplUrl = System.getenv("NPL_URL") ?: "http://npl-engine:12000"
     private val keycloakUrl = System.getenv("KEYCLOAK_URL") ?: "http://keycloak:11000"
     private val keycloakRealm = System.getenv("KEYCLOAK_REALM") ?: "mcpgateway"
-    private val agentUsername = System.getenv("AGENT_USERNAME") ?: "agent"
-    private val agentPassword = System.getenv("AGENT_PASSWORD") ?: "Welcome123"
+    private val gatewayUsername = System.getenv("GATEWAY_USERNAME") ?: "gateway"
+    private val gatewayPassword = System.getenv("GATEWAY_PASSWORD") ?: "Welcome123"
     private val devMode = System.getenv("DEV_MODE")?.toBoolean() ?: false
 
     private val client = HttpClient(CIO) {
@@ -75,19 +75,19 @@ class NplClient {
         }
 
         return try {
-            val agentToken = getAgentToken()
+            val gatewayToken = getGatewayToken()
 
             // Step 1: Check service-level ToolPolicy
-            val policyId = findToolPolicyForService(agentToken, service)
+            val policyId = findToolPolicyForService(gatewayToken, service)
             if (policyId != null) {
-                val policyResult = invokeCheckAccess(policyId, agentToken, service, operation, userId)
+                val policyResult = invokeCheckAccess(policyId, gatewayToken, service, operation, userId)
                 if (!policyResult.allowed) {
                     return policyResult // Service-level policy denied
                 }
                 logger.info { "ToolPolicy check passed for $service.$operation" }
             } else {
                 // Fallback: check ServiceRegistry directly
-                val registryAllowed = checkServiceRegistry(agentToken, service)
+                val registryAllowed = checkServiceRegistry(gatewayToken, service)
                 if (!registryAllowed) {
                     return PolicyResponse(
                         allowed = false,
@@ -98,9 +98,9 @@ class NplClient {
             }
 
             // Step 2: Check user-level UserToolAccess (NEW)
-            val userAccessId = findUserToolAccess(agentToken, userId)
+            val userAccessId = findUserToolAccess(gatewayToken, userId)
             if (userAccessId != null) {
-                val userAccessResult = invokeUserAccessCheck(userAccessId, agentToken, service, operation, userId)
+                val userAccessResult = invokeUserAccessCheck(userAccessId, gatewayToken, service, operation, userId)
                 if (!userAccessResult.allowed) {
                     return userAccessResult // User-level access denied
                 }
@@ -128,19 +128,19 @@ class NplClient {
      * Get a gateway service token from Keycloak.
      * The Gateway authenticates as a system service (role=gateway).
      */
-    private suspend fun getAgentToken(): String {
+    private suspend fun getGatewayToken(): String {
         val response = client.submitForm(
             url = "$keycloakUrl/realms/$keycloakRealm/protocol/openid-connect/token",
             formParameters = parameters {
                 append("grant_type", "password")
                 append("client_id", "mcpgateway")
-                append("username", agentUsername)  // TODO: Rename to gatewayUsername
-                append("password", agentPassword)  // TODO: Rename to gatewayPassword
+                append("username", gatewayUsername)
+                append("password", gatewayPassword)
             }
         )
 
         if (!response.status.isSuccess()) {
-            throw RuntimeException("Failed to get agent token: ${response.status}")
+            throw RuntimeException("Failed to get gateway token: ${response.status}")
         }
 
         val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
@@ -152,13 +152,13 @@ class NplClient {
      * Find a ToolPolicy instance for a specific service.
      * Returns the instance ID, or null if no ToolPolicy exists for this service.
      */
-    private suspend fun findToolPolicyForService(agentToken: String, serviceName: String): String? {
+    private suspend fun findToolPolicyForService(gatewayToken: String, serviceName: String): String? {
         // Check cache first
         policyIds[serviceName]?.let { return it }
 
         try {
             val listResponse = client.get("$nplUrl/npl/services/ToolPolicy/") {
-                header("Authorization", "Bearer $agentToken")
+                header("Authorization", "Bearer $gatewayToken")
             }
 
             if (!listResponse.status.isSuccess()) return null
@@ -236,7 +236,7 @@ class NplClient {
      * Find a UserToolAccess instance for a specific user.
      * Returns the instance ID, or null if no UserToolAccess exists for this user.
      */
-    private suspend fun findUserToolAccess(agentToken: String, userId: String): String? {
+    private suspend fun findUserToolAccess(gatewayToken: String, userId: String): String? {
         // Check cache first
         userAccessIds[userId]?.let { return it }
 
@@ -244,7 +244,7 @@ class NplClient {
             // NPL doesn't support filtering by constructor params via URL query
             // So we query all UserToolAccess and filter client-side
             val listResponse = client.get("$nplUrl/npl/users/UserToolAccess/") {
-                header("Authorization", "Bearer $agentToken")
+                header("Authorization", "Bearer $gatewayToken")
             }
 
             if (!listResponse.status.isSuccess()) return null
@@ -323,10 +323,10 @@ class NplClient {
      * Check if a service is enabled in the ServiceRegistry.
      * Fallback when no per-service ToolPolicy exists.
      */
-    private suspend fun checkServiceRegistry(agentToken: String, serviceName: String): Boolean {
+    private suspend fun checkServiceRegistry(gatewayToken: String, serviceName: String): Boolean {
         try {
             val listResponse = client.get("$nplUrl/npl/registry/ServiceRegistry/") {
-                header("Authorization", "Bearer $agentToken")
+                header("Authorization", "Bearer $gatewayToken")
             }
 
             if (!listResponse.status.isSuccess()) return false
@@ -363,6 +363,57 @@ class NplClient {
     }
 
     /**
+     * Get the user's access list from NPL UserToolAccess.
+     * Authenticates as gateway service account, finds the user's UserToolAccess instance,
+     * and calls getAccessList permission.
+     *
+     * @param userId The user identifier (email, e.g., "jarvis@acme.com")
+     * @return List of (serviceName, allowedTools) pairs, or empty list if no access configured (fail-closed)
+     */
+    suspend fun getUserAccessList(userId: String): List<Pair<String, Set<String>>> {
+        return try {
+            val gatewayToken = getGatewayToken()
+
+            // Find user's UserToolAccess instance
+            val accessId = findUserToolAccess(gatewayToken, userId)
+            if (accessId == null) {
+                logger.info { "No UserToolAccess found for user '$userId' - returning empty access list (fail-closed)" }
+                return emptyList()
+            }
+
+            // Call getAccessList permission
+            val response = client.post("$nplUrl/npl/users/UserToolAccess/$accessId/getAccessList") {
+                header("Authorization", "Bearer $gatewayToken")
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+
+            if (!response.status.isSuccess()) {
+                logger.warn { "Failed to get access list for user '$userId': ${response.status}" }
+                return emptyList()
+            }
+
+            val responseBody = response.bodyAsText()
+            val accessList = Json.parseToJsonElement(responseBody).jsonArray
+
+            val result = accessList.map { entry ->
+                val obj = entry.jsonObject
+                val serviceName = obj["serviceName"]?.jsonPrimitive?.content ?: ""
+                val allowedTools = obj["allowedTools"]?.jsonArray
+                    ?.map { it.jsonPrimitive.content }
+                    ?.toSet() ?: emptySet()
+                serviceName to allowedTools
+            }
+
+            logger.info { "User '$userId' has access to ${result.size} services: ${result.map { it.first }}" }
+            result
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get user access list for '$userId': ${e.message}" }
+            emptyList()
+        }
+    }
+
+    /**
      * Get all enabled services from NPL ServiceRegistry.
      * This is the source of truth for which services are available at runtime.
      * 
@@ -370,10 +421,10 @@ class NplClient {
      */
     suspend fun getEnabledServices(): Set<String> {
         return try {
-            val agentToken = getAgentToken()
+            val gatewayToken = getGatewayToken()
             
             val listResponse = client.get("$nplUrl/npl/registry/ServiceRegistry/") {
-                header("Authorization", "Bearer $agentToken")
+                header("Authorization", "Bearer $gatewayToken")
             }
 
             if (!listResponse.status.isSuccess()) {

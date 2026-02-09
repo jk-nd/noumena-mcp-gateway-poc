@@ -171,7 +171,7 @@ fun Application.configureGateway() {
     val upstreamSessionManager = UpstreamSessionManager(upstreamRouter, notificationBroadcaster)
     
     // Create MCP Server handler (transparent proxy)
-    val mcpHandler = McpServerHandler(upstreamRouter = upstreamRouter, upstreamSessionManager = upstreamSessionManager)
+    val mcpHandler = McpServerHandler(nplClient = nplClient, upstreamRouter = upstreamRouter, upstreamSessionManager = upstreamSessionManager)
     
     routing {
         // Health check (public - no auth required)
@@ -411,10 +411,10 @@ fun Application.configureGateway() {
         post("/mcp") {
             val requestBody = call.receiveText()
             val principal = call.principal<JWTPrincipal>()!!
-            // Use preferred_username instead of subject (UUID) for human-readable userId
-            val user = principal.payload.getClaim("preferred_username")?.asString() 
-                ?: principal.payload.getClaim("email")?.asString() 
-                ?: principal.payload.subject 
+            // Use email as userId to match UserToolAccess entries (e.g., "jarvis@acme.com")
+            val user = principal.payload.getClaim("email")?.asString()
+                ?: principal.payload.getClaim("preferred_username")?.asString()
+                ?: principal.payload.subject
                 ?: "unknown"
             val roles = principal.payload.getClaim("role")?.asList(String::class.java) ?: emptyList()
             
@@ -443,8 +443,8 @@ fun Application.configureGateway() {
         // MCP WebSocket endpoint for agents (streaming/realtime)
         webSocket("/mcp/ws") {
             val principal = call.principal<JWTPrincipal>()
-            val user = principal?.payload?.getClaim("preferred_username")?.asString()
-                ?: principal?.payload?.getClaim("email")?.asString()
+            val user = principal?.payload?.getClaim("email")?.asString()
+                ?: principal?.payload?.getClaim("preferred_username")?.asString()
                 ?: principal?.payload?.subject
                 ?: "unknown"
             val wsId = UUID.randomUUID().toString()
@@ -493,12 +493,12 @@ fun Application.configureGateway() {
         authenticate("keycloak-sse") {
             get("/sse") {
                 val principal = call.principal<JWTPrincipal>()!!
-                val user = principal.payload.getClaim("preferred_username")?.asString()
-                    ?: principal.payload.getClaim("email")?.asString()
+                val user = principal.payload.getClaim("email")?.asString()
+                    ?: principal.payload.getClaim("preferred_username")?.asString()
                     ?: principal.payload.subject
                     ?: "unknown"
                 val roles = principal.payload.getClaim("role")?.asList(String::class.java) ?: emptyList()
-                
+
                 val sessionId = UUID.randomUUID().toString()
                 val session = SseSession(id = sessionId)
                 sseSessions[sessionId] = session
@@ -584,11 +584,11 @@ fun Application.configureGateway() {
                 
                 val requestBody = call.receiveText()
                 val principal = call.principal<JWTPrincipal>()!!
-                val user = principal.payload.getClaim("preferred_username")?.asString()
-                    ?: principal.payload.getClaim("email")?.asString()
+                val user = principal.payload.getClaim("email")?.asString()
+                    ?: principal.payload.getClaim("preferred_username")?.asString()
                     ?: principal.payload.subject
                     ?: "unknown"
-                
+
                 logger.info { "MCP REQUEST via SSE (MCP Inspector) - User: $user" }
                 
                 try {

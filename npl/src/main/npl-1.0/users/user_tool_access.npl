@@ -208,7 +208,7 @@ protocol[pAdmin, pGateway] UserToolAccess(
      * @return List of service tool access entries
      */
     @api
-    permission[pAdmin] getAccessList() returns List<ServiceToolAccess> | active {
+    permission[pGateway | pAdmin] getAccessList() returns List<ServiceToolAccess> | active {
         return serviceAccess;
     };
     

@@ -769,16 +769,30 @@ export async function syncServiceWithNpl(
   if (enabled) {
     // Enable in ServiceRegistry
     await enableServiceInNpl(serviceName);
-    
+
     // Create ToolPolicy if it doesn't exist (required for tool management)
     const token = await getKeycloakToken();
     let policyId = await findToolPolicyForService(token, serviceName);
-    
+
     if (!policyId) {
       policyId = await createToolPolicy(token, serviceName);
       console.log(`[syncServiceWithNpl] Created ToolPolicy for ${serviceName}: ${policyId}`);
     } else {
       console.log(`[syncServiceWithNpl] ToolPolicy already exists for ${serviceName}: ${policyId}`);
+    }
+
+    // Sync enabled tools from services.yaml into the ToolPolicy
+    const { loadConfig } = await import("./config.js");
+    const config = loadConfig();
+    const service = config.services.find((s: any) => s.name === serviceName);
+    if (service) {
+      const enabledToolNames = service.tools
+        .filter((t: any) => t.enabled !== false)
+        .map((t: any) => t.name);
+      if (enabledToolNames.length > 0) {
+        await enableAllToolsInPolicy(token, policyId!, enabledToolNames);
+        console.log(`[syncServiceWithNpl] Enabled ${enabledToolNames.length} tools in ToolPolicy for ${serviceName}`);
+      }
     }
   } else {
     await disableServiceInNpl(serviceName);

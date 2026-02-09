@@ -23,3 +23,19 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V4: Allow gateway to read user access lists; remove legacy agent role
+  - name: mcp-4.0-gateway-access
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V5: Allow gateway to read ServiceRegistry (enabled services visibility)
+  - name: mcp-5.0-registry-gateway-access
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

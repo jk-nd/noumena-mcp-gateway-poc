@@ -102,7 +102,7 @@ resource "keycloak_realm_user_profile" "mcpgateway_user_profile" {
     }
   }
 
-  # Custom attribute for role (admin, user, agent)
+  # Custom attribute for role (admin, gateway, user)
   attribute {
     name         = "role"
     display_name = "Functional Role"
@@ -155,6 +155,22 @@ resource "keycloak_openid_user_attribute_protocol_mapper" "role_mapper" {
   claim_name       = "role"
   claim_value_type = "String"
   multivalued      = true
+
+  add_to_id_token     = true
+  add_to_access_token = true
+  add_to_userinfo     = true
+}
+
+# Protocol mapper for email claim — ensures email is always in the access token
+# regardless of which OIDC scopes the client requests (MCP Inspector only sends openid)
+resource "keycloak_openid_user_attribute_protocol_mapper" "email_mapper" {
+  realm_id  = keycloak_realm.mcpgateway.id
+  client_id = keycloak_openid_client.mcpgateway_client.id
+  name      = "email-mapper"
+
+  user_attribute   = "email"
+  claim_name       = "email"
+  claim_value_type = "String"
 
   add_to_id_token     = true
   add_to_access_token = true
@@ -260,7 +276,7 @@ resource "keycloak_user" "gateway_service" {
 # AI Agents - Default Demo Agent
 # ============================================================================
 
-# Jarvis - AI Agent (autonomous tool user)
+# Jarvis - AI Agent (tool user, same role as humans)
 resource "keycloak_user" "jarvis" {
   realm_id   = keycloak_realm.mcpgateway.id
   username   = "jarvis"
@@ -270,7 +286,7 @@ resource "keycloak_user" "jarvis" {
   enabled    = true
 
   attributes = {
-    "role"         = "agent"  # AI agent (can use tools like a human user)
+    "role"         = "user"  # Tool user (humans and AI agents use same role)
     "organization" = "acme"
   }
 

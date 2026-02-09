@@ -106,7 +106,7 @@ All endpoints require JWT authentication (Bearer token or OAuth 2.0 flow).
 
 ## NPL Policy Enforcement
 
-NPL is the **runtime source of truth** for all policy decisions. The TUI and `services.yaml` are the declarative configuration layer -- all changes are synced to NPL atomically.
+NPL is the **runtime source of truth** for all policy decisions. The TUI writes to NPL first, then updates `services.yaml` as a persistent cache.
 
 ### Protocol Hierarchy
 
@@ -173,19 +173,19 @@ cd tui && npm start
 - **Tool management** -- Enable/disable individual tools per service
 - **User management** -- Register/deregister Keycloak users, grant/revoke tool access
 - **Credential management** -- Create credential mappings, choose scope, store secrets in Vault
-- **Gateway configuration** -- Sync config to/from NPL, export/import YAML
+- **Gateway configuration** -- View, edit, backup, import YAML config
 - **Container control** -- Pull, start, stop Docker containers
 
-### Atomic Operations
+### NPL-First Operations
 
-All TUI operations that modify state are **atomic with rollback**:
+All TUI operations that modify state follow the **NPL-first** pattern:
 
-1. Changes are written to `services.yaml`
-2. NPL is synced via the Gateway
-3. If NPL sync fails, `services.yaml` is rolled back and an error is shown
-4. Success is only reported when NPL confirms
+1. Changes are written to NPL (source of truth) first
+2. On success, `services.yaml` is updated as a persistent cache
+3. Gateway is reloaded (best-effort)
+4. If the NPL write fails, `services.yaml` is unchanged
 
-> **Principle**: "If the engine doesn't confirm, you cannot write to services.yaml."
+> **Principle**: "NPL is the source of truth. YAML is a persistent cache."
 
 ## Configuration
 

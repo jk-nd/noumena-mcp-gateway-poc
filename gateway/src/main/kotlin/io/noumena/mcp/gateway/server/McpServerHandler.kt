@@ -34,31 +34,50 @@ class McpServerHandler(
         prettyPrint = true
     }
 
+    private val configPath = System.getenv("SERVICES_CONFIG_PATH") ?: "/app/configs/services.yaml"
+
     /**
-     * Handle tools/list: aggregate namespaced tools from all enabled services.
-     * 
-     * V3 Architecture:
-     * - Queries NPL ServiceRegistry for enabled services (source of truth)
-     * - Reads services.yaml for tool schemas and static config
-     * - Only returns tools from services enabled in NPL
+     * Handle tools/list: aggregate namespaced tools from enabled services,
+     * filtered by the user's UserToolAccess in NPL.
+     *
+     * V4 Architecture:
+     * - Reads services.yaml for service catalog (no NPL ServiceRegistry dependency)
+     * - Queries NPL UserToolAccess for the user's allowed services/tools
+     * - Only returns tools the user has explicit access to (fail-closed)
+     * - No UserToolAccess for user → empty tool list
      */
     suspend fun handleToolsList(requestId: JsonElement?, userId: String): String {
         val namespacedTools = try {
-            // Use upstreamRouter which queries NPL for enabled state
-            upstreamRouter.getEnabledServices()
-                .flatMap { svc ->
+            // Load enabled services from services.yaml (service catalog)
+            val enabledServices = ServicesConfigLoader.load(configPath).services.filter { it.enabled }
+
+            // Query user's access list from NPL
+            val userAccess = nplClient.getUserAccessList(userId)
+
+            if (userAccess.isEmpty()) {
+                logger.info { "No UserToolAccess for user '$userId' - returning empty tools (fail-closed)" }
+                emptyList()
+            } else {
+                // Build a lookup: serviceName → set of allowed tool names
+                val accessMap = userAccess.associate { (svc, tools) -> svc to tools }
+
+                enabledServices.flatMap { svc ->
+                    val allowedTools = accessMap[svc.name] ?: return@flatMap emptyList()
+                    val hasWildcard = allowedTools.contains("*")
+
                     svc.tools
-                        .filter { it.enabled }
+                        .filter { it.enabled && (hasWildcard || allowedTools.contains(it.name)) }
                         .map { tool -> svc to tool }
                 }
+            }
         } catch (e: Exception) {
-            logger.warn { "Failed to load services config: ${e.message}. Using empty tool list." }
+            logger.warn { "Failed to load tools for user '$userId': ${e.message}. Using empty tool list." }
             emptyList()
         }
 
         logger.info { "Returning ${namespacedTools.size} namespaced tools from ${
             namespacedTools.map { it.first.name }.distinct().size
-        } services (enabled in NPL)" }
+        } services for user '$userId'" }
 
         val response = buildJsonObject {
             put("jsonrpc", "2.0")

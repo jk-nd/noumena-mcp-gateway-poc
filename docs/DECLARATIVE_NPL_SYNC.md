@@ -2,11 +2,13 @@
 
 ## Overview
 
-The NPL sync process now implements a **declarative model** where `services.yaml` is the single source of truth, and NPL state is synchronized to match it exactly.
+The **declarative NPL sync** is a bulk import operation available in the TUI Configuration Manager ("Import and apply from file"). It reads a `services.yaml` file and overwrites NPL state to match it.
+
+**Important**: For day-to-day operations (enable/disable services, grant/revoke user access), the TUI uses an **NPL-first** pattern — writing to NPL first, then updating `services.yaml` as a persistent cache. The declarative sync described here is only for bulk reconfiguration.
 
 ## Key Principle
 
-> **`services.yaml` defines the desired state. NPL sync makes NPL match that state.**
+> **Declarative sync: YAML defines desired state, NPL is overwritten to match.**
 
 This means:
 - ✅ **Add**: Services/tools/users in YAML → Enabled/Registered in NPL
