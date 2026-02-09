@@ -30,6 +30,10 @@ class McpServerHandlerTest {
 
     @BeforeEach
     fun setup() {
+        // Enable DEV_MODE BEFORE constructing NplClient/handler,
+        // so NplClient reads devMode=true from env at field init time.
+        setEnv("DEV_MODE", "true")
+
         // Create a temporary services.yaml for testing
         tempConfigFile = File.createTempFile("services-test", ".yaml")
         tempConfigFile.writeText("""
@@ -73,13 +77,12 @@ class McpServerHandlerTest {
                     enabled: true
         """.trimIndent())
 
-        // Point the handler to our test config
-        System.setProperty("test.services.config", tempConfigFile.absolutePath)
+        setEnv("SERVICES_CONFIG_PATH", tempConfigFile.absolutePath)
 
         val router = UpstreamRouter()
         val sessionManager = UpstreamSessionManager(router)
 
-        // We use DEV_MODE NplClient so policy checks auto-approve
+        // Handler constructed AFTER DEV_MODE is set, so NplClient picks it up
         handler = McpServerHandler(
             upstreamRouter = router,
             upstreamSessionManager = sessionManager
@@ -89,6 +92,8 @@ class McpServerHandlerTest {
     @AfterEach
     fun cleanup() {
         tempConfigFile.delete()
+        removeEnv("DEV_MODE")
+        removeEnv("SERVICES_CONFIG_PATH")
     }
 
     @Nested
@@ -97,9 +102,6 @@ class McpServerHandlerTest {
 
         @Test
         fun `returns namespaced tools from config`() = runTest {
-            // Set the env var for the handler to use our test config
-            setEnv("SERVICES_CONFIG_PATH", tempConfigFile.absolutePath)
-
             val response = handler.handleToolsList(JsonPrimitive(1), "test-user")
             val parsed = json.parseToJsonElement(response).jsonObject
 
@@ -123,9 +125,6 @@ class McpServerHandlerTest {
             assertNotNull(schema)
             assertEquals("object", schema!!["type"]?.jsonPrimitive?.content)
             assertTrue(schema["properties"]?.jsonObject?.containsKey("query") == true)
-
-            // Cleanup
-            removeEnv("SERVICES_CONFIG_PATH")
         }
     }
 
@@ -135,9 +134,6 @@ class McpServerHandlerTest {
 
         @Test
         fun `returns TOOL_NOT_FOUND for completely unknown tool`() = runTest {
-            setEnv("SERVICES_CONFIG_PATH", tempConfigFile.absolutePath)
-            setEnv("DEV_MODE", "true")
-
             val response = handler.handleToolCall(
                 requestId = JsonPrimitive(42),
                 namespacedToolName = "nonexistent.fake_tool",
@@ -158,16 +154,10 @@ class McpServerHandlerTest {
             assertNotNull(content)
             val texts = content!!.map { it.jsonObject["text"]?.jsonPrimitive?.content ?: "" }
             assertTrue(texts.any { it.contains("not found") }, "Expected 'not found' in response: $texts")
-
-            removeEnv("SERVICES_CONFIG_PATH")
-            removeEnv("DEV_MODE")
         }
 
         @Test
         fun `returns TOOL_NOT_FOUND for disabled tool`() = runTest {
-            setEnv("SERVICES_CONFIG_PATH", tempConfigFile.absolutePath)
-            setEnv("DEV_MODE", "true")
-
             val response = handler.handleToolCall(
                 requestId = JsonPrimitive(43),
                 namespacedToolName = "testservice.disabled_tool",
@@ -178,9 +168,6 @@ class McpServerHandlerTest {
             val parsed = json.parseToJsonElement(response).jsonObject
             val result = parsed["result"]?.jsonObject
             assertTrue(result!!["isError"]?.jsonPrimitive?.boolean == true)
-
-            removeEnv("SERVICES_CONFIG_PATH")
-            removeEnv("DEV_MODE")
         }
     }
 

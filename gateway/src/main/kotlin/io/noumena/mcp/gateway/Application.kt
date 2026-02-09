@@ -21,6 +21,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import io.ktor.http.auth.*
 import io.ktor.utils.io.*
+import io.noumena.mcp.gateway.auth.ApiKeyAuthProvider
 import io.noumena.mcp.gateway.notifications.NotificationBroadcaster
 import io.noumena.mcp.gateway.server.McpServerHandler
 import io.noumena.mcp.gateway.upstream.UpstreamSessionManager
@@ -169,9 +170,13 @@ fun Application.configureGateway() {
     val notificationBroadcaster = NotificationBroadcaster()
     val upstreamRouter = UpstreamRouter(nplClient = nplClient)
     val upstreamSessionManager = UpstreamSessionManager(upstreamRouter, notificationBroadcaster)
-    
+
     // Create MCP Server handler (transparent proxy)
     val mcpHandler = McpServerHandler(nplClient = nplClient, upstreamRouter = upstreamRouter, upstreamSessionManager = upstreamSessionManager)
+
+    // ─── API Key authentication ──────────────────────────────────────────────
+    val apiKeysPath = System.getenv("API_KEYS_PATH") ?: "/app/configs/api-keys.yaml"
+    val apiKeyProvider = ApiKeyAuthProvider(apiKeysPath)
     
     routing {
         // Health check (public - no auth required)
@@ -403,28 +408,67 @@ fun Application.configureGateway() {
         } // end admin authenticate block
         
         // ─────────────────────────────────────────────────────────────────────
-        // MCP endpoints - require any valid JWT (transparent proxy)
+        // MCP HTTP POST - accepts API key (nmc-xxx) OR JWT
+        // Uses optional JWT auth: Ktor validates JWT if present but doesn't
+        // reject if missing/invalid, allowing API key fallback.
         // ─────────────────────────────────────────────────────────────────────
-        authenticate("keycloak") {
-        
-        // MCP HTTP POST endpoint for agents
+        authenticate("keycloak", optional = true) {
+
         post("/mcp") {
+            val authHeader = call.request.headers[HttpHeaders.Authorization]
+
+            val userId: String
+            val roles: List<String>
+            var tenantId: String? = null
+
+            if (authHeader != null && authHeader.startsWith("Bearer nmc-")) {
+                // API key auth path
+                val apiKey = authHeader.removePrefix("Bearer ").trim()
+                val identity = apiKeyProvider.validate(apiKey)
+                if (identity == null) {
+                    call.respondText(
+                        """{"error": "Invalid API key"}""",
+                        ContentType.Application.Json,
+                        HttpStatusCode.Unauthorized
+                    )
+                    return@post
+                }
+                userId = identity.userId
+                roles = identity.roles
+                tenantId = identity.tenantId
+                logger.info { "╔════════════════════════════════════════════════════════════════╗" }
+                logger.info { "║ MCP REQUEST via HTTP POST (API Key)                           ║" }
+                logger.info { "║ User: $userId  Tenant: $tenantId  Roles: $roles" }
+                logger.info { "╚════════════════════════════════════════════════════════════════╝" }
+            } else {
+                // JWT auth path (validated by Ktor's optional auth)
+                val principal = call.principal<JWTPrincipal>()
+                if (principal == null) {
+                    call.response.header(
+                        HttpHeaders.WWWAuthenticate,
+                        """Bearer resource_metadata="/.well-known/oauth-protected-resource""""
+                    )
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        mapOf("error" to "Authentication required. Provide a Bearer token (JWT or API key nmc-xxx) in the Authorization header.")
+                    )
+                    return@post
+                }
+                userId = principal.payload.getClaim("email")?.asString()
+                    ?: principal.payload.getClaim("preferred_username")?.asString()
+                    ?: principal.payload.subject
+                    ?: "unknown"
+                roles = principal.payload.getClaim("role")?.asList(String::class.java) ?: emptyList()
+                tenantId = principal.payload.getClaim("tenant_id")?.asString()
+                logger.info { "╔════════════════════════════════════════════════════════════════╗" }
+                logger.info { "║ MCP REQUEST via HTTP POST (JWT)                               ║" }
+                logger.info { "║ User: $userId  Tenant: ${tenantId ?: "(default)"}  Roles: $roles" }
+                logger.info { "╚════════════════════════════════════════════════════════════════╝" }
+            }
+
             val requestBody = call.receiveText()
-            val principal = call.principal<JWTPrincipal>()!!
-            // Use email as userId to match UserToolAccess entries (e.g., "jarvis@acme.com")
-            val user = principal.payload.getClaim("email")?.asString()
-                ?: principal.payload.getClaim("preferred_username")?.asString()
-                ?: principal.payload.subject
-                ?: "unknown"
-            val roles = principal.payload.getClaim("role")?.asList(String::class.java) ?: emptyList()
-            
-            logger.info { "╔════════════════════════════════════════════════════════════════╗" }
-            logger.info { "║ MCP REQUEST via HTTP POST                                     ║" }
-            logger.info { "║ User: $user  Roles: $roles" }
-            logger.info { "╚════════════════════════════════════════════════════════════════╝" }
-            
             try {
-                val response = processMcpMessage(requestBody, mcpHandler, user)
+                val response = processMcpMessage(requestBody, mcpHandler, userId, agentSessionId = null, tenantId = tenantId)
                 call.respondText(response, ContentType.Application.Json)
             } catch (e: Exception) {
                 logger.error(e) { "HTTP MCP error" }
@@ -439,16 +483,45 @@ fun Application.configureGateway() {
                 call.respondText(errorResponse.toString(), ContentType.Application.Json, HttpStatusCode.InternalServerError)
             }
         }
-        
+
         // MCP WebSocket endpoint for agents (streaming/realtime)
+        // Also supports API key auth via query parameter: /mcp/ws?apiKey=nmc-xxx
         webSocket("/mcp/ws") {
-            val principal = call.principal<JWTPrincipal>()
-            val user = principal?.payload?.getClaim("email")?.asString()
-                ?: principal?.payload?.getClaim("preferred_username")?.asString()
-                ?: principal?.payload?.subject
-                ?: "unknown"
+            val user: String
+
+            // Check for API key in query parameter (WebSocket can't set custom headers reliably)
+            val queryApiKey = call.request.queryParameters["apiKey"]
+            val authHeader = call.request.headers[HttpHeaders.Authorization]
+
+            if (queryApiKey != null && queryApiKey.startsWith("nmc-")) {
+                val identity = apiKeyProvider.validate(queryApiKey)
+                if (identity == null) {
+                    close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Invalid API key"))
+                    return@webSocket
+                }
+                user = identity.userId
+            } else if (authHeader != null && authHeader.startsWith("Bearer nmc-")) {
+                val apiKey = authHeader.removePrefix("Bearer ").trim()
+                val identity = apiKeyProvider.validate(apiKey)
+                if (identity == null) {
+                    close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Invalid API key"))
+                    return@webSocket
+                }
+                user = identity.userId
+            } else {
+                val principal = call.principal<JWTPrincipal>()
+                if (principal == null) {
+                    close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Authentication required"))
+                    return@webSocket
+                }
+                user = principal.payload.getClaim("email")?.asString()
+                    ?: principal.payload.getClaim("preferred_username")?.asString()
+                    ?: principal.payload.subject
+                    ?: "unknown"
+            }
+
             val wsId = UUID.randomUUID().toString()
-            
+
             logger.info { "╔════════════════════════════════════════════════════════════════╗" }
             logger.info { "║ AGENT CONNECTED via WebSocket (user: $user)" }
             logger.info { "╚════════════════════════════════════════════════════════════════╝" }
@@ -469,7 +542,7 @@ fun Application.configureGateway() {
                     when (frame) {
                         is Frame.Text -> {
                             val text = frame.readText()
-                            val response = processMcpMessage(text, mcpHandler, user)
+                            val response = processMcpMessage(text, mcpHandler, user, agentSessionId = "ws-$wsId")
                             if (response.isNotEmpty()) {
                                 send(Frame.Text(response))
                             }
@@ -590,9 +663,9 @@ fun Application.configureGateway() {
                     ?: "unknown"
 
                 logger.info { "MCP REQUEST via SSE (MCP Inspector) - User: $user" }
-                
+
                 try {
-                    val response = processMcpMessage(requestBody, mcpHandler, user)
+                    val response = processMcpMessage(requestBody, mcpHandler, user, agentSessionId = "sse-$sessionId")
                     
                     if (response.isNotEmpty()) {
                         session.responseChannel.send(response)
@@ -717,7 +790,9 @@ private suspend fun respondAuthServerMetadata(
 private suspend fun processMcpMessage(
     message: String,
     mcpHandler: McpServerHandler,
-    userId: String
+    userId: String,
+    agentSessionId: String? = null,
+    tenantId: String? = null
 ): String {
     val json = Json { 
         ignoreUnknownKeys = true 
@@ -783,7 +858,7 @@ private suspend fun processMcpMessage(
                 logger.info { "║ Arguments: ${json.encodeToString(JsonObject.serializer(), arguments).take(80)}..." }
                 logger.info { "╚══════════════════════════════════════════════════════════════╝" }
                 
-                mcpHandler.handleToolCall(id ?: JsonNull, toolName, arguments, userId)
+                mcpHandler.handleToolCall(id ?: JsonNull, toolName, arguments, userId, agentSessionId, tenantId)
             }
             
             else -> {

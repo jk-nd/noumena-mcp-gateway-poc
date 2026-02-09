@@ -43,7 +43,10 @@ private val logger = KotlinLogging.logger {}
  *
  * Key design decisions:
  *   - Lazy connection: sessions are created on first tool call, not at startup.
- *   - Session keyed by service name (one connection per upstream service).
+ *   - Session keyed by "serviceName:userId" for per-agent isolation.
+ *     Each agent gets its own upstream connection, ensuring:
+ *       (a) Credentials are never shared between agents.
+ *       (b) Upstream notifications are routed to the correct agent.
  *   - STDIO processes are tracked and destroyed on shutdown or session eviction.
  *   - Uses MCP Kotlin SDK's Client for protocol handling (handshake, serialization, framing).
  *   - No `supergateway` wrapper needed — the Gateway natively speaks STDIO/WS/HTTP.
@@ -103,7 +106,7 @@ class UpstreamSessionManager(
         } catch (e: Exception) {
             logger.error(e) { "Failed to forward tool call ${resolved.serviceName}.${resolved.toolName}" }
             // Remove session on error so it can be re-created
-            closeSession(resolved.serviceName)
+            closeSession(sessionKey(resolved.serviceName, userContext.userId))
             UpstreamResult(
                 success = false,
                 error = "Upstream call failed: ${e.message}",
@@ -137,25 +140,33 @@ class UpstreamSessionManager(
             }
         } catch (e: Exception) {
             logger.error(e) { "Failed to discover tools from ${service.name}" }
-            closeSession(service.name)
+            closeSession(sessionKey(service.name, userContext.userId))
             emptyList()
         }
     }
 
     /**
-     * Get or create an upstream session for a service.
-     * Sessions are lazily initialized and cached by service name.
+     * Compute the session key for per-agent isolation.
+     * Each agent gets its own upstream connection per service.
+     */
+    private fun sessionKey(serviceName: String, userId: String): String = "$serviceName:$userId"
+
+    /**
+     * Get or create an upstream session for a service+user pair.
+     * Sessions are lazily initialized and cached by "serviceName:userId".
      */
     private suspend fun getOrCreateSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
+        val key = sessionKey(service.name, userContext.userId)
+
         // Fast path: return existing session
-        sessions[service.name]?.let { return it }
+        sessions[key]?.let { return it }
 
         // Slow path: create new session
-        logger.info { "Creating upstream session for '${service.name}' (type=${service.type})" }
+        logger.info { "Creating upstream session for '${service.name}' user='${userContext.userId}' (type=${service.type})" }
         val managed = createSession(service, userContext)
 
         // Atomically store, or return existing if another coroutine won the race
-        val existing = sessions.putIfAbsent(service.name, managed)
+        val existing = sessions.putIfAbsent(key, managed)
         if (existing != null) {
             managed.close()
             return existing
@@ -169,8 +180,8 @@ class UpstreamSessionManager(
     private suspend fun createSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
         return when (service.type) {
             "MCP_STDIO" -> createStdioSession(service, userContext)
-            "MCP_HTTP" -> createHttpSession(service)
-            "MCP_WS" -> createWebSocketSession(service)
+            "MCP_HTTP" -> createHttpSession(service, userContext)
+            "MCP_WS" -> createWebSocketSession(service, userContext)
             else -> throw IllegalArgumentException(
                 "Unsupported transport type '${service.type}' for service '${service.name}'. " +
                     "Supported types: MCP_STDIO, MCP_HTTP, MCP_WS"
@@ -182,7 +193,7 @@ class UpstreamSessionManager(
 
     /**
      * Register a fallback notification handler on an MCP SDK Client to forward
-     * server-initiated notifications from upstream to connected agents.
+     * server-initiated notifications from upstream to the owning agent.
      *
      * The MCP protocol allows servers to send notifications at any time:
      *   - notifications/tools/list_changed
@@ -192,12 +203,16 @@ class UpstreamSessionManager(
      *
      * Progress notifications (notifications/progress) are already handled
      * per-request by the SDK and are NOT forwarded through this path.
+     *
+     * Notifications are routed to the specific agent that owns this upstream
+     * session (via agentSessionId), not broadcast to all connected agents.
      */
-    private fun registerNotificationForwarding(client: Client, serviceName: String) {
+    private fun registerNotificationForwarding(client: Client, serviceName: String, agentSessionId: String?) {
         client.fallbackNotificationHandler = { notification ->
             logger.info { "╔══════════════════════════════════════════════════════════════╗" }
             logger.info { "║ UPSTREAM NOTIFICATION from '$serviceName'" }
             logger.info { "║ Method: ${notification.method}" }
+            logger.info { "║ Target: ${agentSessionId ?: "broadcast (no agent session)"}" }
             logger.info { "╚══════════════════════════════════════════════════════════════╝" }
 
             try {
@@ -206,12 +221,18 @@ class UpstreamSessionManager(
                     JSONRPCNotification.serializer(),
                     notification
                 )
-                notificationBroadcaster.broadcast(notificationJson)
+                if (agentSessionId != null) {
+                    // Route to the specific agent that owns this upstream session
+                    notificationBroadcaster.send(agentSessionId, notificationJson)
+                } else {
+                    // No agent session (HTTP POST) — broadcast as fallback
+                    notificationBroadcaster.broadcast(notificationJson)
+                }
             } catch (e: Exception) {
                 logger.error(e) { "Failed to forward notification from '$serviceName'" }
             }
         }
-        logger.info { "Registered notification forwarding for '$serviceName'" }
+        logger.info { "Registered notification forwarding for '$serviceName' → ${agentSessionId ?: "broadcast"}" }
     }
 
     // ─── Transport-specific session factories ────────────────────────────────
@@ -283,9 +304,9 @@ class UpstreamSessionManager(
 
         val client = Client(clientInfo, ClientOptions())
         client.connect(transport)
-        registerNotificationForwarding(client, service.name)
+        registerNotificationForwarding(client, service.name, userContext.agentSessionId)
 
-        logger.info { "STDIO session '${service.name}' connected with credentials (PID: ${process.pid()})" }
+        logger.info { "STDIO session '${service.name}' connected for user '${userContext.userId}' (PID: ${process.pid()})" }
         return ManagedSession(
             client = client,
             process = process,
@@ -298,18 +319,18 @@ class UpstreamSessionManager(
     /**
      * Create a Streamable HTTP session (MCP spec HTTP transport).
      */
-    private suspend fun createHttpSession(service: ServiceDefinition): ManagedSession {
+    private suspend fun createHttpSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
         val endpoint = service.endpoint
             ?: throw IllegalArgumentException("MCP_HTTP service '${service.name}' has no endpoint configured")
 
-        logger.info { "Connecting HTTP transport for '${service.name}' → $endpoint" }
+        logger.info { "Connecting HTTP transport for '${service.name}' → $endpoint (user='${userContext.userId}')" }
 
         val transport = StreamableHttpClientTransport(httpClient, endpoint)
         val client = Client(clientInfo, ClientOptions())
         client.connect(transport)
-        registerNotificationForwarding(client, service.name)
+        registerNotificationForwarding(client, service.name, userContext.agentSessionId)
 
-        logger.info { "HTTP session '${service.name}' connected" }
+        logger.info { "HTTP session '${service.name}' connected for user '${userContext.userId}'" }
         return ManagedSession(
             client = client,
             configType = service.type,
@@ -321,18 +342,18 @@ class UpstreamSessionManager(
     /**
      * Create a WebSocket session (MCP WebSocket transport).
      */
-    private suspend fun createWebSocketSession(service: ServiceDefinition): ManagedSession {
+    private suspend fun createWebSocketSession(service: ServiceDefinition, userContext: UserContext): ManagedSession {
         val endpoint = service.endpoint
             ?: throw IllegalArgumentException("MCP_WS service '${service.name}' has no endpoint configured")
 
-        logger.info { "Connecting WebSocket transport for '${service.name}' → $endpoint" }
+        logger.info { "Connecting WebSocket transport for '${service.name}' → $endpoint (user='${userContext.userId}')" }
 
         val transport = WebSocketClientTransport(httpClient, endpoint)
         val client = Client(clientInfo, ClientOptions())
         client.connect(transport)
-        registerNotificationForwarding(client, service.name)
+        registerNotificationForwarding(client, service.name, userContext.agentSessionId)
 
-        logger.info { "WebSocket session '${service.name}' connected" }
+        logger.info { "WebSocket session '${service.name}' connected for user '${userContext.userId}'" }
         return ManagedSession(
             client = client,
             configType = service.type,
@@ -379,10 +400,10 @@ class UpstreamSessionManager(
     // ─── Session lifecycle ───────────────────────────────────────────────────
 
     /**
-     * Close and remove a session by service name.
+     * Close and remove a session by its composite key (serviceName:userId).
      */
-    private fun closeSession(name: String) {
-        sessions.remove(name)?.close()
+    private fun closeSession(key: String) {
+        sessions.remove(key)?.close()
     }
 
     /**
@@ -390,18 +411,22 @@ class UpstreamSessionManager(
      * Called after [ServicesConfigLoader.reload()] to evict sessions
      * for services whose config changed (endpoint, command, type) or
      * services that were removed or disabled.
+     *
+     * Session keys are "serviceName:userId", so we extract the service name
+     * prefix for matching against the new config.
      */
     fun clearStaleSessions(newConfig: ServicesConfig) {
         val newServicesByName = newConfig.services.associateBy { it.name }
 
-        sessions.keys.toList().forEach { name ->
-            val newDef = newServicesByName[name]
-            val currentSession = sessions[name] ?: return@forEach
+        sessions.keys.toList().forEach { key ->
+            val serviceName = key.substringBefore(":")
+            val newDef = newServicesByName[serviceName]
+            val currentSession = sessions[key] ?: return@forEach
 
             // Evict if service was removed, disabled, or config changed
             if (newDef == null || !newDef.enabled || currentSession.hasConfigChanged(newDef)) {
-                logger.info { "Evicting stale session for '$name'" }
-                closeSession(name)
+                logger.info { "Evicting stale session for '$key'" }
+                closeSession(key)
             }
         }
     }

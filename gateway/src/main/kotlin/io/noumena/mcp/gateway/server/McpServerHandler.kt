@@ -61,13 +61,18 @@ class McpServerHandler(
             } else {
                 // Build a lookup: serviceName → set of allowed tool names
                 val accessMap = userAccess.associate { (svc, tools) -> svc to tools }
+                val hasGlobalWildcard = accessMap.containsKey("*")
 
                 enabledServices.flatMap { svc ->
-                    val allowedTools = accessMap[svc.name] ?: return@flatMap emptyList()
-                    val hasWildcard = allowedTools.contains("*")
+                    val allowedTools = if (hasGlobalWildcard) {
+                        accessMap["*"]!!  // DEV_MODE: wildcard for all services
+                    } else {
+                        accessMap[svc.name] ?: return@flatMap emptyList()
+                    }
+                    val hasToolWildcard = allowedTools.contains("*")
 
                     svc.tools
-                        .filter { it.enabled && (hasWildcard || allowedTools.contains(it.name)) }
+                        .filter { it.enabled && (hasToolWildcard || allowedTools.contains(it.name)) }
                         .map { tool -> svc to tool }
                 }
             }
@@ -129,7 +134,9 @@ class McpServerHandler(
         requestId: JsonElement,
         namespacedToolName: String,
         arguments: JsonObject,
-        userId: String
+        userId: String,
+        agentSessionId: String? = null,
+        tenantId: String? = null
     ): String {
         val startTime = System.currentTimeMillis()
 
@@ -184,7 +191,7 @@ class McpServerHandler(
         }
 
         // Step 3: Forward to upstream MCP service with user context for credentials
-        val userContext = UserContext(userId = userId, tenantId = defaultTenantId)
+        val userContext = UserContext(userId = userId, tenantId = tenantId ?: defaultTenantId, agentSessionId = agentSessionId)
         val upstreamResult = upstreamSessionManager.forwardToolCall(resolved, arguments, userContext)
         val durationMs = System.currentTimeMillis() - startTime
 

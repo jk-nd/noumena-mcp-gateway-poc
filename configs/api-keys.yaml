@@ -1,0 +1,8 @@
+# API Keys for MCP Gateway
+# Each key maps to an identity (userId, tenantId, roles) used for policy checks and credential injection.
+# Generate new keys via TUI: System > API Keys > Generate
+#
+# Key format: nmc-<32 hex chars>
+# Keys are cached in memory and reloaded when the file changes.
+
+keys: []

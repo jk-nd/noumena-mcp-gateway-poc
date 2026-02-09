@@ -47,7 +47,35 @@ class NotificationBroadcaster {
     }
 
     /**
+     * Send a notification to a specific connected client.
+     *
+     * Used for per-agent notification routing: upstream notifications from a
+     * session owned by a specific agent are delivered only to that agent.
+     *
+     * @param listenerId The target connection identifier
+     * @param notification JSON-RPC notification string to forward
+     */
+    suspend fun send(listenerId: String, notification: String) {
+        val handler = listeners[listenerId]
+        if (handler == null) {
+            logger.debug { "No listener found for targeted send: $listenerId" }
+            return
+        }
+
+        try {
+            handler(notification)
+            logger.info { "Sent targeted notification to '$listenerId'" }
+        } catch (e: Exception) {
+            logger.warn { "Failed to send notification to listener $listenerId: ${e.message}" }
+            listeners.remove(listenerId)
+        }
+    }
+
+    /**
      * Broadcast a notification to all connected clients.
+     *
+     * Used for system-wide notifications (e.g., tools/list_changed after config reload).
+     * For per-agent upstream notifications, prefer [send] with a specific listener ID.
      *
      * Failed deliveries are logged and the listener is removed to prevent
      * future failures on dead connections.

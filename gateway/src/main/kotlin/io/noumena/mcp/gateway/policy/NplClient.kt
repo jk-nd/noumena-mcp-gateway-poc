@@ -371,6 +371,12 @@ class NplClient {
      * @return List of (serviceName, allowedTools) pairs, or empty list if no access configured (fail-closed)
      */
     suspend fun getUserAccessList(userId: String): List<Pair<String, Set<String>>> {
+        // DEV MODE: Return wildcard access for all services (bypass NPL)
+        if (devMode) {
+            logger.info { "DEV MODE: Returning wildcard access for user '$userId'" }
+            return listOf("*" to setOf("*"))
+        }
+
         return try {
             val gatewayToken = getGatewayToken()
 
