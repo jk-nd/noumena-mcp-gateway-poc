@@ -326,6 +326,8 @@ docker compose build
 
 ## Testing
 
+> **Warning:** The test suite has not been updated to reflect recent changes (UserToolAccess-based tool filtering, `DEFAULT_TENANT_ID`, NPM-via-Docker services, credential `-e` flag injection). Unit tests for pure logic (namespace parsing, JWT identity) should pass, but integration and E2E tests will likely fail due to missing `UserToolAccess` setup and tenant configuration mismatches. Test update is pending.
+
 ```bash
 # Run unit tests
 ./gradlew test
