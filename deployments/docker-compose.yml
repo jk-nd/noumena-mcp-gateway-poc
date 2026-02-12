@@ -1,12 +1,16 @@
-# Gateway Infrastructure - V2 Transparent Proxy Architecture
+# Gateway Infrastructure — Envoy AI Gateway + NPL Governance Architecture
 # Start with: docker compose up -d
 #
-# Network topology:
-#   public-net:  Gateway, Keycloak (agent-facing)
-#   policy-net:  Gateway, NPL Engine (policy checks)
-#   backend-net: Gateway, upstream MCP containers (tool execution)
+# Architecture:
+#   Envoy AI Gateway (port 8000) — MCP protocol, JWT auth, tool filtering, aggregation
+#   Governance Service (port 8090) — NPL ext_authz for stateful policy checks
+#   Supergateway sidecars — wrap STDIO MCP tools as Streamable HTTP
 #
-# For MCP servers, use: docker compose -f docker-compose.mcp.yml up -d
+# Network topology:
+#   public-net:  Envoy Gateway, Keycloak (agent-facing)
+#   policy-net:  Governance Service, NPL Engine (policy checks)
+#   backend-net: Envoy Gateway, supergateway MCP containers (tool execution)
+#   secrets-net: Credential Proxy, Vault (credential injection)
 
 name: gateway
 
@@ -212,68 +216,111 @@ services:
         condition: service_healthy
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Gateway Proxy (spans all networks)
+  # Envoy AI Gateway (public-net — agent-facing MCP endpoint)
   #
-  # The Gateway is a transparent MCP proxy:
-  #   - public-net: accepts agent connections, talks to Keycloak
-  #   - policy-net: checks NPL policy before forwarding
-  #   - secrets-net: requests credentials from Credential Proxy
-  #   - backend-net: forwards approved calls to upstream MCPs
+  # Replaces the Kotlin gateway for:
+  #   - MCP protocol handling (Streamable HTTP)
+  #   - JWT validation (Keycloak JWKS)
+  #   - Tool filtering and aggregation
+  #   - Multi-server routing
+  #   - SSE/streaming support
+  #
+  # Stateful governance delegated to governance-service via ext_authz.
   # ─────────────────────────────────────────────────────────────────────────
-  gateway:
-    build:
-      context: ..
-      dockerfile: deployments/docker/Dockerfile.gateway
+  envoy-gateway:
+    image: envoyproxy/envoy:v1.32-latest
     ports:
-      - "8000:8080"
+      - "8000:8000"   # MCP endpoint (agent-facing)
+      - "9901:9901"   # Envoy admin interface
     volumes:
-      - ../configs/services.yaml:/app/configs/services.yaml:ro
-      # Docker socket for STDIO transport — Gateway spawns upstream MCP containers
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - NPL_URL=http://npl-engine:12000
-      - KEYCLOAK_URL=http://keycloak:11000
-      - KEYCLOAK_REALM=mcpgateway
-      - KEYCLOAK_CLIENT_ID=mcpgateway
-      # Issuer must match what Keycloak puts in tokens (KC_HOSTNAME=keycloak)
-      - KEYCLOAK_ISSUER=http://keycloak:11000/realms/mcpgateway
-      # External URL for browser-facing OAuth redirects (authorization code flow)
-      # Must use 'keycloak' hostname (resolved via /etc/hosts) to match KC_HOSTNAME
-      # so login cookies stay on the same domain throughout the auth flow
-      - KEYCLOAK_EXTERNAL_URL=http://keycloak:11000
-      - GATEWAY_URL=http://gateway:8080
-      - GATEWAY_USERNAME=gateway
-      - GATEWAY_PASSWORD=Welcome123
-      - DEV_MODE=false
-      # Dynamic services configuration
-      - SERVICES_CONFIG_PATH=/app/configs/services.yaml
-      # Credential Proxy
-      - CREDENTIAL_PROXY_URL=http://credential-proxy:9002
-      - DEFAULT_TENANT_ID=acme
+      - ./envoy/envoy-config.yaml:/etc/envoy/envoy.yaml:ro
+      - ./envoy/mcp-servers.json:/etc/envoy/mcp-servers.json:ro
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
     depends_on:
-      npl-engine:
+      keycloak:
         condition: service_healthy
-      credential-proxy:
+      governance-service:
+        condition: service_started
+      duckduckgo-mcp:
         condition: service_started
     networks:
       - public-net
-      - policy-net
-      - secrets-net
       - backend-net
+      - policy-net  # For ext_authz to governance-service
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Example Upstream MCP: DuckDuckGo (backend-net only)
+  # NPL Governance Service (ext_authz backend)
   #
-  # This is an example of an upstream MCP container that the Gateway
-  # proxies to. It's only on backend-net — agents can't reach it directly.
+  # Slim Ktor service implementing Envoy ext_authz contract:
+  #   - Receives authorization checks from Envoy
+  #   - Checks NPL ToolPolicy (service-level) and UserToolAccess (user-level)
+  #   - Returns 200 (allow) or 403 (deny)
+  #
+  # Extracted from the old Kotlin gateway's NplClient.kt
   # ─────────────────────────────────────────────────────────────────────────
-  # Uncomment to enable DuckDuckGo as an upstream MCP via HTTP:
-  # duckduckgo-mcp:
-  #   image: mcp/duckduckgo
-  #   # Expose HTTP endpoint for Gateway to connect to
-  #   # (not exposed to host - only accessible via backend-net)
-  #   networks:
-  #     - backend-net
+  governance-service:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.governance
+    ports:
+      - "8090:8090"
+    environment:
+      PORT: "8090"
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      GATEWAY_USERNAME: "gateway"
+      GATEWAY_PASSWORD: "Welcome123"
+      DEV_MODE: "false"
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - policy-net
+      - public-net  # For Keycloak token requests
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Backend MCP Services (supergateway sidecars)
+  #
+  # Each backend wraps a STDIO-based MCP tool as Streamable HTTP
+  # using supergateway. Only accessible on backend-net.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  # DuckDuckGo MCP — web search
+  duckduckgo-mcp:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.supergateway
+    environment:
+      MCP_COMMAND: "docker run -i --rm mcp/duckduckgo"
+      PORT: "8000"
+    volumes:
+      # Docker socket for spawning MCP containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - backend-net
+
+  # GitHub MCP — GitHub API access (with credential injection)
+  github-mcp:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.supergateway
+    environment:
+      MCP_COMMAND: "docker run -i --rm -e GITHUB_TOKEN mcp/github"
+      PORT: "8000"
+      # Credential injection at startup
+      CREDENTIAL_PROXY_URL: "http://credential-proxy:9002"
+      SERVICE_NAME: "github"
+      TENANT_ID: "acme"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - backend-net
+      - secrets-net  # For credential proxy access
+    profiles:
+      - github  # Only enable when GitHub credentials are configured
 
   # ─────────────────────────────────────────────────────────────────────────
   # Integration Test Runner (on-demand)
@@ -285,33 +332,19 @@ services:
     environment:
       - NPL_URL=http://npl-engine:12000
       - KEYCLOAK_URL=http://localhost:11000
-      - GATEWAY_URL=http://gateway:8080
+      - GATEWAY_URL=http://envoy-gateway:8000
     depends_on:
       npl-engine:
         condition: service_healthy
       keycloak:
         condition: service_healthy
-      gateway:
+      envoy-gateway:
         condition: service_started
     networks:
       - public-net
       - policy-net
     profiles:
       - test
-
-# ─────────────────────────────────────────────────────────────────────────
-# Network Isolation
-#
-# Four-tier network model:
-#   public-net:  Agent-facing (Gateway, Keycloak)
-#   policy-net:  Policy enforcement (Gateway ↔ NPL Engine)
-#   secrets-net: Credential injection (Gateway ↔ Credential Proxy ↔ Vault)
-#   backend-net: Upstream MCPs (Gateway ↔ MCP containers)
-#
-# Agents can only reach the Gateway and Keycloak.
-# Upstream MCPs are isolated from agents, NPL, and secrets.
-# Only Credential Proxy has Vault access.
-# ─────────────────────────────────────────────────────────────────────────
 
   # CORS proxy for NPL Engine (needed for Inspector browser access)
   npl-cors-proxy:
