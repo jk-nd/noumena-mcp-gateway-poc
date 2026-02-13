@@ -1,0 +1,14 @@
+{
+  "name": "mock-calendar-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mock Calendar MCP server for bilateral streaming tests",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "uuid": "^11.0.0"
+  }
+}

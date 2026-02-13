@@ -1,21 +1,21 @@
-# MCP Gateway v2 — Transparent Proxy Architecture
+# MCP Gateway v2 — Envoy AI Gateway + NPL Governance Architecture
 
 ## Overview
 
-This document describes the target architecture for the Noumena MCP Gateway, refactored from a tool-definition-owning gateway into a **transparent MCP proxy** with interceptor-based authentication, policy enforcement, and credential injection.
+This document describes the architecture for the Noumena MCP Gateway, built on **Envoy AI Gateway** for MCP protocol handling and routing, with a dedicated **Governance Service** for two-tier policy enforcement via NPL.
 
-The Gateway sits between agents/humans and upstream MCP servers. It does not own tool definitions — it discovers and forwards them from upstream services. All MCP messages flow through the proxy, where they are authenticated, authorized via NPL, and optionally enriched with credentials before reaching the upstream.
+The system sits between agents/humans and upstream MCP servers. Envoy handles the MCP protocol (Streamable HTTP), JWT validation, and routing. The Governance Service implements Envoy's `ext_authz` contract to enforce access control: fast RBAC from local config (sub-millisecond, no network) followed by stateful NPL governance checks (ToolPolicy + UserToolAccess). Upstream STDIO MCP tools run as **supergateway sidecars** that wrap STDIO as Streamable HTTP.
 
 ---
 
 ## Design Principles
 
-1. **Transparent proxy** — the Gateway should behave as if it's not there, except for security
-2. **Agents never see credentials** — secrets flow Vault → Credential Proxy → upstream only, never toward the agent
+1. **Envoy as the edge** — all agent traffic enters through Envoy; no custom protocol handling code
+2. **Agents never see credentials** — secrets flow Vault -> Credential Proxy -> supergateway sidecar -> upstream only, never toward the agent
 3. **NPL as pure decision engine** — NPL decides allow/deny and credential mapping, but never handles secrets
-4. **Bidirectional streaming** — designed for SSE/WebSocket end-to-end from day one, supporting upstream notifications
-5. **Fail-closed** — if NPL is unreachable, all requests are denied
-6. **Per-session isolation** — each agent connection gets its own set of upstream MCP sessions
+4. **Two-tier authorization** — fast local RBAC (sub-ms) gates expensive NPL calls; fail-closed at both tiers
+5. **Fail-closed** — if the Governance Service or NPL is unreachable, all requests are denied
+6. **Sidecar pattern** — each STDIO MCP tool runs in its own supergateway container, isolated on backend-net
 7. **Convention over configuration** — Vault paths, tool namespaces, and service registration follow predictable patterns
 
 ---
@@ -23,46 +23,70 @@ The Gateway sits between agents/humans and upstream MCP servers. It does not own
 ## Component Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  public-net                                                         │
-│                                                                     │
-│  ┌──────────────┐      ┌──────────┐                                │
-│  │   Keycloak   │      │ Gateway  │◄──── Agents / Humans           │
-│  │   (OIDC)     │      │ MCP Proxy│     (JWT auth)                 │
-│  └──────────────┘      └────┬─────┘                                │
-│                              │                                      │
-├──────────────────────────────┼──────────────────────────────────────┤
-│  policy-net                  │                                      │
-│                              │                                      │
-│  ┌──────────────┐      ┌────┴─────┐                                │
-│  │  NPL Engine  │◄─────│ Gateway  │                                │
-│  │              │      │          │                                │
-│  │  Protocols:  │      └────┬─────┘                                │
-│  │  - ToolPolicy│           │                                      │
-│  │  - CredMap   │           │                                      │
-│  │  - SvcReg    │           │                                      │
-│  └──────────────┘           │                                      │
-│                              │                                      │
-├──────────────────────────────┼──────────────────────────────────────┤
-│  secrets-net                 │                                      │
-│                              │                                      │
-│  ┌──────────────┐      ┌────┴──────────┐                           │
-│  │    Vault     │◄─────│  Credential   │                           │
-│  │  (per tenant)│      │  Proxy        │                           │
-│  └──────────────┘      └────┬──────────┘                           │
-│                              │                                      │
-├──────────────────────────────┼──────────────────────────────────────┤
-│  backend-net                 │                                      │
-│                              │                                      │
-│  ┌──────────┐  ┌──────────┐ │ ┌──────────┐                        │
-│  │ DuckDuck │  │  Slack   │◄┘ │  Gmail   │  ...                   │
-│  │ Go MCP   │  │  MCP     │   │  MCP     │                        │
-│  └──────────┘  └──────────┘   └──────────┘                        │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------------+
+|  public-net                                                          |
+|                                                                      |
+|  +--------------+      +-------------------+                         |
+|  |   Keycloak   |      | Envoy AI Gateway  |<---- Agents / Humans   |
+|  |   (OIDC)     |      | (port 8000)       |      (JWT auth)        |
+|  +--------------+      | - MCP Streamable   |                        |
+|                         |   HTTP             |                        |
+|                         | - JWT validation   |                        |
+|                         |   (jwt_authn)      |                        |
+|                         | - ext_authz        |                        |
+|                         | - SSE streaming    |                        |
+|                         +--------+----------+                        |
+|                                  |                                    |
++----------------------------------+------------------------------------+
+|  policy-net                      |  ext_authz                        |
+|                                  v                                    |
+|  +--------------+      +-------------------+                         |
+|  |  NPL Engine  |<-----|  Governance Svc   |                         |
+|  |              |      |  (Kotlin/Ktor)    |                         |
+|  |  Protocols:  |      |  port 8090        |                         |
+|  |  - ToolPolicy|      |                   |                         |
+|  |  - UserTool  |      | 1. Fast RBAC      |                         |
+|  |    Access    |      |    (services.yaml)|                         |
+|  |  - CredMap   |      | 2. NPL governance |                         |
+|  |  - SvcReg    |      +-------------------+                         |
+|  +--------------+                                                    |
+|                                                                      |
++----------------------------------------------------------------------+
+|  secrets-net                                                         |
+|                                                                      |
+|  +--------------+      +-------------------+                         |
+|  |    Vault     |<-----|  Credential Proxy |                         |
+|  |  (per tenant)|      |  (port 9002)      |                         |
+|  +--------------+      +-------------------+                         |
+|                                  ^                                    |
++----------------------------------+------------------------------------+
+|  backend-net                     |  credential fetch at startup      |
+|                                  |                                    |
+|  +------------------+  +------------------+  +------------------+    |
+|  | duckduckgo-mcp   |  |  github-mcp      |  | mock-calendar-   |   |
+|  | (supergateway    |  |  (supergateway   |  |  mcp             |   |
+|  |  sidecar)        |  |   sidecar)       |  | (HTTP-native)    |   |
+|  | wraps STDIO as   |  |  wraps STDIO as  |  | POST /mcp +      |   |
+|  | Streamable HTTP  |  |  Streamable HTTP |  | GET /mcp (SSE)   |   |
+|  +------------------+  +------------------+  +------------------+   |
+|                                                                      |
++----------------------------------------------------------------------+
 ```
 
-**Network isolation**: Each component sits on only the networks it needs. The Gateway spans public-net, policy-net, and connects to the Credential Proxy on secrets-net. Upstream MCP containers are on backend-net. No component spans more than two networks except the Gateway.
+### Network Isolation
+
+Each component sits on only the networks it needs:
+
+| Component | Networks | Rationale |
+|-----------|----------|-----------|
+| **Envoy AI Gateway** | public-net, backend-net, policy-net | Receives agent traffic, routes to backends, sends ext_authz to Governance Service |
+| **Governance Service** | policy-net, public-net | ext_authz from Envoy; calls NPL Engine on policy-net; calls Keycloak on public-net for service tokens |
+| **Keycloak** | public-net | Agent-facing OIDC provider; JWKS endpoint for Envoy and NPL Engine |
+| **NPL Engine** | policy-net, public-net | Policy decisions; Keycloak for token validation |
+| **Supergateway sidecars** | backend-net (+ secrets-net if credentials needed) | Only reachable by Envoy; credential fetch at startup |
+| **Mock Calendar MCP** | backend-net | HTTP-native MCP server for bilateral streaming tests |
+| **Credential Proxy** | secrets-net, policy-net | Fetches from Vault, serves credentials to sidecars |
+| **Vault** | secrets-net | Credential storage only |
 
 ---
 
@@ -90,12 +114,12 @@ The same agent program can be spawned for different users. Each instance is a se
 
 ```
 Finance Agent (program)
-  ├── Instance F1: JWT sub=F1, act_on_behalf_of=alice  → Alice's credentials
-  ├── Instance F2: JWT sub=F2, act_on_behalf_of=bob    → Bob's credentials
-  └── Instance F3: JWT sub=F3, act_on_behalf_of=self   → service account credentials
+  +-- Instance F1: JWT sub=F1, act_on_behalf_of=alice  -> Alice's credentials
+  +-- Instance F2: JWT sub=F2, act_on_behalf_of=bob    -> Bob's credentials
+  +-- Instance F3: JWT sub=F3, act_on_behalf_of=self   -> service account credentials
 ```
 
-The Gateway doesn't care about the program — it cares about the JWT. The JWT subject determines the session; `act_on_behalf_of` determines whose credentials to fetch.
+The JWT subject determines the session; `act_on_behalf_of` determines whose credentials to fetch.
 
 ---
 
@@ -112,196 +136,245 @@ github.create_issue
 duckduckgo.search
 ```
 
-When the Gateway aggregates `tools/list` from upstream MCPs, it prefixes each tool with the service name. When routing `tools/call`, it strips the prefix to determine the target service and the actual tool name.
+When Envoy aggregates `tools/list` from upstream MCP services, tools are prefixed with the service name. When routing `tools/call`, the prefix determines the target supergateway sidecar and the actual tool name.
 
 ---
 
-## Message Flow — Forward Direction (Agent → Upstream)
+## Message Flow — Forward Direction (Agent -> Upstream)
 
 ```
-1. Agent sends tools/call to Gateway:
+1. Agent sends tools/call to Envoy AI Gateway (port 8000):
    Authorization: Bearer <agent-JWT>
+   POST /mcp
    {"method":"tools/call","params":{"name":"slack.send_message","arguments":{...}}}
 
-2. Gateway:
-   a. Validates JWT → identity = finance-agent, on_behalf_of = alice
-   b. Parses namespace → service = slack, tool = send_message
-   c. NPL Check (ToolPolicy): Can finance-agent call send_message on slack for alice?
-      → Fail-closed if NPL unreachable
-      → Denied → return error to agent
-      → Allowed → continue
+2. Envoy — JWT validation (jwt_authn filter):
+   a. Validates JWT signature against Keycloak JWKS
+   b. Checks issuer, audience claims
+   c. Forwards JWT in Authorization header to downstream filters
+   d. If invalid -> 401 Unauthorized (agent never reaches backend)
 
-3. Gateway → Credential Proxy:
-   Forwards request with identity headers:
-     X-Agent-Session: A1
-     X-User-Identity: alice
-     X-Service: slack
-   Body: original tools/call (with namespace stripped)
+3. Envoy — ext_authz to Governance Service:
+   a. Sends full request (headers + JSON-RPC body) to governance-service:8090
+   b. Governance Service parses JSON-RPC body:
+      - Extracts method ("tools/call"), tool name ("slack.send_message")
+   c. Governance Service decodes JWT from Authorization header:
+      - Extracts userId (email > preferred_username > sub)
+   d. Non-tool-call methods (initialize, tools/list, ping) -> allow immediately
+   e. For tools/call:
 
-4. Credential Proxy:
-   a. Compute Vault path by convention: secret/services/slack/users/alice/default
-   b. Vault lookup: GET secret/services/slack/users/alice/default
-      → Returns: { access_token: "xoxb-...", refresh_token: "..." }
-   c. If access_token expired → refresh via OAuth token endpoint → store new tokens in Vault
-   d. Open/reuse upstream MCP session for (A1, slack) with Authorization header
-   e. Forward tools/call to upstream Slack MCP
-   
-   (Future: NPL CredentialMapping could gate step (a) and select the variant)
+      FAST PATH (sub-ms, no network):
+        Check services.yaml user_access config:
+        - Find user by userId
+        - Parse namespace: "slack.send_message" -> service=slack, tool=send_message
+        - Check if user has access to slack.send_message (or wildcard "slack.*")
+        - If denied -> 403 (never hits NPL)
 
-5. Upstream Slack MCP executes, returns result
+      SLOW PATH (NPL, only if fast path passed):
+        - ToolPolicy.checkAccess(service=slack, tool=send_message, user=alice)
+        - UserToolAccess.hasAccess(service=slack, tool=send_message)
+        - Both must pass -> allow
+        - Either fails -> 403
 
-6. Response flows back: Upstream → Credential Proxy → Gateway → Agent
-   (no credentials in the response)
+   f. Governance Service returns 200 (allow) or 403 (deny) to Envoy
+
+4. Envoy — route to backend:
+   a. Routes request to the appropriate supergateway sidecar (e.g., slack-mcp:8000)
+   b. Sidecar receives Streamable HTTP request
+   c. Sidecar forwards to the wrapped STDIO MCP tool via stdin/stdout
+   d. STDIO tool executes and returns result via stdout
+
+5. Response flows back:
+   STDIO tool -> supergateway sidecar -> Envoy -> Agent
+   (no credentials in the response — they were injected at sidecar startup)
 ```
 
 ---
 
-## Message Flow — Reverse Direction (Upstream → Agent)
+## Message Flow — Reverse Direction (Upstream -> Agent)
 
-Upstream MCP servers can send notifications (e.g., `notifications/resources/updated`). These flow back through the same bidirectional session:
+Upstream MCP servers can send notifications (e.g., `notifications/resources/updated`). These flow back through SSE streaming via **bilateral (bidirectional) streaming**:
+
+### Via Supergateway Sidecars (STDIO tools)
 
 ```
-1. Upstream Gmail MCP sends notification on session X
+1. STDIO MCP tool sends notification via stdout
 
-2. Credential Proxy:
-   - Session X belongs to agent session A1
-   - Pass through notification as-is (trust upstream for POC; sanitize later)
-   - Forward to Gateway
+2. Supergateway sidecar:
+   - Receives notification from STDIO process
+   - Forwards as SSE event on the Streamable HTTP connection
 
-3. Gateway:
-   - Session A1 maps to the agent's SSE/WebSocket connection
-   - Forward notification to agent
+3. Envoy:
+   - Streams SSE event back to the agent's connection
+   - No authorization check on reverse direction (trust upstream)
 
 4. Agent receives notification
    - May choose to call tools/call in response (goes through forward flow)
 ```
 
-**Key rule**: Each agent connection to the Gateway maps 1:1 to its own set of upstream sessions. Notifications on an upstream session go to the agent that established it. No fan-out, no routing decisions — the session binding is the routing.
+### Via HTTP-native MCP Servers (e.g., mock-calendar-mcp)
+
+HTTP-native MCP servers support bilateral streaming directly without supergateway:
+
+```
+1. Agent opens GET /mcp with Accept: text/event-stream
+   (JWT auth + ext_authz governance check at stream setup)
+
+2. Envoy routes to HTTP-native MCP server (timeout: 0s — never timeout)
+
+3. MCP server pushes SSE notifications:
+   event: message
+   data: {"jsonrpc":"2.0","method":"notifications/message","params":{...}}
+
+4. Agent receives notifications as long as SSE connection is open
+   - May call POST /mcp tools/call in response (separate forward flow)
+```
+
+The mock-calendar-mcp server demonstrates this pattern: it sends periodic calendar notifications ("Meeting starting in 5 minutes") over GET /mcp while handling normal JSON-RPC requests on POST /mcp.
+
+**Key rule**: Each agent connection to Envoy maps to its own set of upstream sessions via Envoy's routing. Notifications on an upstream session go to the agent that established it.
 
 ---
 
-## OAuth 2.0 Authentication Flow
+## JWT Authentication
 
-The Gateway implements the MCP authentication specification, acting as both the protected resource and an OAuth proxy to Keycloak. This enables browser-based clients (like MCP Inspector) to authenticate without manual token management.
+Envoy handles JWT validation directly using its `jwt_authn` HTTP filter. There are no OAuth proxy endpoints implemented in the gateway.
 
-### Discovery Endpoints
+### How It Works
 
-| Endpoint | RFC | Purpose |
-|----------|-----|---------|
-| `GET /.well-known/oauth-protected-resource` | RFC 9728 | Returns resource metadata pointing to the Gateway as authorization server |
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 | Returns OAuth server metadata (endpoints, supported grants, PKCE) |
+1. Envoy's `jwt_authn` filter validates the JWT signature against Keycloak's JWKS endpoint
+2. Claims (issuer, audience) are verified against the Envoy configuration
+3. The validated JWT is forwarded in the `Authorization` header to downstream filters and backends
+4. Invalid or missing JWTs on protected routes result in a 401 response from Envoy itself
 
-### OAuth Proxy Endpoints
+### Envoy jwt_authn Configuration
 
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /authorize` | Redirects to Keycloak's authorization endpoint (browser-facing URL) |
-| `POST /token` | Proxies token exchange to Keycloak (internal URL) |
-| `POST /register` | Dynamic client registration (RFC 7591) — returns pre-configured client info |
+```yaml
+providers:
+  keycloak:
+    issuer: "http://keycloak:11000/realms/mcpgateway"
+    audiences: ["account", "mcpgateway"]
+    remote_jwks:
+      http_uri:
+        uri: "http://keycloak:11000/realms/mcpgateway/protocol/openid-connect/certs"
+        cluster: keycloak
+        timeout: 5s
+      cache_duration: { seconds: 300 }
+    forward: true
+    payload_in_metadata: "jwt_payload"
+rules:
+  - match: { prefix: "/mcp" }
+    requires: { provider_name: "keycloak" }
+  - match: { prefix: "/sse" }
+    requires: { provider_name: "keycloak" }
+  - match: { path: "/health" }
+    requires: { allow_missing_or_failed: {} }
+```
+
+### Token Acquisition
+
+Agents and users obtain JWTs from Keycloak directly (e.g., via the Keycloak token endpoint or browser-based OIDC flow). The gateway itself does not proxy OAuth endpoints — it only validates the resulting JWT.
+
+For local development, Keycloak runs on `keycloak:11000` (via `/etc/hosts: 127.0.0.1 keycloak`), and pre-provisioned users (gateway, jarvis, alice, etc.) can obtain tokens via the Keycloak password grant.
+
+---
+
+## Supergateway Sidecar Architecture
+
+The gateway no longer spawns STDIO processes directly. Instead, each STDIO-based MCP tool runs as a **supergateway sidecar container** that wraps the STDIO interface as Streamable HTTP.
+
+### How It Works
+
+1. Each STDIO MCP tool gets its own Docker container running supergateway (Node.js)
+2. Supergateway starts the STDIO MCP tool as a child process
+3. Supergateway exposes the tool's MCP interface as Streamable HTTP on a port (typically 8000)
+4. Envoy routes to these sidecar containers on backend-net
+
+### Benefits Over Direct STDIO
+
+| Aspect | Old (Direct STDIO) | New (Supergateway Sidecar) |
+|--------|--------------------|-----------------------------|
+| Process management | Gateway spawns/manages Docker processes, needs Docker socket | Each sidecar manages its own child process |
+| Credential injection | Per-request by Gateway via Docker `-e` flags | At container startup via entrypoint calling Credential Proxy |
+| Protocol | Mixed (STDIO, HTTP, WebSocket in Gateway code) | Uniform Streamable HTTP from Envoy's perspective |
+| Scaling | Single Gateway bottleneck for process management | Each sidecar is independent; Envoy load-balances |
+| Isolation | Shared Gateway process space | Separate container per tool |
+
+### Configuration Example
+
+In `docker-compose.yml`, each sidecar is defined as a service:
+
+```yaml
+# DuckDuckGo MCP — web search (no credentials needed)
+duckduckgo-mcp:
+  build:
+    context: ..
+    dockerfile: deployments/docker/Dockerfile.supergateway
+  environment:
+    MCP_COMMAND: "docker run -i --rm mcp/duckduckgo"
+    PORT: "8000"
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+  networks:
+    - backend-net
+
+# GitHub MCP — with credential injection at startup
+github-mcp:
+  build:
+    context: ..
+    dockerfile: deployments/docker/Dockerfile.supergateway
+  environment:
+    MCP_COMMAND: "docker run -i --rm -e GITHUB_TOKEN mcp/github"
+    PORT: "8000"
+    CREDENTIAL_PROXY_URL: "http://credential-proxy:9002"
+    SERVICE_NAME: "github"
+    TENANT_ID: "acme"
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+  networks:
+    - backend-net
+    - secrets-net  # For credential proxy access
+```
+
+Envoy routes to these sidecars via cluster definitions:
+
+```yaml
+clusters:
+  - name: duckduckgo_mcp
+    type: STRICT_DNS
+    load_assignment:
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: duckduckgo-mcp
+                    port_value: 8000
+```
+
+---
+
+## Credential Injection
+
+Credentials are injected at **supergateway container startup**, not per-request by the gateway.
 
 ### Flow
 
 ```
-1. Client sends POST /mcp (no token)
-2. Gateway returns 401 with:
-   WWW-Authenticate: Bearer resource_metadata="/.well-known/oauth-protected-resource"
-
-3. Client discovers OAuth endpoints:
-   GET /.well-known/oauth-protected-resource → authorization_servers: [gateway-url]
-   GET /.well-known/oauth-authorization-server → endpoints, PKCE config
-
-4. Client registers (optional):
-   POST /register → client_id, redirect_uris
-
-5. Client initiates authorization code flow with PKCE:
-   GET /authorize?response_type=code&client_id=...&code_challenge=...
-   → Gateway redirects to Keycloak login page
-
-6. User authenticates at Keycloak
-   → Keycloak redirects to client callback with authorization code
-
-7. Client exchanges code for token:
-   POST /token (code, code_verifier)
-   → Gateway proxies to Keycloak, returns JWT
-
-8. Client reconnects with JWT:
-   POST /mcp with Authorization: Bearer <JWT>
-   → Authenticated ✓
+1. Supergateway sidecar starts
+2. Entrypoint script checks if CREDENTIAL_PROXY_URL is set
+3. If set, calls Credential Proxy:
+     GET http://credential-proxy:9002/credentials?service=github&tenant=acme
+4. Credential Proxy:
+   a. Computes Vault path: secret/data/tenants/acme/services/github/...
+   b. Fetches credentials from Vault
+   c. Returns credentials as environment variables
+5. Sidecar exports credentials as env vars (e.g., GITHUB_TOKEN)
+6. Sidecar starts the STDIO MCP tool with those env vars
+7. All subsequent tool calls use the pre-injected credentials
 ```
 
-### URL Routing
-
-The Gateway uses two Keycloak URLs:
-- **Internal** (`KEYCLOAK_URL`): Used for JWT validation (JWKS) and token proxy — resolved via Docker DNS
-- **External** (`KEYCLOAK_EXTERNAL_URL`): Used for browser redirects in `/authorize` — must be reachable by the browser
-
-For local development, both resolve to `keycloak:11000` (via `/etc/hosts: 127.0.0.1 keycloak`). This ensures cookies set during the Keycloak login page stay on the same domain throughout the flow.
-
----
-
-## Multi-Transport Upstream Support
-
-The Gateway connects to upstream MCP services using the transport appropriate for each service. Transport type is configured per-service in `services.yaml`.
-
-| Type | Config Value | How It Works |
-|------|-------------|--------------|
-| **STDIO** | `MCP_STDIO` | Gateway runs the configured command (e.g., `docker run -i --rm <image>` or `docker run -i --rm node:22-slim npx -y <package>`) and communicates via stdin/stdout. Containers are ephemeral — spawned on first tool call, destroyed after. |
-| **HTTP** | `MCP_HTTP` | Gateway sends HTTP POST requests to the upstream's endpoint URL. Uses MCP Streamable HTTP transport. |
-| **WebSocket** | `MCP_WS` | Gateway opens a persistent WebSocket connection to the upstream's endpoint URL. |
-
-### STDIO Transport Details
-
-For STDIO services, the Gateway:
-1. Spawns a Docker container on first tool call using the configured command (e.g., `docker run -i --rm <image>` for Docker images, or `docker run -i --rm node:22-slim npx -y <package>` for NPM packages)
-2. Communicates using the MCP SDK's `StdioClientTransport`
-3. Manages the process lifecycle (tracks PID, cleans up on shutdown)
-4. Requires Docker socket mounted in the Gateway container (`/var/run/docker.sock`)
-5. Requires Docker CLI installed in the Gateway image
-6. For services requiring credentials, injects them as `-e KEY=VALUE` Docker flags (inserted after `docker run`)
-
-### Configuration Example
-
-```yaml
-services:
-  - name: duckduckgo
-    displayName: DuckDuckGo
-    type: MCP_STDIO
-    command: docker run -i --rm mcp/duckduckgo
-    enabled: true
-    tools:
-      - name: search
-        enabled: true
-
-  - name: gemini
-    displayName: Google Gemini
-    type: MCP_STDIO
-    command: "docker run -i --rm node:22-slim npx"
-    args: ["-y", "@houtini/gemini-mcp"]
-    requiresCredentials: true
-    enabled: true
-    tools:
-      - name: gemini_chat
-        enabled: true
-
-  - name: github
-    displayName: GitHub
-    type: MCP_HTTP
-    endpoint: http://github-mcp:8080/mcp
-    enabled: true
-    tools:
-      - name: get_issue
-        enabled: true
-```
-
----
-
-## Lazy Connection with "Waking Up" Indicator
-
-Upstream MCP connections are established **lazily** on first `tools/call`, not eagerly at connect time.
-
-- `tools/list` returns tools from the ServiceRegistry / NPL configuration (not live-discovered)
-- On first `tools/call` for a service, the upstream connection is established
-- The agent may see a brief delay; the Gateway can indicate "waking up tool" via progress notifications
+This means credentials are fetched once at startup, not on every request. For services requiring per-user credentials, a different model will be needed (future work).
 
 ---
 
@@ -366,10 +439,9 @@ When a service is added via TUI/API:
 4. Admin configures rules via permissions
 
 When a service is removed:
-1. All three protocol instances → `become removed`
-2. Upstream sessions closed
-3. Docker container stopped
-4. Vault credentials optionally retained for audit
+1. All three protocol instances -> `become removed`
+2. Supergateway sidecar container stopped
+3. Vault credentials optionally retained for audit
 
 **No NPL redeployment required** — protocols are the schema, instances are the data.
 
@@ -387,7 +459,7 @@ Analysis of popular MCP servers reveals three authentication patterns:
 | Brave Search | API Key | Per-org |
 | DuckDuckGo | None | Free API |
 
-**Handling**: Store in Vault, inject as HTTP header. Simple lookup, no refresh.
+**Handling**: Store in Vault, inject at supergateway startup as environment variables. Simple lookup, no refresh.
 
 ### Category 2: OAuth 2.0 (User-Delegated) (~70% of services)
 
@@ -421,25 +493,25 @@ Separate Vault instance per tenant for hard isolation.
 secret/
   services/
     {service-name}/
-      manifest.json              ← auth type, credential schema, OAuth config
+      manifest.json              <- auth type, credential schema, OAuth config
       shared/
-        default                  ← org-wide credential (if applicable)
+        default                  <- org-wide credential (if applicable)
       users/
         {user-sub}/
-          default                ← user's primary credential
-          {variant}              ← alternatives (readonly, full, etc.)
+          default                <- user's primary credential
+          {variant}              <- alternatives (readonly, full, etc.)
   app/
-    {provider}/                  ← OAuth app registrations (client_id, client_secret)
+    {provider}/                  <- OAuth app registrations (client_id, client_secret)
 ```
 
 The Credential Proxy constructs paths from convention:
 
 ```
 resolve(user=alice, service=slack, variant=readonly)
-  → secret/services/slack/users/alice/readonly
+  -> secret/services/slack/users/alice/readonly
 
 resolve(service=duckduckgo, shared=true)
-  → secret/services/duckduckgo/shared/default
+  -> secret/services/duckduckgo/shared/default
 ```
 
 No hardcoded paths. The path is computed from `(service, user, variant)`.
@@ -460,7 +532,7 @@ When an access token expires (runtime, no user interaction):
      &client_secret=<app_client_secret>
 4. Provider returns: new access_token (+ optionally new refresh_token for Slack)
 5. Store updated tokens in Vault
-6. Use new access_token for upstream MCP session
+6. Use new access_token for upstream MCP tool
 ```
 
 All server-to-server. Agent is not involved and never sees any tokens.
@@ -471,13 +543,14 @@ All server-to-server. Agent is not involved and never sees any tokens.
 
 | Property | Enforcement |
 |----------|-------------|
-| Agent never sees upstream credentials | Credentials flow Vault → Credential Proxy → upstream only, never toward agent |
+| Agent never sees upstream credentials | Credentials injected at sidecar startup; flow Vault -> Credential Proxy -> supergateway sidecar -> STDIO tool only |
 | NPL never handles secrets | NPL returns vault paths / policy decisions, never credential values |
-| Fail-closed on NPL outage | All requests denied if NPL is unreachable |
-| Per-session isolation | Each agent connection gets independent upstream sessions |
-| Network isolation | Four Docker networks; no component spans more than two (except Gateway) |
-| Credential direction is one-way | Secrets flow toward upstream; notifications flow toward agent; the two never mix |
+| Two-tier fail-closed | Fast RBAC denies first; NPL denies second; both must pass for access |
+| Fail-closed on governance outage | Envoy `failure_mode_allow: false` — all requests denied if Governance Service or NPL is unreachable |
+| Network isolation | Four Docker networks; Envoy spans three (public, backend, policy); all other components span at most two |
+| Credential direction is one-way | Secrets flow toward upstream tools; responses flow toward agent; the two never mix |
 | Tenant isolation | Separate Vault per tenant; NPL policies scoped by organization claim |
+| No Docker socket in gateway | Envoy has no Docker socket; only supergateway sidecars mount it for spawning STDIO tool containers |
 
 ---
 
@@ -485,31 +558,33 @@ All server-to-server. Agent is not involved and never sees any tokens.
 
 | Component | Technology |
 |-----------|------------|
-| Gateway | Kotlin, Ktor, SSE/WebSocket |
+| Edge Gateway | Envoy AI Gateway (`envoyproxy/envoy:v1.32-latest`), port 8000 |
+| Governance Service | Kotlin, Ktor (`ext_authz` backend), port 8090 |
 | NPL Engine | Noumena Platform |
 | Credential Proxy | Kotlin, Ktor |
 | Secrets | HashiCorp Vault |
-| Auth | Keycloak (OIDC) |
-| Upstream MCP | Docker containers / NPM packages via Docker-wrapped npx (any MCP server) |
+| Auth | Keycloak (OIDC) — JWT validation via Envoy `jwt_authn` filter |
+| Backend MCP | Supergateway (Node.js) wrapping STDIO tools as Streamable HTTP; HTTP-native MCP servers (Express/Node.js) for bilateral streaming |
 | TUI | TypeScript, @clack/prompts |
 | Container Orchestration | Docker Compose |
 
 ---
 
----
-
-## Current Architecture (V2)
+## Current Architecture Summary
 
 ```
-Agent → Gateway (transparent proxy, intercepts)
-          → NPL (policy check + credential selection)
-          → Credential Proxy → Vault (credential fetch + inject)
-          → Upstream MCP container (direct connection)
+Agent -> Envoy AI Gateway (JWT validated, Streamable HTTP)
+           -> Governance Service (ext_authz: fast RBAC + NPL governance)
+              -> NPL Engine (ToolPolicy.checkAccess, UserToolAccess.hasAccess)
+           -> Supergateway Sidecar (Streamable HTTP -> STDIO MCP tool)
+
+Credential injection:
+  Sidecar startup -> Credential Proxy -> Vault -> env vars -> STDIO tool
 ```
 
-- Gateway discovers tools from upstream MCPs
-- Direct MCP-to-MCP connections (STDIO/Streamable HTTP/WebSocket)
-- Bidirectional streaming for notifications
-- Credential injection isolated from Gateway and agents
-- NPL as runtime source of truth for all policy decisions
-- Atomic TUI operations with rollback on NPL sync failure
+- Envoy handles MCP protocol, JWT validation, SSE streaming, and routing
+- Governance Service provides two-tier authorization via Envoy ext_authz
+- Supergateway sidecars wrap STDIO tools as uniform Streamable HTTP endpoints
+- Credential injection happens at container startup, not per-request
+- NPL remains the runtime source of truth for stateful policy decisions
+- Fast RBAC from services.yaml gates expensive NPL calls (sub-ms, no network)

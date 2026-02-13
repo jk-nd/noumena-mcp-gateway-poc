@@ -243,6 +243,8 @@ services:
         condition: service_started
       duckduckgo-mcp:
         condition: service_started
+      mock-calendar-mcp:
+        condition: service_started
     networks:
       - public-net
       - backend-net
@@ -264,6 +266,8 @@ services:
       dockerfile: deployments/docker/Dockerfile.governance
     ports:
       - "8090:8090"
+    volumes:
+      - ../configs/services.yaml:/app/configs/services.yaml:ro
     environment:
       PORT: "8090"
       NPL_URL: "http://npl-engine:12000"
@@ -271,7 +275,8 @@ services:
       KEYCLOAK_REALM: "mcpgateway"
       GATEWAY_USERNAME: "gateway"
       GATEWAY_PASSWORD: "Welcome123"
-      DEV_MODE: "false"
+      DEV_MODE: "true"
+      SERVICES_CONFIG_PATH: "/app/configs/services.yaml"
     depends_on:
       npl-engine:
         condition: service_healthy
@@ -321,6 +326,16 @@ services:
       - secrets-net  # For credential proxy access
     profiles:
       - github  # Only enable when GitHub credentials are configured
+
+  # Mock Calendar MCP — HTTP-native Streamable HTTP (bilateral streaming)
+  mock-calendar-mcp:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.mock-calendar
+    environment:
+      PORT: "8000"
+    networks:
+      - backend-net
 
   # ─────────────────────────────────────────────────────────────────────────
   # Integration Test Runner (on-demand)

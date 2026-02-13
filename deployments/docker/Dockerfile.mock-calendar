@@ -1,0 +1,18 @@
+# Mock Calendar MCP Server — HTTP-native Streamable HTTP transport
+#
+# Supports bilateral streaming:
+#   POST /mcp  — JSON-RPC request/response
+#   GET  /mcp  — SSE notification stream
+
+FROM node:22-slim
+
+WORKDIR /app
+
+COPY mock-calendar-mcp/package.json ./
+RUN npm install --production
+
+COPY mock-calendar-mcp/server.js ./
+
+EXPOSE 8000
+
+CMD ["node", "server.js"]

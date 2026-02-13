@@ -6,6 +6,7 @@
 #   2. JWT validation via Keycloak JWKS
 #   3. ext_authz to NPL Governance Service for stateful policy checks
 #   4. Routing to backend MCP services (supergateway sidecars)
+#   5. OAuth discovery & proxy endpoints for MCP Inspector compatibility
 
 static_resources:
   listeners:
@@ -26,6 +27,15 @@ static_resources:
                   virtual_hosts:
                     - name: mcp_service
                       domains: ["*"]
+                      cors:
+                        allow_origin_string_match:
+                          - safe_regex:
+                              regex: ".*"
+                        allow_methods: "GET, POST, PUT, DELETE, OPTIONS"
+                        allow_headers: "authorization, content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id"
+                        expose_headers: "mcp-session-id"
+                        max_age: "86400"
+                        allow_credentials: true
                       routes:
                         # Health check endpoint (no auth required)
                         - match:
@@ -38,27 +48,125 @@ static_resources:
                             - header:
                                 key: "content-type"
                                 value: "application/json"
-                        # MCP endpoint — routed to DuckDuckGo backend (primary backend)
-                        # In production, Envoy AI Gateway's MCPRoute handles multi-server
-                        # aggregation. In this static config, we route to a single backend.
+
+                        # ── OAuth Discovery & Proxy (MCP Inspector compatibility) ──
+                        # RFC 9728: OAuth Protected Resource Metadata
+                        # SDK tries path-aware: /.well-known/oauth-protected-resource/mcp first
+                        - match:
+                            prefix: "/.well-known/oauth-protected-resource"
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: '{"resource":"http://localhost:8000","authorization_servers":["http://localhost:8000"],"bearer_methods_supported":["header"]}'
+                          response_headers_to_add:
+                            - header:
+                                key: "content-type"
+                                value: "application/json"
+                            - header:
+                                key: "access-control-allow-origin"
+                                value: "*"
+                            - header:
+                                key: "access-control-allow-methods"
+                                value: "GET, POST, OPTIONS"
+                            - header:
+                                key: "access-control-allow-headers"
+                                value: "content-type, mcp-protocol-version, authorization"
+
+                        # RFC 8414: OAuth Authorization Server Metadata
+                        # SDK tries path-aware: /.well-known/oauth-authorization-server/mcp first
+                        - match:
+                            prefix: "/.well-known/oauth-authorization-server"
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: '{"issuer":"http://localhost:8000","authorization_endpoint":"http://localhost:8000/authorize","token_endpoint":"http://localhost:8000/token","registration_endpoint":"http://localhost:8000/register","response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"]}'
+                          response_headers_to_add:
+                            - header:
+                                key: "content-type"
+                                value: "application/json"
+                            - header:
+                                key: "access-control-allow-origin"
+                                value: "*"
+                            - header:
+                                key: "access-control-allow-methods"
+                                value: "GET, POST, OPTIONS"
+                            - header:
+                                key: "access-control-allow-headers"
+                                value: "content-type, mcp-protocol-version, authorization"
+
+                        # RFC 7591: Dynamic Client Registration
+                        # Returns pre-configured mcpgateway client info
+                        - match:
+                            path: "/register"
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: '{"client_id":"mcpgateway","client_name":"MCP Gateway","redirect_uris":["http://localhost:6274/oauth/callback","http://localhost:5173/oauth/callback","http://127.0.0.1:5173/oauth/callback","http://localhost:3000/oauth/callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}'
+                          response_headers_to_add:
+                            - header:
+                                key: "content-type"
+                                value: "application/json"
+                            - header:
+                                key: "access-control-allow-origin"
+                                value: "*"
+                            - header:
+                                key: "access-control-allow-methods"
+                                value: "GET, POST, OPTIONS"
+                            - header:
+                                key: "access-control-allow-headers"
+                                value: "content-type, mcp-protocol-version, authorization"
+
+                        # OAuth Authorization endpoint — redirect to Keycloak
+                        # Preserves query params (client_id, redirect_uri, etc.)
+                        # Must be 302 (not 301) — browsers cache 301 and break Keycloak sessions
+                        - match:
+                            path: "/authorize"
+                          redirect:
+                            host_redirect: "keycloak:11000"
+                            path_redirect: "/realms/mcpgateway/protocol/openid-connect/auth"
+                            response_code: "FOUND"
+
+                        # OAuth Token endpoint — proxy to Keycloak
+                        - match:
+                            path: "/token"
+                          route:
+                            cluster: keycloak
+                            prefix_rewrite: "/realms/mcpgateway/protocol/openid-connect/token"
+                            auto_host_rewrite: true
+                            timeout: 10s
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+
+                        # MCP notification stream (GET /mcp) — long-lived SSE connection
+                        # JWT required (authN) + ext_authz verifies service access (authZ)
+                        # Governance checks once at stream setup, then notifications flow freely
                         - match:
                             prefix: "/mcp"
+                            headers:
+                              - name: ":method"
+                                string_match: {exact: "GET"}
                           route:
-                            cluster: duckduckgo_mcp
-                            timeout: 300s
-                        # SSE endpoint for MCP Inspector compatibility
+                            cluster: mock_calendar_mcp
+                            timeout: 0s  # Long-lived notification stream, never timeout
+
+                        # MCP requests (POST /mcp) — JSON-RPC tool calls
+                        # JWT required + ext_authz governance checks on every request
                         - match:
-                            prefix: "/sse"
+                            prefix: "/mcp"
+                            headers:
+                              - name: ":method"
+                                string_match: {exact: "POST"}
                           route:
-                            cluster: duckduckgo_mcp
-                            timeout: 0s  # No timeout for SSE streams
-                        # Message endpoint for SSE transport
-                        - match:
-                            prefix: "/message"
-                          route:
-                            cluster: duckduckgo_mcp
+                            cluster: mock_calendar_mcp
                             timeout: 300s
                 http_filters:
+                  # Step 0: CORS (allow MCP Inspector browser at localhost:6274)
+                  - name: envoy.filters.http.cors
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+
                   # Step 1: JWT Authentication (Keycloak)
                   - name: envoy.filters.http.jwt_authn
                     typed_config:
@@ -91,11 +199,42 @@ static_resources:
                             prefix: "/message"
                           requires:
                             provider_name: "keycloak"
-                        # Health endpoint — no JWT required
+                        # Health + OAuth endpoints — no JWT required
                         - match:
                             path: "/health"
                           requires:
                             allow_missing_or_failed: {}
+                        - match:
+                            prefix: "/.well-known/oauth-protected-resource"
+                          requires:
+                            allow_missing_or_failed: {}
+                        - match:
+                            prefix: "/.well-known/oauth-authorization-server"
+                          requires:
+                            allow_missing_or_failed: {}
+                        - match:
+                            path: "/register"
+                          requires:
+                            allow_missing_or_failed: {}
+                        - match:
+                            path: "/authorize"
+                          requires:
+                            allow_missing_or_failed: {}
+                        - match:
+                            path: "/token"
+                          requires:
+                            allow_missing_or_failed: {}
+
+                  # Step 1.5: Add WWW-Authenticate header on 401 (triggers MCP OAuth flow)
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      inline_code: |
+                        function envoy_on_response(response_handle)
+                          if response_handle:headers():get(":status") == "401" then
+                            response_handle:headers():add("WWW-Authenticate", 'Bearer resource_metadata="http://localhost:8000/.well-known/oauth-protected-resource"')
+                          end
+                        end
 
                   # Step 2: External Authorization (NPL Governance Service)
                   - name: envoy.filters.http.ext_authz
@@ -115,6 +254,10 @@ static_resources:
                           allowed_upstream_headers:
                             patterns:
                               - prefix: "x-governance-"
+                      with_request_body:
+                        max_request_bytes: 65536  # 64KB — enough for any JSON-RPC request
+                        allow_partial_message: true
+                        pack_as_bytes: false
                       failure_mode_allow: false  # Fail-closed: deny if governance unavailable
 
                   # Step 3: Router
@@ -166,6 +309,21 @@ static_resources:
                   address:
                     socket_address:
                       address: duckduckgo-mcp
+                      port_value: 8000
+
+    # Mock Calendar MCP (HTTP-native, bilateral streaming)
+    - name: mock_calendar_mcp
+      connect_timeout: 5s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: mock_calendar_mcp
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: mock-calendar-mcp
                       port_value: 8000
 
     - name: github_mcp

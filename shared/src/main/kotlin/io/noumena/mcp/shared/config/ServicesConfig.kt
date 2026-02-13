@@ -4,7 +4,33 @@ package io.noumena.mcp.shared.config
  * Root configuration for services.yaml
  */
 data class ServicesConfig(
-    val services: List<ServiceDefinition> = emptyList()
+    val services: List<ServiceDefinition> = emptyList(),
+    val user_access: UserAccessConfig? = null
+)
+
+/**
+ * User access configuration — fast RBAC lookup.
+ * Maps users to the services/tools they can access.
+ */
+data class UserAccessConfig(
+    val default_template: UserAccessTemplate = UserAccessTemplate(),
+    val users: List<UserAccess> = emptyList()
+)
+
+data class UserAccessTemplate(
+    val enabled: Boolean = false,
+    val description: String = "",
+    val tools: Map<String, List<String>> = emptyMap()
+)
+
+data class UserAccess(
+    val userId: String,
+    val keycloakId: String? = null,
+    val displayName: String = "",
+    val createdAt: String? = null,
+    /** Map of serviceName → list of tool names ("*" = wildcard) */
+    val tools: Map<String, List<String>> = emptyMap(),
+    val vaultPaths: Map<String, String> = emptyMap()
 )
 
 /**
