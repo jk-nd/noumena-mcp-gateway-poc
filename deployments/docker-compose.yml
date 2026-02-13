@@ -1,14 +1,15 @@
-# Gateway Infrastructure — Envoy AI Gateway + NPL Governance Architecture
+# Gateway Infrastructure — Envoy AI Gateway + OPA + NPL Architecture
 # Start with: docker compose up -d
 #
 # Architecture:
 #   Envoy AI Gateway (port 8000) — MCP protocol, JWT auth, tool filtering, aggregation
-#   Governance Service (port 8090) — NPL ext_authz for stateful policy checks
+#   OPA Sidecar (port 9191 gRPC / 8181 HTTP) — ext_authz policy evaluation via Rego
+#   NPL Engine (port 12000) — Policy state manager (OPA self-polls via http.send)
 #   Supergateway sidecars — wrap STDIO MCP tools as Streamable HTTP
 #
 # Network topology:
 #   public-net:  Envoy Gateway, Keycloak (agent-facing)
-#   policy-net:  Governance Service, NPL Engine (policy checks)
+#   policy-net:  OPA, NPL Engine (policy checks)
 #   backend-net: Envoy Gateway, supergateway MCP containers (tool execution)
 #   secrets-net: Credential Proxy, Vault (credential injection)
 
@@ -216,16 +217,52 @@ services:
         condition: service_healthy
 
   # ─────────────────────────────────────────────────────────────────────────
+  # OPA Sidecar (policy-net — ext_authz backend for Envoy)
+  #
+  # Evaluates Rego policy for every ext_authz request from Envoy.
+  # Self-polls NPL Engine via http.send() with 5s cache TTL.
+  # Fetches gateway token from Keycloak via http.send() with 60s cache TTL.
+  # No separate policy-sync service needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  opa:
+    image: openpolicyagent/opa:latest-envoy
+    ports:
+      - "9191:9191"   # gRPC ext_authz (Envoy connects here)
+      - "8181:8181"   # HTTP API (debugging, data inspection)
+    volumes:
+      - ../policies:/policies:ro
+    command:
+      - "run"
+      - "--server"
+      - "--addr=:8181"
+      - "--set=plugins.envoy_ext_authz_grpc.addr=:9191"
+      - "--set=plugins.envoy_ext_authz_grpc.path=envoy/authz/allow"
+      - "--set=decision_logs.console=true"
+      - "/policies"
+    environment:
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      GATEWAY_USERNAME: "gateway"
+      GATEWAY_PASSWORD: "Welcome123"
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - policy-net
+      - public-net  # For Keycloak token requests
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Envoy AI Gateway (public-net — agent-facing MCP endpoint)
   #
-  # Replaces the Kotlin gateway for:
-  #   - MCP protocol handling (Streamable HTTP)
+  # Handles:
+  #   - MCP protocol (Streamable HTTP)
   #   - JWT validation (Keycloak JWKS)
-  #   - Tool filtering and aggregation
+  #   - ext_authz to OPA sidecar (gRPC) for policy evaluation
   #   - Multi-server routing
   #   - SSE/streaming support
-  #
-  # Stateful governance delegated to governance-service via ext_authz.
   # ─────────────────────────────────────────────────────────────────────────
   envoy-gateway:
     image: envoyproxy/envoy:v1.32-latest
@@ -239,7 +276,7 @@ services:
     depends_on:
       keycloak:
         condition: service_healthy
-      governance-service:
+      opa:
         condition: service_started
       duckduckgo-mcp:
         condition: service_started
@@ -248,43 +285,7 @@ services:
     networks:
       - public-net
       - backend-net
-      - policy-net  # For ext_authz to governance-service
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # NPL Governance Service (ext_authz backend)
-  #
-  # Slim Ktor service implementing Envoy ext_authz contract:
-  #   - Receives authorization checks from Envoy
-  #   - Checks NPL ToolPolicy (service-level) and UserToolAccess (user-level)
-  #   - Returns 200 (allow) or 403 (deny)
-  #
-  # Extracted from the old Kotlin gateway's NplClient.kt
-  # ─────────────────────────────────────────────────────────────────────────
-  governance-service:
-    build:
-      context: ..
-      dockerfile: deployments/docker/Dockerfile.governance
-    ports:
-      - "8090:8090"
-    volumes:
-      - ../configs/services.yaml:/app/configs/services.yaml:ro
-    environment:
-      PORT: "8090"
-      NPL_URL: "http://npl-engine:12000"
-      KEYCLOAK_URL: "http://keycloak:11000"
-      KEYCLOAK_REALM: "mcpgateway"
-      GATEWAY_USERNAME: "gateway"
-      GATEWAY_PASSWORD: "Welcome123"
-      DEV_MODE: "true"
-      SERVICES_CONFIG_PATH: "/app/configs/services.yaml"
-    depends_on:
-      npl-engine:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-    networks:
-      - policy-net
-      - public-net  # For Keycloak token requests
+      - policy-net  # For ext_authz to OPA sidecar
 
   # ─────────────────────────────────────────────────────────────────────────
   # Backend MCP Services (supergateway sidecars)

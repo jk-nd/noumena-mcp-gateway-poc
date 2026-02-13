@@ -4,7 +4,7 @@
 # It configures:
 #   1. MCP protocol handling (Streamable HTTP on /mcp)
 #   2. JWT validation via Keycloak JWKS
-#   3. ext_authz to NPL Governance Service for stateful policy checks
+#   3. ext_authz to OPA sidecar (gRPC) for policy evaluation
 #   4. Routing to backend MCP services (supergateway sidecars)
 #   5. OAuth discovery & proxy endpoints for MCP Inspector compatibility
 
@@ -236,29 +236,21 @@ static_resources:
                           end
                         end
 
-                  # Step 2: External Authorization (NPL Governance Service)
+                  # Step 2: External Authorization (OPA sidecar via gRPC)
+                  # OPA evaluates Rego policy using NPL data cached via http.send()
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
-                      http_service:
-                        server_uri:
-                          uri: "governance-service:8090"
-                          cluster: governance_service
-                          timeout: 5s
-                        path_prefix: "/auth/check"
-                        authorization_request:
-                          headers_to_add:
-                            - key: "x-forwarded-method"
-                              value: "%REQ(:METHOD)%"
-                        authorization_response:
-                          allowed_upstream_headers:
-                            patterns:
-                              - prefix: "x-governance-"
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: opa_service
+                        timeout: 1s  # allows for NPL fetch on cache miss
+                      transport_api_version: V3
                       with_request_body:
                         max_request_bytes: 65536  # 64KB — enough for any JSON-RPC request
                         allow_partial_message: true
                         pack_as_bytes: false
-                      failure_mode_allow: false  # Fail-closed: deny if governance unavailable
+                      failure_mode_allow: false  # Fail-closed: deny if OPA unavailable
 
                   # Step 3: Router
                   - name: envoy.filters.http.router
@@ -281,20 +273,25 @@ static_resources:
                       address: keycloak
                       port_value: 11000
 
-    # NPL Governance Service (ext_authz backend)
-    - name: governance_service
-      connect_timeout: 5s
+    # OPA sidecar (ext_authz backend via gRPC)
+    - name: opa_service
+      connect_timeout: 1s
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
       load_assignment:
-        cluster_name: governance_service
+        cluster_name: opa_service
         endpoints:
           - lb_endpoints:
               - endpoint:
                   address:
                     socket_address:
-                      address: governance-service
-                      port_value: 8090
+                      address: opa
+                      port_value: 9191
 
     # Backend MCP servers (supergateway wrapping STDIO tools)
     - name: duckduckgo_mcp

@@ -1,7 +1,6 @@
 rootProject.name = "noumena-mcp-gateway"
 
 include("shared")
-include("governance-service")
-// gateway module removed — replaced by Envoy AI Gateway + governance-service
+// governance-service removed — replaced by OPA Rego policy (policies/mcp_authz.rego)
 include("credential-proxy")
 include("integration-tests")

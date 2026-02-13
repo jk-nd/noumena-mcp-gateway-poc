@@ -1,10 +1,12 @@
-# MCP Gateway v2 — Envoy AI Gateway + NPL Governance Architecture
+# MCP Gateway v2 — Envoy AI Gateway + OPA + NPL Architecture
 
 ## Overview
 
-This document describes the architecture for the Noumena MCP Gateway, built on **Envoy AI Gateway** for MCP protocol handling and routing, with a dedicated **Governance Service** for two-tier policy enforcement via NPL.
+This document describes the architecture for the Noumena MCP Gateway, built on **Envoy AI Gateway** for MCP protocol handling and routing, with **OPA (Open Policy Agent)** as the fast policy evaluation engine and **NPL Engine** as the policy state manager.
 
-The system sits between agents/humans and upstream MCP servers. Envoy handles the MCP protocol (Streamable HTTP), JWT validation, and routing. The Governance Service implements Envoy's `ext_authz` contract to enforce access control: fast RBAC from local config (sub-millisecond, no network) followed by stateful NPL governance checks (ToolPolicy + UserToolAccess). Upstream STDIO MCP tools run as **supergateway sidecars** that wrap STDIO as Streamable HTTP.
+The system sits between agents/humans and upstream MCP servers. Envoy handles the MCP protocol (Streamable HTTP), JWT validation, and routing. OPA implements Envoy's `ext_authz` contract via gRPC and evaluates Rego policy rules against NPL-sourced data cached via `http.send()`. NPL serves as the source of truth for policy state — admin mutations flow through TUI/API to NPL, and OPA self-polls NPL with a 5-second cache TTL. Upstream STDIO MCP tools run as **supergateway sidecars** that wrap STDIO as Streamable HTTP.
+
+**Only two components in the policy chain: OPA + NPL. No governance service. No policy-sync service.**
 
 ---
 
@@ -12,11 +14,12 @@ The system sits between agents/humans and upstream MCP servers. Envoy handles th
 
 1. **Envoy as the edge** — all agent traffic enters through Envoy; no custom protocol handling code
 2. **Agents never see credentials** — secrets flow Vault -> Credential Proxy -> supergateway sidecar -> upstream only, never toward the agent
-3. **NPL as pure decision engine** — NPL decides allow/deny and credential mapping, but never handles secrets
-4. **Two-tier authorization** — fast local RBAC (sub-ms) gates expensive NPL calls; fail-closed at both tiers
-5. **Fail-closed** — if the Governance Service or NPL is unreachable, all requests are denied
+3. **OPA for fast policy evaluation** — Rego rules with cached NPL data; sub-millisecond from cache, ~50ms on cache miss
+4. **NPL as policy state manager** — NPL stores and manages policy state; OPA reads it via `http.send()` with caching
+5. **Fail-closed** — if OPA or NPL is unreachable (after cache expires), all requests are denied
 6. **Sidecar pattern** — each STDIO MCP tool runs in its own supergateway container, isolated on backend-net
 7. **Convention over configuration** — Vault paths, tool namespaces, and service registration follow predictable patterns
+8. **No sync service** — OPA self-polls NPL via `http.send()` response caching; no separate sync/polling process needed
 
 ---
 
@@ -33,23 +36,23 @@ The system sits between agents/humans and upstream MCP servers. Envoy handles th
 |                         |   HTTP             |                        |
 |                         | - JWT validation   |                        |
 |                         |   (jwt_authn)      |                        |
-|                         | - ext_authz        |                        |
+|                         | - ext_authz (gRPC) |                        |
 |                         | - SSE streaming    |                        |
 |                         +--------+----------+                        |
 |                                  |                                    |
 +----------------------------------+------------------------------------+
-|  policy-net                      |  ext_authz                        |
+|  policy-net                      |  ext_authz (gRPC)                 |
 |                                  v                                    |
 |  +--------------+      +-------------------+                         |
-|  |  NPL Engine  |<-----|  Governance Svc   |                         |
-|  |              |      |  (Kotlin/Ktor)    |                         |
-|  |  Protocols:  |      |  port 8090        |                         |
-|  |  - ToolPolicy|      |                   |                         |
-|  |  - UserTool  |      | 1. Fast RBAC      |                         |
-|  |    Access    |      |    (services.yaml)|                         |
-|  |  - CredMap   |      | 2. NPL governance |                         |
-|  |  - SvcReg    |      +-------------------+                         |
-|  +--------------+                                                    |
+|  |  NPL Engine  |<-----|  OPA Sidecar      |                         |
+|  |              | http  |  (Rego policy)    |                         |
+|  |  Protocols:  | .send |  port 9191 gRPC   |                         |
+|  |  - ToolPolicy|  (5s  |  port 8181 HTTP   |                         |
+|  |  - UserTool  | cache)|                   |                         |
+|  |    Access    |       | Cached NPL data   |                         |
+|  |  - SvcReg    |       | + JWT decode      |                         |
+|  +--------------+       | + JSON-RPC parse   |                         |
+|                         +-------------------+                         |
 |                                                                      |
 +----------------------------------------------------------------------+
 |  secrets-net                                                         |
@@ -79,14 +82,81 @@ Each component sits on only the networks it needs:
 
 | Component | Networks | Rationale |
 |-----------|----------|-----------|
-| **Envoy AI Gateway** | public-net, backend-net, policy-net | Receives agent traffic, routes to backends, sends ext_authz to Governance Service |
-| **Governance Service** | policy-net, public-net | ext_authz from Envoy; calls NPL Engine on policy-net; calls Keycloak on public-net for service tokens |
+| **Envoy AI Gateway** | public-net, backend-net, policy-net | Receives agent traffic, routes to backends, sends ext_authz to OPA |
+| **OPA Sidecar** | policy-net, public-net | ext_authz from Envoy; fetches NPL data on policy-net; fetches Keycloak tokens on public-net |
 | **Keycloak** | public-net | Agent-facing OIDC provider; JWKS endpoint for Envoy and NPL Engine |
-| **NPL Engine** | policy-net, public-net | Policy decisions; Keycloak for token validation |
+| **NPL Engine** | policy-net, public-net | Policy state storage; Keycloak for token validation |
 | **Supergateway sidecars** | backend-net (+ secrets-net if credentials needed) | Only reachable by Envoy; credential fetch at startup |
 | **Mock Calendar MCP** | backend-net | HTTP-native MCP server for bilateral streaming tests |
 | **Credential Proxy** | secrets-net, policy-net | Fetches from Vault, serves credentials to sidecars |
 | **Vault** | secrets-net | Credential storage only |
+
+---
+
+## OPA Policy Evaluation
+
+### How OPA Self-Polls NPL (No Sync Service)
+
+OPA's `http.send()` has built-in response caching. The Rego policy (`policies/mcp_authz.rego`) fetches NPL data lazily:
+
+```rego
+# Cached for 5 seconds — only hits NPL when cache expires
+npl_service_registry_response := http.send({
+    "method": "GET",
+    "url": sprintf("%s/npl/registry/ServiceRegistry/", [npl_url]),
+    "headers": {"Authorization": npl_auth_header},
+    "force_cache": true,
+    "force_cache_duration_seconds": 5
+})
+
+npl_tool_policy_response := http.send({
+    "method": "GET",
+    "url": sprintf("%s/npl/services/ToolPolicy/", [npl_url]),
+    "headers": {"Authorization": npl_auth_header},
+    "force_cache": true,
+    "force_cache_duration_seconds": 5
+})
+
+npl_user_access_response := http.send({
+    "method": "GET",
+    "url": sprintf("%s/npl/users/UserToolAccess/", [npl_url]),
+    "headers": {"Authorization": npl_auth_header},
+    "force_cache": true,
+    "force_cache_duration_seconds": 5
+})
+```
+
+**Request flow:**
+1. First request (or after cache expires): OPA calls NPL APIs (~50ms), caches responses
+2. All subsequent requests within 5s: OPA uses cached data (~0.1ms)
+3. After 5s: Next request triggers fresh NPL fetch, re-caches
+
+**On NPL unavailable**: OPA serves from stale cache until TTL expires. After that, `http.send()` returns error -> Rego evaluates to `default allow = false` -> fail-closed.
+
+**Keycloak token**: OPA also fetches a gateway service account token via `http.send()` to Keycloak's token endpoint, cached with a 60s TTL.
+
+### What Stays in NPL vs. Moves to OPA
+
+| NPL Protocol | Role | Runtime Query |
+|---|---|---|
+| `ServiceRegistry` | State manager: which services are enabled | OPA reads via `http.send()` (cached 5s) |
+| `ToolPolicy` | State manager: which tools are enabled per service. `suspendPolicy()` = emergency kill | OPA reads via `http.send()` (cached 5s) |
+| `UserToolAccess` | State manager: per-user tool access grants. `revokeAllAccess()` = emergency revoke | OPA reads via `http.send()` (cached 5s) |
+| `UserRegistry` | Admin-only: user management | OPA reads via `http.send()` (cached 5s) |
+| `CredentialInjectionPolicy` | Startup-time credential selection | **Unchanged** — not in ext_authz path |
+
+**NPL protocols are NOT modified.** Their `checkAccess()` / `hasAccess()` permissions remain for admin testing via TUI. OPA reads the underlying data directly via the list/get APIs.
+
+### Policy Decision Logic
+
+The Rego policy (`policies/mcp_authz.rego`) implements:
+
+1. **JWT decode**: Extract userId from `email > preferred_username > sub` claims
+2. **JSON-RPC parse**: Extract method and tool name from request body
+3. **Stream setup** (GET /mcp): Allow if user has any tool access
+4. **Non-tool methods** (initialize, tools/list, ping, notifications/*): Always allow
+5. **tools/call**: Check service enabled -> tool enabled -> user has access
+6. **Default deny**: `default allow = false` — fail-closed on any error or missing data
 
 ---
 
@@ -146,7 +216,7 @@ When Envoy aggregates `tools/list` from upstream MCP services, tools are prefixe
 1. Agent sends tools/call to Envoy AI Gateway (port 8000):
    Authorization: Bearer <agent-JWT>
    POST /mcp
-   {"method":"tools/call","params":{"name":"slack.send_message","arguments":{...}}}
+   {"method":"tools/call","params":{"name":"duckduckgo.search","arguments":{...}}}
 
 2. Envoy — JWT validation (jwt_authn filter):
    a. Validates JWT signature against Keycloak JWKS
@@ -154,32 +224,21 @@ When Envoy aggregates `tools/list` from upstream MCP services, tools are prefixe
    c. Forwards JWT in Authorization header to downstream filters
    d. If invalid -> 401 Unauthorized (agent never reaches backend)
 
-3. Envoy — ext_authz to Governance Service:
-   a. Sends full request (headers + JSON-RPC body) to governance-service:8090
-   b. Governance Service parses JSON-RPC body:
-      - Extracts method ("tools/call"), tool name ("slack.send_message")
-   c. Governance Service decodes JWT from Authorization header:
-      - Extracts userId (email > preferred_username > sub)
+3. Envoy — ext_authz to OPA (gRPC):
+   a. Sends full request (headers + JSON-RPC body) to OPA sidecar on port 9191
+   b. OPA decodes JWT: extracts userId (email > preferred_username > sub)
+   c. OPA parses JSON-RPC body:
+      - Extracts method ("tools/call"), tool name ("duckduckgo.search")
+      - Parses namespace: service=duckduckgo, tool=search
    d. Non-tool-call methods (initialize, tools/list, ping) -> allow immediately
-   e. For tools/call:
-
-      FAST PATH (sub-ms, no network):
-        Check services.yaml user_access config:
-        - Find user by userId
-        - Parse namespace: "slack.send_message" -> service=slack, tool=send_message
-        - Check if user has access to slack.send_message (or wildcard "slack.*")
-        - If denied -> 403 (never hits NPL)
-
-      SLOW PATH (NPL, only if fast path passed):
-        - ToolPolicy.checkAccess(service=slack, tool=send_message, user=alice)
-        - UserToolAccess.hasAccess(service=slack, tool=send_message)
-        - Both must pass -> allow
-        - Either fails -> 403
-
-   f. Governance Service returns 200 (allow) or 403 (deny) to Envoy
+   e. For tools/call, OPA fetches NPL data via http.send() (cached 5s):
+      - ServiceRegistry: is "duckduckgo" enabled?
+      - ToolPolicy: is "search" in enabledTools for "duckduckgo"?
+      - UserToolAccess: does this user have access to duckduckgo.search?
+   f. OPA returns allow or deny to Envoy
 
 4. Envoy — route to backend:
-   a. Routes request to the appropriate supergateway sidecar (e.g., slack-mcp:8000)
+   a. Routes request to the appropriate supergateway sidecar (e.g., duckduckgo-mcp:8000)
    b. Sidecar receives Streamable HTTP request
    c. Sidecar forwards to the wrapped STDIO MCP tool via stdin/stdout
    d. STDIO tool executes and returns result via stdout
@@ -218,7 +277,7 @@ HTTP-native MCP servers support bilateral streaming directly without supergatewa
 
 ```
 1. Agent opens GET /mcp with Accept: text/event-stream
-   (JWT auth + ext_authz governance check at stream setup)
+   (JWT auth + ext_authz OPA check at stream setup)
 
 2. Envoy routes to HTTP-native MCP server (timeout: 0s — never timeout)
 
@@ -238,7 +297,7 @@ The mock-calendar-mcp server demonstrates this pattern: it sends periodic calend
 
 ## JWT Authentication
 
-Envoy handles JWT validation directly using its `jwt_authn` HTTP filter. There are no OAuth proxy endpoints implemented in the gateway.
+Envoy handles JWT validation directly using its `jwt_authn` HTTP filter.
 
 ### How It Works
 
@@ -247,33 +306,9 @@ Envoy handles JWT validation directly using its `jwt_authn` HTTP filter. There a
 3. The validated JWT is forwarded in the `Authorization` header to downstream filters and backends
 4. Invalid or missing JWTs on protected routes result in a 401 response from Envoy itself
 
-### Envoy jwt_authn Configuration
-
-```yaml
-providers:
-  keycloak:
-    issuer: "http://keycloak:11000/realms/mcpgateway"
-    audiences: ["account", "mcpgateway"]
-    remote_jwks:
-      http_uri:
-        uri: "http://keycloak:11000/realms/mcpgateway/protocol/openid-connect/certs"
-        cluster: keycloak
-        timeout: 5s
-      cache_duration: { seconds: 300 }
-    forward: true
-    payload_in_metadata: "jwt_payload"
-rules:
-  - match: { prefix: "/mcp" }
-    requires: { provider_name: "keycloak" }
-  - match: { prefix: "/sse" }
-    requires: { provider_name: "keycloak" }
-  - match: { path: "/health" }
-    requires: { allow_missing_or_failed: {} }
-```
-
 ### Token Acquisition
 
-Agents and users obtain JWTs from Keycloak directly (e.g., via the Keycloak token endpoint or browser-based OIDC flow). The gateway itself does not proxy OAuth endpoints — it only validates the resulting JWT.
+Agents and users obtain JWTs from Keycloak directly (e.g., via the Keycloak token endpoint or browser-based OIDC flow). The gateway exposes OAuth discovery endpoints (RFC 9728/8414) and proxies `/token` to Keycloak for MCP Inspector compatibility.
 
 For local development, Keycloak runs on `keycloak:11000` (via `/etc/hosts: 127.0.0.1 keycloak`), and pre-provisioned users (gateway, jarvis, alice, etc.) can obtain tokens via the Keycloak password grant.
 
@@ -281,7 +316,7 @@ For local development, Keycloak runs on `keycloak:11000` (via `/etc/hosts: 127.0
 
 ## Supergateway Sidecar Architecture
 
-The gateway no longer spawns STDIO processes directly. Instead, each STDIO-based MCP tool runs as a **supergateway sidecar container** that wraps the STDIO interface as Streamable HTTP.
+Each STDIO-based MCP tool runs as a **supergateway sidecar container** that wraps the STDIO interface as Streamable HTTP.
 
 ### How It Works
 
@@ -289,68 +324,6 @@ The gateway no longer spawns STDIO processes directly. Instead, each STDIO-based
 2. Supergateway starts the STDIO MCP tool as a child process
 3. Supergateway exposes the tool's MCP interface as Streamable HTTP on a port (typically 8000)
 4. Envoy routes to these sidecar containers on backend-net
-
-### Benefits Over Direct STDIO
-
-| Aspect | Old (Direct STDIO) | New (Supergateway Sidecar) |
-|--------|--------------------|-----------------------------|
-| Process management | Gateway spawns/manages Docker processes, needs Docker socket | Each sidecar manages its own child process |
-| Credential injection | Per-request by Gateway via Docker `-e` flags | At container startup via entrypoint calling Credential Proxy |
-| Protocol | Mixed (STDIO, HTTP, WebSocket in Gateway code) | Uniform Streamable HTTP from Envoy's perspective |
-| Scaling | Single Gateway bottleneck for process management | Each sidecar is independent; Envoy load-balances |
-| Isolation | Shared Gateway process space | Separate container per tool |
-
-### Configuration Example
-
-In `docker-compose.yml`, each sidecar is defined as a service:
-
-```yaml
-# DuckDuckGo MCP — web search (no credentials needed)
-duckduckgo-mcp:
-  build:
-    context: ..
-    dockerfile: deployments/docker/Dockerfile.supergateway
-  environment:
-    MCP_COMMAND: "docker run -i --rm mcp/duckduckgo"
-    PORT: "8000"
-  volumes:
-    - /var/run/docker.sock:/var/run/docker.sock
-  networks:
-    - backend-net
-
-# GitHub MCP — with credential injection at startup
-github-mcp:
-  build:
-    context: ..
-    dockerfile: deployments/docker/Dockerfile.supergateway
-  environment:
-    MCP_COMMAND: "docker run -i --rm -e GITHUB_TOKEN mcp/github"
-    PORT: "8000"
-    CREDENTIAL_PROXY_URL: "http://credential-proxy:9002"
-    SERVICE_NAME: "github"
-    TENANT_ID: "acme"
-  volumes:
-    - /var/run/docker.sock:/var/run/docker.sock
-  networks:
-    - backend-net
-    - secrets-net  # For credential proxy access
-```
-
-Envoy routes to these sidecars via cluster definitions:
-
-```yaml
-clusters:
-  - name: duckduckgo_mcp
-    type: STRICT_DNS
-    load_assignment:
-      endpoints:
-        - lb_endpoints:
-            - endpoint:
-                address:
-                  socket_address:
-                    address: duckduckgo-mcp
-                    port_value: 8000
-```
 
 ---
 
@@ -380,55 +353,23 @@ This means credentials are fetched once at startup, not on every request. For se
 
 ## NPL Protocols
 
-Three generic protocols, deployed once, instantiated per service at runtime:
+Generic protocols, deployed once, instantiated per service at runtime. OPA reads their state via HTTP APIs.
 
 ### ServiceRegistry
 
-Tracks which services exist and their status. Already implemented; extended with tool namespace metadata.
+Tracks which services exist and their status. OPA reads `enabledServices` via `GET /npl/registry/ServiceRegistry/`.
 
 ### ToolPolicy
 
-Governs whether a specific tool call is allowed:
+Per-service tool access policy. OPA reads `enabledTools` and `@state` (active/suspended) via `GET /npl/services/ToolPolicy/`. Admin can suspend a policy as an emergency kill switch.
 
-```npl
-@api
-protocol[pAdmin, pGateway] ToolPolicy(
-    var serviceName: Text
-) {
-    initial state active;
-    final state removed;
+### UserToolAccess
 
-    var toolRules = listOf<ToolRule>();
-
-    permission[pAdmin] setToolAccess(
-        toolName: Text,
-        agentType: Text,
-        allowed: Boolean
-    ) | active {
-        // Add or update rule
-    };
-
-    permission[pGateway] checkToolAccess(
-        toolName: Text,
-        agentType: Text,
-        userName: Text
-    ) returns Boolean | active {
-        // Evaluate rules, return allowed/denied
-    };
-};
-```
+Per-user tool access grants. OPA reads `serviceAccess` (list of service+tools) via `GET /npl/users/UserToolAccess/`. Supports wildcard (`"*"`) for granting all tools in a service.
 
 ### CredentialInjectionPolicy
 
-NPL governs credential selection at runtime. The `CredentialInjectionPolicy` protocol determines which credential to use for each request, while the Credential Proxy handles the actual Vault fetch and injection. NPL never sees or handles the credentials themselves.
-
-**Two credential scopes:**
-- **Tenant-level**: Shared across all users in an organization (e.g., company Slack workspace)
-  - Vault path: `secret/data/tenants/{tenant}/services/SERVICE/...`
-- **User-level**: Per-user credentials (e.g., personal GitHub tokens)
-  - Vault path: `secret/data/tenants/{tenant}/users/{user}/SERVICE/...`
-
-At runtime, the JWT provides `{tenant}` and `{user}` values, and the Credential Proxy interpolates the Vault path accordingly.
+NPL governs credential selection at runtime. The `CredentialInjectionPolicy` protocol determines which credential to use for each request, while the Credential Proxy handles the actual Vault fetch and injection. NPL never sees or handles the credentials themselves. **Not in the ext_authz path.**
 
 ### Runtime Instance Lifecycle
 
@@ -447,110 +388,18 @@ When a service is removed:
 
 ---
 
-## Credential Categories
-
-Analysis of popular MCP servers reveals three authentication patterns:
-
-### Category 1: Static API Key / PAT (~20% of services)
-
-| Service | Credential | Notes |
-|---------|-----------|-------|
-| GitHub | Personal Access Token | Long-lived |
-| Brave Search | API Key | Per-org |
-| DuckDuckGo | None | Free API |
-
-**Handling**: Store in Vault, inject at supergateway startup as environment variables. Simple lookup, no refresh.
-
-### Category 2: OAuth 2.0 (User-Delegated) (~70% of services)
-
-| Service | Access Token TTL | Refresh Token TTL | Notes |
-|---------|-----------------|-------------------|-------|
-| Google (Gmail, Drive, Calendar) | ~1 hour | Indefinite* | *Expires if unused 6 months |
-| Slack (user token) | 12 hours | Rotates on refresh | Must store new refresh token atomically |
-| Slack (bot token) | Indefinite | N/A | No refresh needed |
-| Atlassian/Jira | 1 hour | 90 days | |
-| Salesforce | ~2 hours | Indefinite* | *Until admin revokes |
-
-**Handling**: Store refresh token in Vault. Credential Proxy refreshes access token when expired. Server-to-server — agent never involved.
-
-**One-time setup**: User authorizes via browser (OAuth consent screen). Tokens stored in Vault. User never needs to interact again unless they revoke access.
-
-### Category 3: Session-Based / Interactive (~10% of services)
-
-| Service | Auth Method | Notes |
-|---------|-----------|-------|
-| WhatsApp | QR code scan | Re-auth every ~20 days, persistent bridge process |
-
-**Handling**: Per-user stateful bridge instances. Different deployment model — deferred.
-
----
-
-## Vault Structure (Convention-Based)
-
-Separate Vault instance per tenant for hard isolation.
-
-```
-secret/
-  services/
-    {service-name}/
-      manifest.json              <- auth type, credential schema, OAuth config
-      shared/
-        default                  <- org-wide credential (if applicable)
-      users/
-        {user-sub}/
-          default                <- user's primary credential
-          {variant}              <- alternatives (readonly, full, etc.)
-  app/
-    {provider}/                  <- OAuth app registrations (client_id, client_secret)
-```
-
-The Credential Proxy constructs paths from convention:
-
-```
-resolve(user=alice, service=slack, variant=readonly)
-  -> secret/services/slack/users/alice/readonly
-
-resolve(service=duckduckgo, shared=true)
-  -> secret/services/duckduckgo/shared/default
-```
-
-No hardcoded paths. The path is computed from `(service, user, variant)`.
-
----
-
-## OAuth Token Refresh Flow
-
-When an access token expires (runtime, no user interaction):
-
-```
-1. Credential Proxy detects expired access_token (expires_at < now)
-2. Fetch from Vault: refresh_token + app credentials (client_id, client_secret)
-3. POST to provider's token endpoint:
-     grant_type=refresh_token
-     &refresh_token=<stored_refresh_token>
-     &client_id=<app_client_id>
-     &client_secret=<app_client_secret>
-4. Provider returns: new access_token (+ optionally new refresh_token for Slack)
-5. Store updated tokens in Vault
-6. Use new access_token for upstream MCP tool
-```
-
-All server-to-server. Agent is not involved and never sees any tokens.
-
----
-
 ## Security Properties
 
 | Property | Enforcement |
 |----------|-------------|
 | Agent never sees upstream credentials | Credentials injected at sidecar startup; flow Vault -> Credential Proxy -> supergateway sidecar -> STDIO tool only |
 | NPL never handles secrets | NPL returns vault paths / policy decisions, never credential values |
-| Two-tier fail-closed | Fast RBAC denies first; NPL denies second; both must pass for access |
-| Fail-closed on governance outage | Envoy `failure_mode_allow: false` — all requests denied if Governance Service or NPL is unreachable |
+| Fail-closed on OPA/NPL outage | Envoy `failure_mode_allow: false` — all requests denied if OPA unreachable; OPA `default allow = false` — all requests denied if NPL data unavailable after cache expires |
 | Network isolation | Four Docker networks; Envoy spans three (public, backend, policy); all other components span at most two |
 | Credential direction is one-way | Secrets flow toward upstream tools; responses flow toward agent; the two never mix |
 | Tenant isolation | Separate Vault per tenant; NPL policies scoped by organization claim |
-| No Docker socket in gateway | Envoy has no Docker socket; only supergateway sidecars mount it for spawning STDIO tool containers |
+| No Docker socket in gateway | Envoy and OPA have no Docker socket; only supergateway sidecars mount it for spawning STDIO tool containers |
+| Policy propagation within 5s | Admin mutations in NPL are reflected in OPA within 5 seconds (cache TTL) |
 
 ---
 
@@ -559,8 +408,8 @@ All server-to-server. Agent is not involved and never sees any tokens.
 | Component | Technology |
 |-----------|------------|
 | Edge Gateway | Envoy AI Gateway (`envoyproxy/envoy:v1.32-latest`), port 8000 |
-| Governance Service | Kotlin, Ktor (`ext_authz` backend), port 8090 |
-| NPL Engine | Noumena Platform |
+| Policy Engine | OPA (`openpolicyagent/opa:latest-envoy`), port 9191 (gRPC) / 8181 (HTTP) |
+| Policy State | NPL Engine (Noumena Platform), port 12000 |
 | Credential Proxy | Kotlin, Ktor |
 | Secrets | HashiCorp Vault |
 | Auth | Keycloak (OIDC) — JWT validation via Envoy `jwt_authn` filter |
@@ -574,8 +423,8 @@ All server-to-server. Agent is not involved and never sees any tokens.
 
 ```
 Agent -> Envoy AI Gateway (JWT validated, Streamable HTTP)
-           -> Governance Service (ext_authz: fast RBAC + NPL governance)
-              -> NPL Engine (ToolPolicy.checkAccess, UserToolAccess.hasAccess)
+           -> OPA Sidecar (ext_authz gRPC: Rego policy + cached NPL data)
+              -> NPL Engine (http.send, cached 5s: ServiceRegistry, ToolPolicy, UserToolAccess)
            -> Supergateway Sidecar (Streamable HTTP -> STDIO MCP tool)
 
 Credential injection:
@@ -583,8 +432,8 @@ Credential injection:
 ```
 
 - Envoy handles MCP protocol, JWT validation, SSE streaming, and routing
-- Governance Service provides two-tier authorization via Envoy ext_authz
+- OPA evaluates Rego policy with NPL data cached via `http.send()` (~0.1ms from cache)
+- NPL is the source of truth for policy state (admin mutations via TUI/API)
 - Supergateway sidecars wrap STDIO tools as uniform Streamable HTTP endpoints
 - Credential injection happens at container startup, not per-request
-- NPL remains the runtime source of truth for stateful policy decisions
-- Fast RBAC from services.yaml gates expensive NPL calls (sub-ms, no network)
+- No governance service, no policy-sync service — just OPA + NPL

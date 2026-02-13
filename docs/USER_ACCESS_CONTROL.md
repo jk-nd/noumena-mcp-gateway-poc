@@ -2,7 +2,7 @@
 
 ## Overview
 
-Phase 2 introduces **per-user/agent tool access control** to the MCP Gateway. Users can now be granted granular access to specific tools across services, with enforcement at the NPL protocol level.
+Phase 2 introduces **per-user/agent tool access control** to the MCP Gateway. Users can now be granted granular access to specific tools across services, with enforcement via a two-tier architecture: a fast local check against `services.yaml` (sub-millisecond, no network) and a slow NPL protocol check for dynamic policy evaluation. The Governance Service runs as an Envoy `ext_authz` filter, sitting between Envoy and the upstream MCP services.
 
 ## Architecture Components
 
@@ -25,7 +25,7 @@ Located in `npl/src/main/npl-1.0/users/`
   - `revokeTool(serviceName, toolName)` - Revoke a specific tool
   - `grantAllToolsForService(serviceName)` - Grant all tools (wildcard `*`)
   - `revokeServiceAccess(serviceName)` - Revoke all access to a service
-  - `hasAccess(serviceName, toolName)` - Check if user has access (called by Gateway)
+  - `hasAccess(serviceName, toolName)` - Check if user has access (called by Governance Service)
   - `getAccessMap()` - Get complete access map for audit
 
 **Wildcard Support**: Setting `["*"]` for a service grants access to ALL tools for that service.
@@ -74,23 +74,26 @@ New menu: **User Management**
 - Real-time sync to NPL UserToolAccess protocol
 - Persisted to `services.yaml`
 
-### 4. Gateway (Enforcement Layer)
+### 4. Governance Service (Enforcement Layer)
 
-Located in `gateway/src/main/kotlin/io/noumena/mcp/gateway/policy/NplClient.kt`
+Located in `governance-service/src/main/kotlin/io/noumena/mcp/governance/Application.kt`
 
-#### V3 Policy Check Flow:
+The Governance Service runs as an Envoy `ext_authz` gRPC/HTTP filter, implementing a two-tier access control architecture with a fast local check and a slow NPL check.
+
+#### V3 Policy Check Flow (Two-Tier Architecture):
 
 ```
-1. JWT Authentication → Extract userId (email)
-2. Check Service-Level Policy (ToolPolicy)
-   - Find ToolPolicy[serviceName]
-   - Call checkAccess(toolName, userId)
-   - DENY if service-level policy rejects
-3. Check User-Level Policy (UserToolAccess) ← NEW
-   - Find UserToolAccess[userId]
-   - Call hasAccess(serviceName, toolName)
-   - DENY if user doesn't have access
-4. ALLOW if both checks pass
+1. Envoy validates JWT (Keycloak JWKS)
+2. Envoy forwards to Governance Service (ext_authz with JSON-RPC body)
+3. Governance Service parses JSON-RPC body (method, tool name)
+4. Governance Service decodes JWT (userId from email/preferred_username/sub)
+5. FAST PATH: Check services.yaml user_access config (sub-ms, no network)
+   - DENY if user not found or tool not granted → NPL never called
+6. SLOW PATH: Check NPL ToolPolicy.checkAccess (service-level)
+   - DENY if tool not enabled in policy
+7. SLOW PATH: Check NPL UserToolAccess.hasAccess (user-level)
+   - DENY if user doesn't have dynamic access
+8. ALLOW if all checks pass
 ```
 
 #### Fail-Closed Behavior:
@@ -98,6 +101,7 @@ Located in `gateway/src/main/kotlin/io/noumena/mcp/gateway/policy/NplClient.kt`
 - If ToolPolicy check fails → DENY
 - If UserToolAccess check fails → DENY
 - If no UserToolAccess configured → ALLOW (backward compatibility)
+- If user not found in services.yaml → DENY (fast path rejects before NPL is called)
 
 ## Bootstrap Process
 
@@ -175,38 +179,59 @@ revokeServiceFromUser(userId, "slack");
 3. Remove from `services.yaml`
 4. `UserToolAccess` protocol remains (for audit) but user can no longer authenticate
 
-## Gateway Request Flow Example
+## Request Flow Example (Envoy + Governance Service)
 
 **Scenario**: Alice calls `duckduckgo__search`
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ 1. Alice's Agent → Gateway (JWT with email claim)     │
+│ 1. Alice's Agent → Envoy (JWT with email claim)       │
+│    POST http://localhost:8000/mcp                       │
 └─────────────────────────────────────────────────────────┘
                     ↓
 ┌─────────────────────────────────────────────────────────┐
-│ 2. Gateway extracts userId: alice@acme.com             │
+│ 2. Envoy validates JWT via Keycloak JWKS               │
 └─────────────────────────────────────────────────────────┘
                     ↓
 ┌─────────────────────────────────────────────────────────┐
-│ 3. Service-Level Check: ToolPolicy[duckduckgo]        │
-│    - checkAccess("search", "alice@acme.com")           │
-│    - ✓ ALLOWED (tool is enabled globally)             │
+│ 3. Envoy ext_authz → Governance Service                │
+│    (forwards JSON-RPC body + JWT)                       │
 └─────────────────────────────────────────────────────────┘
                     ↓
 ┌─────────────────────────────────────────────────────────┐
-│ 4. User-Level Check: UserToolAccess[alice@acme.com]   │
-│    - hasAccess("duckduckgo", "search")                 │
-│    - ✓ ALLOWED (Alice has search granted)             │
+│ 4. Governance Service: Parse JSON-RPC body             │
+│    - method: "tools/call"                               │
+│    - tool: "duckduckgo__search"                         │
+│    - userId: alice@acme.com (from JWT)                  │
 └─────────────────────────────────────────────────────────┘
                     ↓
 ┌─────────────────────────────────────────────────────────┐
-│ 5. Forward to upstream duckduckgo MCP service          │
+│ 5. FAST PATH: Check services.yaml user_access          │
+│    - alice@acme.com has duckduckgo: ["search"]          │
+│    - ✓ PASS (user found, tool granted locally)         │
+└─────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────┐
+│ 6. SLOW PATH: NPL ToolPolicy[duckduckgo]              │
+│    - checkAccess("search", "alice@acme.com")            │
+│    - ✓ ALLOWED (tool is enabled globally)              │
+└─────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────┐
+│ 7. SLOW PATH: NPL UserToolAccess[alice@acme.com]      │
+│    - hasAccess("duckduckgo", "search")                  │
+│    - ✓ ALLOWED (Alice has search granted)              │
+└─────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────┐
+│ 8. Governance Service returns ALLOW → Envoy forwards   │
+│    to upstream duckduckgo MCP service                   │
 └─────────────────────────────────────────────────────────┘
 ```
 
 **Denial Scenarios**:
 
+- **Fast Path Reject**: User not found in services.yaml or tool not granted → NPL is never called
 - **Service Disabled**: ToolPolicy doesn't exist or service not in ServiceRegistry
 - **Tool Disabled**: ToolPolicy.checkAccess returns false
 - **User Lacks Access**: UserToolAccess.hasAccess returns false
@@ -234,7 +259,7 @@ curl -X POST \
   -d '{"serviceName": "github", "toolName": "create_issue"}'
 ```
 
-### Check Access (Gateway calls this)
+### Check Access (Governance Service calls this)
 ```bash
 # Check if user has access
 curl -X POST \
@@ -261,7 +286,7 @@ curl -X POST \
 3. **Credential Isolation** (Future - Phase 3):
    - Vault integration for per-user credentials
    - Credentials stored at `vaultPaths[serviceName]`
-   - Gateway fetches user-specific credentials before forwarding
+   - Governance Service fetches user-specific credentials before forwarding
 
 ### Fail-Closed Principle
 
@@ -269,13 +294,13 @@ curl -X POST \
 - If NPL is unreachable → DENY
 - If protocol instance not found → DENY (except backward compat for no UserToolAccess)
 - If permission call fails → DENY
-- Gateway never bypasses policy checks (except DEV_MODE)
+- Governance Service never bypasses policy checks (except DEV_MODE)
 
 ### Audit Trail
 
 - All access checks logged by NPL protocols
 - `UserToolAccess.requestCounter` tracks total checks per user
-- Gateway logs show full policy check results
+- Governance Service logs show full policy check results
 - NPL logs show grant/revoke operations with timestamps
 
 ## Backward Compatibility
@@ -294,11 +319,11 @@ curl -X POST \
 
 ### HashiCorp Vault Integration
 - Store per-user credentials in Vault
-- Gateway fetches credentials before forwarding tool calls
+- Governance Service fetches credentials before forwarding tool calls
 - `vaultPaths` map already included in config schema
 
 ### Credential Modes (from architecture plan)
-- **auto**: Gateway fetches from Vault automatically
+- **auto**: Governance Service fetches from Vault automatically
 - **confirm**: User approves via Telegram/UI
 - **provide**: User provides credentials in real-time
 
@@ -337,17 +362,18 @@ npm start
 ```bash
 # Get token for test user
 TOKEN=$(curl -s -X POST \
-  "$KEYCLOAK_URL/realms/mcpgateway/protocol/openid-connect/token" \
+  "http://localhost:11000/realms/mcpgateway/protocol/openid-connect/token" \
   -d "grant_type=password" \
   -d "client_id=mcpgateway" \
   -d "username=testuser" \
   -d "password=Welcome123" | jq -r '.access_token')
 
-# Call tool via Gateway
+# Call tool via Envoy → Governance Service → upstream
 curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  "$GATEWAY_URL/mcp" \
+  -H "Accept: application/json, text/event-stream" \
+  "http://localhost:8000/mcp" \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
@@ -365,7 +391,8 @@ curl -X POST \
 curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  "$GATEWAY_URL/mcp" \
+  -H "Accept: application/json, text/event-stream" \
+  "http://localhost:8000/mcp" \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
@@ -393,20 +420,22 @@ curl -X POST \
 
 **Check:**
 1. Is NPL Engine running? (`docker ps | grep npl`)
-2. Can Gateway reach NPL? (Check `NPL_URL` env var)
+2. Can Governance Service reach NPL? (Check `NPL_URL` env var)
 3. Are NPL credentials valid? (Check `AGENT_USERNAME/PASSWORD`)
+4. Is Envoy routing to Governance Service? (Check Envoy ext_authz config)
 
 ### Tool granted but still denied
 
 **Check:**
 1. Is service enabled in ServiceRegistry?
 2. Is tool enabled in ToolPolicy?
-3. Check Gateway logs for exact denial reason
-4. Verify JWT token contains correct email claim
+3. Check Governance Service logs for exact denial reason
+4. Verify JWT token contains correct email/preferred_username/sub claim
+5. Is user listed in services.yaml user_access? (fast path check)
 
 ## Configuration Reference
 
-### Environment Variables (Gateway)
+### Environment Variables (Governance Service)
 
 ```bash
 NPL_URL=http://npl-engine:12000
@@ -414,6 +443,7 @@ KEYCLOAK_URL=http://keycloak:11000
 KEYCLOAK_REALM=mcpgateway
 AGENT_USERNAME=agent
 AGENT_PASSWORD=Welcome123
+SERVICES_YAML_PATH=/configs/services.yaml  # Path to user_access config
 DEV_MODE=false  # Set to true to bypass all policy checks
 ```
 
@@ -433,7 +463,7 @@ Phase 2 delivers:
 
 ✅ **NPL Protocols**: UserRegistry + UserToolAccess  
 ✅ **TUI Management**: User creation, tool grants, deletion  
-✅ **Gateway Enforcement**: Dual-layer policy checks (service + user)  
+✅ **Governance Service Enforcement**: Two-tier policy checks (fast YAML + slow NPL)
 ✅ **Configuration**: Persistent user access in services.yaml  
 ✅ **Bootstrap**: Automated setup and sync  
 ✅ **Security**: Fail-closed, defense-in-depth, audit trail  

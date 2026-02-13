@@ -1,6 +1,6 @@
 # Noumena MCP Gateway
 
-An MCP (Model Context Protocol) gateway that enables AI agents and users to securely access upstream MCP services through Envoy-based routing, two-tier authorization (fast RBAC + stateful NPL governance), JWT authentication, and credential injection.
+An MCP (Model Context Protocol) gateway that enables AI agents and users to securely access upstream MCP services through Envoy-based routing, OPA policy evaluation with cached NPL state, JWT authentication, and credential injection.
 
 ## Architecture
 
@@ -18,14 +18,14 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
                    policy-net │  │  │ backend-net
                               │  │  │
                    ┌──────────┴┐ │  ├──────────────────────┐
-                   │Governance │ │  │                       │
-                   │ Service   │ │  │  supergateway sidecars│
+                   │   OPA     │ │  │                       │
+                   │ Sidecar   │ │  │  supergateway sidecars│
                    │(ext_authz)│ │  │ ┌─────────┐ ┌───────┐│
                    └─────┬─────┘ │  │ │DuckDuck │ │GitHub ││
                          │       │  │ │Go  MCP  │ │ MCP   ││...
                    ┌─────┴─────┐ │  │ └─────────┘ └───────┘│
                    │NPL Engine │ │  └──────────────────────┘
-                   │(Policies) │ │
+                   │(State Mgr)│ │
                    └───────────┘ │ secrets-net
                                  │
                           ┌──────┴──────┐
@@ -38,15 +38,15 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
                           └─────────────┘
 ```
 
-**Four-tier network isolation**: Agents can only reach Envoy and Keycloak (public-net). NPL Engine and Governance Service are on policy-net. Vault and Credential Proxy are on secrets-net. Backend MCP services (supergateway sidecars) are on backend-net.
+**Four-tier network isolation**: Agents can only reach Envoy and Keycloak (public-net). OPA and NPL Engine are on policy-net. Vault and Credential Proxy are on secrets-net. Backend MCP services (supergateway sidecars) are on backend-net.
 
 ## Components
 
 | Component | Role |
 |-----------|------|
 | **Envoy AI Gateway** | MCP protocol handling, JWT validation (Keycloak JWKS), routing to backends, SSE streaming |
-| **Governance Service** | Two-tier ext_authz: fast RBAC from `services.yaml` (sub-ms) + stateful NPL governance |
-| **NPL Engine** | Stateful policy evaluation via ServiceRegistry, ToolPolicy, UserToolAccess |
+| **OPA Sidecar** | ext_authz policy evaluation via Rego; self-polls NPL for state (cached 5s) |
+| **NPL Engine** | Policy state manager: ServiceRegistry, ToolPolicy, UserToolAccess (admin mutations via TUI/API) |
 | **Supergateway Sidecars** | Wrap STDIO MCP tools as Streamable HTTP endpoints |
 | **Mock Calendar MCP** | HTTP-native MCP server for bilateral streaming tests (SSE notifications) |
 | **Keycloak** | OIDC authentication provider with user/role management |
@@ -110,6 +110,7 @@ npx @modelcontextprotocol/inspector
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Envoy Admin | http://localhost:9901 | (none) |
+| OPA API | http://localhost:8181 | (none) |
 | Keycloak Admin | http://localhost:11000 | admin / welcome |
 | NPL Inspector | http://localhost:8080 | admin / Welcome123 |
 | Vault UI | http://localhost:8200 | Token: dev-token |
@@ -130,45 +131,62 @@ The gateway supports **bilateral (bidirectional) streaming** via MCP Streamable 
 - **POST /mcp** — agent-to-server: JSON-RPC requests (initialize, tools/list, tools/call)
 - **GET /mcp** — server-to-agent: long-lived SSE stream for server-initiated notifications
 
-Envoy routes GET /mcp with `timeout: 0s` (never timeout) so notification streams stay open indefinitely. JWT auth and ext_authz governance checks happen once at stream setup.
+Envoy routes GET /mcp with `timeout: 0s` (never timeout) so notification streams stay open indefinitely. JWT auth and ext_authz checks happen once at stream setup.
 
-## Two-Tier Authorization
+## OPA Policy Authorization
 
-Every MCP request passes through Envoy's `ext_authz` filter, which calls the Governance Service. Authorization happens in two tiers:
+Every MCP request passes through Envoy's `ext_authz` filter, which calls OPA via gRPC. OPA evaluates a Rego policy (`policies/mcp_authz.rego`) that fetches NPL state via `http.send()` with response caching.
 
-### Tier 1: Fast RBAC (sub-ms, no network call)
+### How It Works
 
-The governance service checks `services.yaml` `user_access` config locally:
-- Does this user exist in the RBAC config?
-- Does this user have access to this service/tool?
-- Wildcard (`*`) support for granting all tools in a service
+```
+Envoy (port 8000)
+  │ ext_authz (gRPC)
+  ▼
+OPA Sidecar (port 9191 gRPC / 8181 HTTP)
+  ├─ Fast path: Rego rules + cached NPL data via http.send() (~0.1ms from cache)
+  │   Cache refreshes every 5s — OPA polls NPL directly, no sync service needed
+  │
+  └─ Slow path: http.send() → NPL Engine (uncached, ~50ms)
+      Only for first request or after cache expires
+```
 
-If denied at this tier, NPL is never called. Response time: ~5ms.
-
-### Tier 2: Stateful NPL Governance (network call)
-
-Only for `tools/call` requests that pass the fast path:
-- `ToolPolicy.checkAccess` -- Is this tool enabled at the service level?
-- `UserToolAccess.hasAccess` -- Does this user have dynamic/stateful access?
-- Supports approval workflows, audit trail, dynamic policy changes
+**Only two components in the policy chain: OPA + NPL. No governance service. No policy-sync service.**
 
 ### Authorization Flow
 
 ```
-1. Agent → Envoy            POST /mcp: tools/call "search"
+1. Agent → Envoy            POST /mcp: tools/call "duckduckgo.search"
 2. Envoy                    Validates JWT (Keycloak JWKS)
-3. Envoy → Governance       ext_authz: forwards JSON-RPC body + JWT
-4. Governance               Parses JSON-RPC: method=tools/call, tool=search
-5. Governance               Decodes JWT: userId=jarvis@acme.com
-6. Governance               FAST PATH: services.yaml RBAC check (sub-ms)
-7. Governance → NPL         SLOW PATH: ToolPolicy.checkAccess (stateful)
-8. Governance → NPL         SLOW PATH: UserToolAccess.hasAccess (stateful)
-9. Governance → Envoy       200 (allow) or 403 (deny)
-10. Envoy → Backend MCP     Routes to supergateway sidecar (if allowed)
-11. Backend → Envoy → Agent SSE response streamed back
+3. Envoy → OPA              ext_authz (gRPC): forwards JSON-RPC body + headers
+4. OPA                      Decodes JWT: userId=jarvis@acme.com
+5. OPA                      Parses JSON-RPC: method=tools/call, tool=duckduckgo.search
+6. OPA                      Fetches NPL data via http.send() (cached 5s):
+                              - ServiceRegistry → enabled services
+                              - ToolPolicy → enabled tools per service
+                              - UserToolAccess → user-to-service-to-tool matrix
+7. OPA                      Evaluates: service enabled? tool enabled? user has access?
+8. OPA → Envoy              allow or deny
+9. Envoy → Backend MCP      Routes to supergateway sidecar (if allowed)
+10. Backend → Envoy → Agent SSE response streamed back
 ```
 
-**Fail-closed**: If NPL or the governance service is unavailable, all requests are denied.
+### Policy Rules
+
+| Request Type | Rule |
+|-------------|------|
+| `initialize`, `tools/list`, `ping`, `notifications/*` | Always allowed (non-tool methods) |
+| `GET /mcp` (stream setup) | Allowed if user has any tool access |
+| `tools/call` | Service must be enabled, tool must be enabled, user must have access |
+| Missing JWT or unknown user | Denied |
+| NPL unavailable (cache expired) | Denied (fail-closed) |
+
+### Cache Behavior
+
+- **NPL data**: cached 5s — OPA polls NPL on next request after expiry
+- **Keycloak gateway token**: cached 60s
+- **On NPL unavailable**: serves stale cache until TTL expires, then fail-closed
+- **Admin mutations propagate**: disable a tool in NPL → within 5s, OPA reflects the change
 
 ### NPL Protocol Hierarchy
 
@@ -234,9 +252,9 @@ All TUI operations that modify state follow the **NPL-first** pattern:
 
 ## Configuration
 
-### services.yaml
+### services.yaml (Bootstrap Only)
 
-Defines upstream MCP services, their tools, and user access (used for fast RBAC):
+Defines upstream MCP services and their tools. Used by the TUI for service management and as a persistent cache of NPL state. **Not read at runtime** — OPA fetches all policy data directly from NPL.
 
 ```yaml
 services:
@@ -260,8 +278,6 @@ user_access:
           - "*"       # Wildcard: all tools
 ```
 
-The `user_access` section is read by the governance service for fast RBAC lookups (Tier 1).
-
 ### credentials.yaml
 
 Maps credential names to Vault paths and injection targets:
@@ -284,18 +300,15 @@ service_defaults:
 
 ### Environment Variables
 
-#### Governance Service
+#### OPA Sidecar
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8090` | HTTP port |
 | `NPL_URL` | `http://npl-engine:12000` | NPL Engine URL |
 | `KEYCLOAK_URL` | `http://keycloak:11000` | Keycloak URL |
 | `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
 | `GATEWAY_USERNAME` | `gateway` | Service account for NPL calls |
 | `GATEWAY_PASSWORD` | `Welcome123` | Service account password |
-| `DEV_MODE` | `false` | Bypass NPL policy checks |
-| `SERVICES_CONFIG_PATH` | `/app/configs/services.yaml` | Path to RBAC config |
 
 #### Credential Proxy
 
@@ -310,10 +323,9 @@ service_defaults:
 
 ```
 noumena-mcp-gateway/
-├── governance-service/     # ext_authz backend (Kotlin/Ktor)
-│   └── src/main/kotlin/
-│       ├── Application.kt  # Two-tier auth: fast RBAC + NPL
-│       └── NplGovernanceClient.kt  # NPL Engine communication
+├── policies/              # OPA Rego policies (ext_authz)
+│   ├── mcp_authz.rego     # Authorization policy: JWT decode, JSON-RPC parse, NPL data fetch, RBAC
+│   └── mcp_authz_test.rego # Rego unit tests (opa test policies/ -v)
 │
 ├── credential-proxy/       # Credential injection service (Kotlin/Ktor)
 │   └── src/main/kotlin/    # VaultClient, CredentialSelector
@@ -337,15 +349,14 @@ noumena-mcp-gateway/
 │   └── server.js           # Express: POST /mcp + GET /mcp SSE stream
 │
 ├── configs/                # Runtime configuration
-│   ├── services.yaml       # Service definitions + user RBAC
+│   ├── services.yaml       # Service definitions + user access (bootstrap/cache)
 │   └── credentials.yaml    # Credential mappings
 │
 ├── deployments/            # Docker Compose + Envoy config
 │   ├── docker-compose.yml  # Full stack with network isolation
 │   ├── envoy/
-│   │   └── envoy-config.yaml  # Envoy static config (JWT, ext_authz, routing)
+│   │   └── envoy-config.yaml  # Envoy static config (JWT, ext_authz → OPA, routing)
 │   └── docker/
-│       ├── Dockerfile.governance     # Governance service image
 │       ├── Dockerfile.supergateway   # Supergateway sidecar image
 │       ├── Dockerfile.credential-proxy
 │       └── Dockerfile.mock-calendar  # HTTP-native MCP server image
@@ -356,25 +367,21 @@ noumena-mcp-gateway/
 └── docs/                   # Documentation
 ```
 
-## Building from Source
+## Running OPA Tests
 
 ```bash
-# Build all modules
-./gradlew build
+# Install OPA (macOS)
+brew install opa
 
-# Build Docker images
-cd deployments
-docker compose build
+# Run Rego unit tests
+opa test policies/ -v
 ```
 
 ## Testing
 
-> **Warning:** The test suite has not been updated to reflect the Envoy + governance service refactoring. Integration and E2E tests will likely fail. Test update is pending.
+> **Warning:** The integration test suite has not been updated to reflect the OPA refactoring. Integration and E2E tests will likely fail. Test update is pending.
 
 ```bash
-# Run unit tests
-./gradlew test
-
 # Manual verification (requires Docker stack running)
 # 1. Get a token
 TOKEN=$(curl -sf -X POST 'http://localhost:11000/realms/mcpgateway/protocol/openid-connect/token' \
@@ -386,16 +393,19 @@ curl -X POST 'http://localhost:8000/mcp' \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"hello"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"duckduckgo.search","arguments":{"query":"hello"}}}'
 
 # 3. Test denial (user without access should get 403)
+
+# 4. Inspect OPA data (debugging)
+curl http://localhost:8181/v1/data
 ```
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/ARCHITECTURE_V2.md) | Full architecture: Envoy gateway, governance service, message flows |
+| [Architecture](docs/ARCHITECTURE_V2.md) | Full architecture: Envoy gateway, OPA policy, NPL state management |
 | [Credential Injection](docs/CREDENTIAL_INJECTION.md) | Credential injection system design and Vault integration |
 | [User Access Control](docs/USER_ACCESS_CONTROL.md) | Per-user/agent tool access control via NPL |
 | [NPL as Source of Truth](docs/NPL_AS_SOURCE_OF_TRUTH.md) | NPL as runtime source of truth for policies |

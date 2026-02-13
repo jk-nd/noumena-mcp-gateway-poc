@@ -1,6 +1,11 @@
-# Dynamic MCP Service Configuration
-# This file defines all upstream services and their tools.
-# The Gateway reads this config for tool listing and upstream routing.
+# MCP Service Configuration (Bootstrap / TUI Cache)
+#
+# This file defines upstream services, their tools, and user access grants.
+# It is used by the TUI for service management and as a persistent cache of NPL state.
+#
+# NOT read at runtime — OPA fetches all policy data directly from NPL Engine
+# via http.send() with 5-second cache TTL. Changes made here are NOT reflected
+# in policy decisions until synced to NPL via the TUI.
 
 services:
   - name: "duckduckgo"
