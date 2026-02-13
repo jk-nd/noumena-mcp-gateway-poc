@@ -226,6 +226,7 @@ services:
   # ─────────────────────────────────────────────────────────────────────────
   opa:
     image: openpolicyagent/opa:latest-envoy
+    platform: linux/amd64  # OPA Envoy image only ships amd64; runs via Rosetta on Apple Silicon
     ports:
       - "9191:9191"   # gRPC ext_authz (Envoy connects here)
       - "8181:8181"   # HTTP API (debugging, data inspection)

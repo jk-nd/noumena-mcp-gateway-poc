@@ -74,7 +74,8 @@ enabled_services[svc] if {
 	some svc in item.enabledServices
 }
 
-# ToolPolicy: list all instances, build map of service → {enabled_tools, state}
+# ToolPolicy: list all instances, then fetch enabledTools via action endpoint
+# The list response includes @id, policyServiceName, @state but NOT enabledTools (private var)
 npl_tool_policy_response := http.send({
 	"method": "GET",
 	"url": sprintf("%s/npl/services/ToolPolicy/", [npl_url]),
@@ -83,12 +84,28 @@ npl_tool_policy_response := http.send({
 	"force_cache_duration_seconds": 5,
 })
 
-# Map: service name → ToolPolicy object
+# Map: service name → ToolPolicy enriched with enabledTools from action call
 tool_policies[service_name] := policy if {
 	npl_tool_policy_response.status_code == 200
 	some item in npl_tool_policy_response.body.items
 	service_name := item.policyServiceName
-	policy := item
+
+	# Fetch enabledTools via POST action endpoint (cached 5s)
+	tools_response := http.send({
+		"method": "POST",
+		"url": sprintf("%s/npl/services/ToolPolicy/%s/getEnabledTools", [npl_url, item["@id"]]),
+		"headers": {"Authorization": npl_auth_header, "Content-Type": "application/json"},
+		"raw_body": "{}",
+		"force_cache": true,
+		"force_cache_duration_seconds": 5,
+	})
+	tools_response.status_code == 200
+
+	policy := {
+		"@state": item["@state"],
+		"policyServiceName": service_name,
+		"enabledTools": tools_response.body,
+	}
 }
 
 # Check if a service's policy is in "active" state (not suspended)
@@ -109,7 +126,8 @@ tool_enabled(service_name, tool_name) if {
 	tool == tool_name
 }
 
-# UserToolAccess: list all instances, build map of userId → access list
+# UserToolAccess: list all instances, then fetch serviceAccess via action endpoint
+# The list response includes @id, userId but NOT serviceAccess (private var)
 npl_user_access_response := http.send({
 	"method": "GET",
 	"url": sprintf("%s/npl/users/UserToolAccess/", [npl_url]),
@@ -118,12 +136,27 @@ npl_user_access_response := http.send({
 	"force_cache_duration_seconds": 5,
 })
 
-# Map: userId → UserToolAccess object
-user_access_entries[user_id] := entry if {
+# Map: userId → UserToolAccess enriched with serviceAccess from action call
+user_access_entries[uid] := entry if {
 	npl_user_access_response.status_code == 200
 	some item in npl_user_access_response.body.items
-	user_id := item.userId
-	entry := item
+	uid := item.userId
+
+	# Fetch serviceAccess via POST action endpoint (cached 5s)
+	access_response := http.send({
+		"method": "POST",
+		"url": sprintf("%s/npl/users/UserToolAccess/%s/getAccessList", [npl_url, item["@id"]]),
+		"headers": {"Authorization": npl_auth_header, "Content-Type": "application/json"},
+		"raw_body": "{}",
+		"force_cache": true,
+		"force_cache_duration_seconds": 5,
+	})
+	access_response.status_code == 200
+
+	entry := {
+		"userId": uid,
+		"serviceAccess": access_response.body,
+	}
 }
 
 # Check if user has access to a specific service+tool

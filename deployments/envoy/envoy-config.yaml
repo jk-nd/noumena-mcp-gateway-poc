@@ -37,7 +37,7 @@ static_resources:
                         max_age: "86400"
                         allow_credentials: true
                       routes:
-                        # Health check endpoint (no auth required)
+                        # Health check endpoint (no auth, no ext_authz)
                         - match:
                             path: "/health"
                           direct_response:
@@ -48,6 +48,10 @@ static_resources:
                             - header:
                                 key: "content-type"
                                 value: "application/json"
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
 
                         # ── OAuth Discovery & Proxy (MCP Inspector compatibility) ──
                         # RFC 9728: OAuth Protected Resource Metadata
@@ -71,6 +75,10 @@ static_resources:
                             - header:
                                 key: "access-control-allow-headers"
                                 value: "content-type, mcp-protocol-version, authorization"
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
 
                         # RFC 8414: OAuth Authorization Server Metadata
                         # SDK tries path-aware: /.well-known/oauth-authorization-server/mcp first
@@ -93,6 +101,10 @@ static_resources:
                             - header:
                                 key: "access-control-allow-headers"
                                 value: "content-type, mcp-protocol-version, authorization"
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
 
                         # RFC 7591: Dynamic Client Registration
                         # Returns pre-configured mcpgateway client info
@@ -115,6 +127,10 @@ static_resources:
                             - header:
                                 key: "access-control-allow-headers"
                                 value: "content-type, mcp-protocol-version, authorization"
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
 
                         # OAuth Authorization endpoint — redirect to Keycloak
                         # Preserves query params (client_id, redirect_uri, etc.)
@@ -125,6 +141,10 @@ static_resources:
                             host_redirect: "keycloak:11000"
                             path_redirect: "/realms/mcpgateway/protocol/openid-connect/auth"
                             response_code: "FOUND"
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
 
                         # OAuth Token endpoint — proxy to Keycloak
                         - match:
