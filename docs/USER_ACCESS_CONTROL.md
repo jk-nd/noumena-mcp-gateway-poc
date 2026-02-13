@@ -74,34 +74,28 @@ New menu: **User Management**
 - Real-time sync to NPL UserToolAccess protocol
 - Persisted to `services.yaml`
 
-### 4. Governance Service (Enforcement Layer)
+### 4. OPA Policy Engine (Enforcement Layer)
 
-Located in `governance-service/src/main/kotlin/io/noumena/mcp/governance/Application.kt`
+Located in `policies/mcp_authz.rego` (with tests in `policies/mcp_authz_test.rego`)
 
-The Governance Service runs as an Envoy `ext_authz` gRPC/HTTP filter, implementing a two-tier access control architecture with a fast local check and a slow NPL check.
+Policy enforcement is handled by OPA (Open Policy Agent) running as an Envoy `ext_authz` filter. OPA evaluates Rego policies that check JWT claims, user access from `services.yaml`, and NPL protocol state via action endpoints.
 
-#### V3 Policy Check Flow (Two-Tier Architecture):
+#### Policy Check Flow:
 
 ```
 1. Envoy validates JWT (Keycloak JWKS)
-2. Envoy forwards to Governance Service (ext_authz with JSON-RPC body)
-3. Governance Service parses JSON-RPC body (method, tool name)
-4. Governance Service decodes JWT (userId from email/preferred_username/sub)
-5. FAST PATH: Check services.yaml user_access config (sub-ms, no network)
-   - DENY if user not found or tool not granted → NPL never called
-6. SLOW PATH: Check NPL ToolPolicy.checkAccess (service-level)
-   - DENY if tool not enabled in policy
-7. SLOW PATH: Check NPL UserToolAccess.hasAccess (user-level)
-   - DENY if user doesn't have dynamic access
-8. ALLOW if all checks pass
+2. Envoy forwards to OPA ext_authz filter
+3. OPA evaluates mcp_authz.rego policy
+4. OPA extracts userId from JWT claims (email/preferred_username/sub)
+5. OPA checks user_access in services.yaml config
+6. OPA queries NPL action endpoints for dynamic policy state
+7. ALLOW or DENY based on policy evaluation
 ```
 
 #### Fail-Closed Behavior:
-- If NPL is unavailable → DENY
-- If ToolPolicy check fails → DENY
-- If UserToolAccess check fails → DENY
-- If no UserToolAccess configured → ALLOW (backward compatibility)
-- If user not found in services.yaml → DENY (fast path rejects before NPL is called)
+- If OPA is unavailable → DENY (Envoy ext_authz fail-closed)
+- If user not found in config → DENY
+- If tool not granted → DENY
 
 ## Bootstrap Process
 
