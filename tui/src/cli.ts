@@ -1562,21 +1562,36 @@ async function manageUserServiceGrantsFlow(
     const userGrants = freshData.grants[email] || [];
     const grant = userGrants.find((g) => g.serviceName === service.serviceName);
     const hasWildcard = grant?.allowedTools.includes("*") || false;
-    const grantedTools = grant ? grant.allowedTools : [];
-    const displayName = service.metadata?.displayName || service.serviceName;
+    const grantedTools = grant ? grant.allowedTools.filter((t) => t !== "*") : [];
+    const grantedSet = new Set(grantedTools);
+
+    // Service's catalog tools (what's available to grant)
+    const freshService = freshData.services[service.serviceName];
+    const catalogTools = freshService ? freshService.enabledTools : [];
+
+    const displayName = freshService?.metadata?.displayName || service.metadata?.displayName || service.serviceName;
 
     console.log();
     console.log(noumena.purple(`  ${displayName} — ${email}`));
-    console.log(noumena.textDim(`  ${hasWildcard ? "ALL tools" : `${grantedTools.length} tools`} granted`));
+    if (hasWildcard) {
+      console.log(noumena.success("  ALL tools granted (wildcard)"));
+    } else if (grantedTools.length > 0) {
+      console.log(noumena.textDim(`  ${grantedTools.length} tool(s) granted:`));
+      for (const tool of grantedTools) {
+        console.log(`    ${noumena.success("✓")} ${tool}`);
+      }
+    } else {
+      console.log(noumena.grayDim("  No tools granted"));
+    }
     console.log();
 
     const action = await p.select({
       message: "What do you want to do?",
       options: [
         { value: "back" as const, label: noumena.textDim("← Back") },
-        { value: "grant" as const, label: noumena.success("Grant tool"), hint: "Enter tool name" },
-        { value: "grant_all" as const, label: "Grant all tools", hint: "Wildcard access" },
-        { value: "revoke" as const, label: noumena.warning("Revoke tools"), hint: "Pick tools to revoke" },
+        { value: "grant" as const, label: noumena.success("Grant tools"), hint: "Select from available tools" },
+        { value: "grant_all" as const, label: "Grant all tools", hint: "Wildcard access (*)" },
+        { value: "revoke" as const, label: noumena.warning("Revoke tools"), hint: "Select tools to revoke" },
         { value: "revoke_all" as const, label: "Revoke all access", hint: "Remove all grants for this service" },
       ],
     });
@@ -1616,17 +1631,32 @@ async function manageUserServiceGrantsFlow(
     }
 
     if (action === "grant") {
-      const toolName = await p.text({
-        message: "Tool name to grant:",
-        placeholder: "e.g., search, list_repos",
-        validate: (v) => (!v || v.trim().length === 0 ? "Tool name is required" : undefined),
-      });
-      if (p.isCancel(toolName)) continue;
+      // Show catalog tools that aren't already granted
+      const ungrantedTools = catalogTools.filter((t) => !grantedSet.has(t));
 
-      s.start("Granting tool...");
+      if (ungrantedTools.length === 0 && catalogTools.length > 0) {
+        p.log.info(hasWildcard ? "User already has wildcard access to all tools" : "All available tools are already granted");
+        continue;
+      }
+
+      if (ungrantedTools.length === 0) {
+        p.log.info("No tools available in the service catalog. Enable tools on the service first.");
+        continue;
+      }
+
+      const selectedTools = await p.multiselect({
+        message: "Select tools to grant (SPACE to toggle, ENTER to apply):",
+        options: ungrantedTools.map((tool) => ({ value: tool, label: tool })),
+        required: false,
+      });
+      if (p.isCancel(selectedTools) || selectedTools.length === 0) continue;
+
+      s.start(`Granting ${selectedTools.length} tool(s)...`);
       try {
-        await grantTool(email, service.serviceName, String(toolName).trim());
-        s.stop(noumena.success(`✓ Granted ${toolName}`));
+        for (const toolName of selectedTools) {
+          await grantTool(email, service.serviceName, toolName);
+        }
+        s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) granted`));
       } catch (error) {
         s.stop(noumena.error("✗ Failed"));
         p.log.error(`${error}`);
@@ -1635,19 +1665,19 @@ async function manageUserServiceGrantsFlow(
     }
 
     if (action === "revoke") {
-      if (grantedTools.length === 0) {
-        p.log.info("No tools to revoke");
-        continue;
-      }
-
-      // Wildcard grant — can't revoke individual tools, use "Revoke all access" instead
+      // Wildcard grant — can't revoke individual tools
       if (hasWildcard) {
         p.log.info("User has wildcard (*) access. Use 'Revoke all access' to remove the grant.");
         continue;
       }
 
+      if (grantedTools.length === 0) {
+        p.log.info("No tools to revoke");
+        continue;
+      }
+
       const selectedTools = await p.multiselect({
-        message: "Select tools to revoke:",
+        message: "Select tools to revoke (SPACE to toggle, ENTER to apply):",
         options: grantedTools.map((tool) => ({ value: tool, label: tool })),
         required: false,
       });
