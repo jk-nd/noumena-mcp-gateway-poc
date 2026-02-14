@@ -58,6 +58,7 @@ import {
   type PolicyData,
   type ServiceEntry,
   type GrantEntry,
+  type DiscoveredTool,
 } from "./lib/api.js";
 
 // Noumena color palette - optimized for dark terminal backgrounds
@@ -237,9 +238,11 @@ function getTypeLabel(type: string): string {
 
 async function mainMenu(): Promise<boolean> {
   let policyData: PolicyData;
+  let policyError = "";
   try {
     policyData = await getPolicyData();
-  } catch {
+  } catch (err) {
+    policyError = `${err}`;
     policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {} };
   }
 
@@ -272,6 +275,9 @@ async function mainMenu(): Promise<boolean> {
     noumena.success("■") + noumena.textDim(" image ready  ") +
     noumena.grayDim("·") + noumena.textDim(" not pulled")
   );
+  if (policyError) {
+    console.log(noumena.error("  PolicyStore error: ") + noumena.warning(policyError.substring(0, 80)));
+  }
   console.log();
 
   // Build service options from PolicyStore
@@ -506,7 +512,7 @@ async function serviceActionsFlow(entry: ServiceEntry, policyData: PolicyData): 
       p.log.error("Failed to pull image");
     }
   } else if (action === "discover") {
-    await discoverAndSaveTools(entry);
+    await discoverAndEnableTools(entry);
   } else if (action === "tools") {
     await manageToolsForService(entry);
   } else if (action === "info") {
@@ -531,12 +537,63 @@ async function serviceActionsFlow(entry: ServiceEntry, policyData: PolicyData): 
 }
 
 // ============================================================================
-// Tool Management — reads/writes PolicyStore directly
+// Tool Management — discover first, then toggle
 // ============================================================================
 
+/**
+ * Run MCP tool discovery against a service.
+ * Returns the list of discovered tools, or null if discovery isn't possible.
+ */
+function discoverTools(entry: ServiceEntry): {
+  success: boolean;
+  tools: DiscoveredTool[];
+  serverInfo?: { name: string; version: string };
+  error?: string;
+} | null {
+  const imageName = getDockerImageFromMetadata(entry);
+  const isDocker = imageName !== null;
+  const command = entry.metadata?.command;
+  const type = entry.metadata?.type || "MCP_STDIO";
+  const argsStr = entry.metadata?.args;
+  const args = argsStr ? JSON.parse(argsStr) : [];
+
+  if (isDocker && imageName) {
+    return discoverToolsFromContainer(imageName);
+  } else if (command && type === "MCP_STDIO") {
+    return discoverToolsFromCommand(command, args);
+  }
+  return null;
+}
+
 async function manageToolsForService(entry: ServiceEntry): Promise<void> {
+  const displayName = entry.metadata?.displayName || entry.serviceName;
+
+  // Step 1: Discover available tools
+  const imageName = getDockerImageFromMetadata(entry);
+  const isDocker = imageName !== null;
+  const command = entry.metadata?.command;
+  const type = entry.metadata?.type || "MCP_STDIO";
+  const canDiscover = (isDocker && imageName && imageExists(imageName)) || (!isDocker && command && type === "MCP_STDIO");
+
+  let availableTools: DiscoveredTool[] = [];
+
+  if (canDiscover) {
+    const s = p.spinner();
+    s.start(`Discovering tools from ${displayName}...`);
+    const result = discoverTools(entry);
+    if (result?.success && result.tools.length > 0) {
+      availableTools = result.tools;
+      const serverLabel = result.serverInfo
+        ? ` (${result.serverInfo.name} v${result.serverInfo.version})`
+        : "";
+      s.stop(noumena.success(`Discovered ${result.tools.length} tool(s)${serverLabel}`));
+    } else {
+      s.stop(noumena.warning(result?.error ? `Discovery failed: ${result.error}` : "No tools discovered"));
+    }
+  }
+
   while (true) {
-    // Refresh from PolicyStore
+    // Refresh enabled tools from PolicyStore
     let freshData: PolicyData;
     try {
       freshData = await getPolicyData();
@@ -550,53 +607,102 @@ async function manageToolsForService(entry: ServiceEntry): Promise<void> {
       return;
     }
 
-    const enabledTools = freshEntry.enabledTools;
-    const displayName = freshEntry.metadata?.displayName || freshEntry.serviceName;
+    const enabledSet = new Set(freshEntry.enabledTools);
+
+    // Merge: all known tools = discovered ∪ currently enabled
+    const allToolNames = new Set([
+      ...availableTools.map((t) => t.name),
+      ...freshEntry.enabledTools,
+    ]);
 
     console.log();
     console.log(noumena.purple(`  ${displayName} - Tools`));
-    console.log(noumena.textDim(`  ${enabledTools.length} enabled`));
+    console.log(noumena.textDim(`  ${enabledSet.size} enabled / ${allToolNames.size} known`));
+    console.log();
+
+    if (allToolNames.size === 0) {
+      p.log.info("No tools discovered and none enabled. Pull the image first or try 'Discover tools' from the service menu.");
+      await p.confirm({ message: "Press Enter to continue", initialValue: true });
+      break;
+    }
+
+    // Build options sorted: enabled first, then disabled
+    const sortedTools = [...allToolNames].sort((a, b) => {
+      const aEnabled = enabledSet.has(a) ? 0 : 1;
+      const bEnabled = enabledSet.has(b) ? 0 : 1;
+      if (aEnabled !== bEnabled) return aEnabled - bEnabled;
+      return a.localeCompare(b);
+    });
+
+    // Show current state
+    for (const toolName of sortedTools) {
+      const enabled = enabledSet.has(toolName);
+      const discovered = availableTools.find((t) => t.name === toolName);
+      const desc = discovered?.description
+        ? noumena.textDim(` — ${discovered.description.substring(0, 50)}`)
+        : "";
+      const icon = enabled ? noumena.success("●") : noumena.grayDim("–");
+      console.log(`  ${icon} ${toolName}${desc}`);
+    }
     console.log();
 
     const action = await p.select({
       message: "What do you want to do?",
       options: [
         { value: "back" as const, label: noumena.textDim("← Back") },
-        { value: "enable" as const, label: noumena.success("Enable tool"), hint: "Enter tool name to enable" },
-        { value: "disable" as const, label: noumena.warning("Disable tools"), hint: "Pick tools with SPACE, then ENTER" },
-        { value: "view" as const, label: "View enabled tools", hint: `${enabledTools.length} tools` },
+        { value: "enable" as const, label: noumena.success("Enable tools"), hint: "Select tools to enable" },
+        { value: "disable" as const, label: noumena.warning("Disable tools"), hint: "Select tools to disable" },
+        { value: "enable_all" as const, label: "Enable all", hint: `Enable all ${allToolNames.size} tools` },
+        { value: "disable_all" as const, label: "Disable all", hint: "Disable all tools" },
+        { value: "rediscover" as const, label: noumena.purple("Re-discover"), hint: "Query service again" },
       ],
     });
 
     if (p.isCancel(action) || action === "back") break;
 
-    if (action === "view") {
-      console.log();
-      if (enabledTools.length === 0) {
-        console.log(noumena.textDim("  No tools enabled"));
-      } else {
-        for (const tool of enabledTools) {
-          console.log(`  ${noumena.success("✓")} ${entry.serviceName}.${tool}`);
-        }
+    if (action === "rediscover") {
+      if (!canDiscover) {
+        p.log.warn("Cannot discover: image not pulled or no command configured");
+        continue;
       }
-      console.log();
-      await p.confirm({ message: "Press Enter to continue", initialValue: true });
+      const s = p.spinner();
+      s.start(`Discovering tools from ${displayName}...`);
+      const result = discoverTools(entry);
+      if (result?.success && result.tools.length > 0) {
+        availableTools = result.tools;
+        s.stop(noumena.success(`Discovered ${result.tools.length} tool(s)`));
+      } else {
+        s.stop(noumena.warning(result?.error || "No tools discovered"));
+      }
       continue;
     }
 
     if (action === "enable") {
-      const toolName = await p.text({
-        message: "Tool name to enable:",
-        placeholder: "e.g., search, get_weather",
-        validate: (v) => (!v || v.trim().length === 0 ? "Tool name is required" : undefined),
+      const disabledTools = sortedTools.filter((t) => !enabledSet.has(t));
+      if (disabledTools.length === 0) {
+        p.log.info("All tools are already enabled");
+        continue;
+      }
+
+      const selectedTools = await p.multiselect({
+        message: "Select tools to enable (SPACE to toggle, ENTER to apply):",
+        options: disabledTools.map((toolName) => {
+          const discovered = availableTools.find((t) => t.name === toolName);
+          const desc = discovered?.description?.substring(0, 50) || "";
+          return { value: toolName, label: toolName, hint: desc };
+        }),
+        required: false,
       });
-      if (p.isCancel(toolName)) continue;
+
+      if (p.isCancel(selectedTools) || selectedTools.length === 0) continue;
 
       const s = p.spinner();
-      s.start("Enabling tool in PolicyStore...");
+      s.start(`Enabling ${selectedTools.length} tool(s)...`);
       try {
-        await enableTool(entry.serviceName, String(toolName).trim());
-        s.stop(noumena.success(`✓ Tool '${toolName}' enabled`));
+        for (const toolName of selectedTools) {
+          await enableTool(entry.serviceName, toolName);
+        }
+        s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) enabled`));
       } catch (error) {
         s.stop(noumena.error("✗ Failed"));
         p.log.error(`${error}`);
@@ -605,16 +711,17 @@ async function manageToolsForService(entry: ServiceEntry): Promise<void> {
     }
 
     if (action === "disable") {
+      const enabledTools = sortedTools.filter((t) => enabledSet.has(t));
       if (enabledTools.length === 0) {
-        p.log.info("No tools to disable");
+        p.log.info("No tools are enabled");
         continue;
       }
 
       const selectedTools = await p.multiselect({
-        message: "Select tools to disable:",
-        options: enabledTools.map((tool) => ({
-          value: tool,
-          label: tool,
+        message: "Select tools to disable (SPACE to toggle, ENTER to apply):",
+        options: enabledTools.map((toolName) => ({
+          value: toolName,
+          label: toolName,
         })),
         required: false,
       });
@@ -628,6 +735,46 @@ async function manageToolsForService(entry: ServiceEntry): Promise<void> {
           await disableTool(entry.serviceName, toolName);
         }
         s.stop(noumena.success(`✓ ${selectedTools.length} tool(s) disabled`));
+      } catch (error) {
+        s.stop(noumena.error("✗ Failed"));
+        p.log.error(`${error}`);
+      }
+      continue;
+    }
+
+    if (action === "enable_all") {
+      const toEnable = sortedTools.filter((t) => !enabledSet.has(t));
+      if (toEnable.length === 0) {
+        p.log.info("All tools are already enabled");
+        continue;
+      }
+      const s = p.spinner();
+      s.start(`Enabling ${toEnable.length} tool(s)...`);
+      try {
+        for (const toolName of toEnable) {
+          await enableTool(entry.serviceName, toolName);
+        }
+        s.stop(noumena.success(`✓ ${toEnable.length} tool(s) enabled`));
+      } catch (error) {
+        s.stop(noumena.error("✗ Failed"));
+        p.log.error(`${error}`);
+      }
+      continue;
+    }
+
+    if (action === "disable_all") {
+      const toDisable = sortedTools.filter((t) => enabledSet.has(t));
+      if (toDisable.length === 0) {
+        p.log.info("No tools are enabled");
+        continue;
+      }
+      const s = p.spinner();
+      s.start(`Disabling ${toDisable.length} tool(s)...`);
+      try {
+        for (const toolName of toDisable) {
+          await disableTool(entry.serviceName, toolName);
+        }
+        s.stop(noumena.success(`✓ ${toDisable.length} tool(s) disabled`));
       } catch (error) {
         s.stop(noumena.error("✗ Failed"));
         p.log.error(`${error}`);
@@ -687,31 +834,14 @@ async function viewServiceInfo(entry: ServiceEntry): Promise<void> {
 // Discover Tools
 // ============================================================================
 
-async function discoverAndSaveTools(entry: ServiceEntry): Promise<number> {
+async function discoverAndEnableTools(entry: ServiceEntry): Promise<number> {
   const s = p.spinner();
-  const imageName = getDockerImageFromMetadata(entry);
-  const isDocker = imageName !== null;
-  const command = entry.metadata?.command;
-  const type = entry.metadata?.type || "MCP_STDIO";
-  const argsStr = entry.metadata?.args;
-  const args = argsStr ? JSON.parse(argsStr) : [];
+  s.start(`Discovering tools...`);
+  const result = discoverTools(entry);
 
-  let result: { success: boolean; tools: any[]; serverInfo?: { name: string; version: string }; error?: string };
-
-  if (isDocker && imageName) {
-    s.start(`Discovering tools from ${imageName}...`);
-    result = discoverToolsFromContainer(imageName);
-  } else if (command && type === "MCP_STDIO") {
-    const label = args.length ? `${command} ${args[0]}` : command;
-    s.start(`Discovering tools from ${label}...`);
-    result = discoverToolsFromCommand(command, args);
-  } else {
-    return 0;
-  }
-
-  if (!result.success || result.tools.length === 0) {
+  if (!result || !result.success || result.tools.length === 0) {
     s.stop(noumena.warning(
-      result.error ? `Could not discover tools: ${result.error}` : "No tools found"
+      result?.error ? `Could not discover tools: ${result.error}` : "No tools found"
     ));
     return 0;
   }
@@ -721,30 +851,41 @@ async function discoverAndSaveTools(entry: ServiceEntry): Promise<number> {
     : "";
   s.stop(noumena.success(`Discovered ${result.tools.length} tool(s)${serverLabel}`));
 
-  // Show summary
-  for (const tool of result.tools) {
-    const desc = (tool.description || "").length > 60
-      ? tool.description.substring(0, 57) + "..."
-      : tool.description;
-    console.log(noumena.textDim(`    ${noumena.grayDim("–")} ${tool.name}: ${desc}`));
-  }
-  console.log();
+  // Let user select which tools to enable
+  const selectedTools = await p.multiselect({
+    message: "Select tools to enable (SPACE to toggle, ENTER to apply):",
+    options: result.tools.map((tool) => {
+      const desc = (tool.description || "").length > 50
+        ? tool.description.substring(0, 47) + "..."
+        : tool.description;
+      return {
+        value: tool.name,
+        label: tool.name,
+        hint: desc,
+      };
+    }),
+    initialValues: result.tools.map((t) => t.name), // all selected by default
+    required: false,
+  });
 
-  // Enable all discovered tools in PolicyStore
+  if (p.isCancel(selectedTools) || selectedTools.length === 0) {
+    p.log.info("No tools enabled");
+    return 0;
+  }
+
   const enableSpinner = p.spinner();
-  enableSpinner.start("Enabling discovered tools in PolicyStore...");
+  enableSpinner.start(`Enabling ${selectedTools.length} tool(s) in PolicyStore...`);
   try {
-    for (const tool of result.tools) {
-      await enableTool(entry.serviceName, tool.name);
+    for (const toolName of selectedTools) {
+      await enableTool(entry.serviceName, toolName);
     }
-    enableSpinner.stop(noumena.success(`✓ ${result.tools.length} tools enabled`));
+    enableSpinner.stop(noumena.success(`✓ ${selectedTools.length}/${result.tools.length} tools enabled`));
   } catch (error) {
     enableSpinner.stop(noumena.warning("Some tools may not have been enabled"));
     p.log.warn(`${error}`);
   }
 
-  await p.confirm({ message: "Press Enter to continue", initialValue: true });
-  return result.tools.length;
+  return selectedTools.length;
 }
 
 // ============================================================================
@@ -867,7 +1008,7 @@ async function searchDockerHubFlow(): Promise<void> {
       suspended: false,
       metadata: { command: `docker run -i --rm mcp/${server.name}`, type: "MCP_STDIO" },
     };
-    await discoverAndSaveTools(fakeEntry);
+    await discoverAndEnableTools(fakeEntry);
   }
 
   p.log.info("Service is disabled by default. Select it to enable.");
@@ -1139,7 +1280,7 @@ async function addDockerServiceFlow(): Promise<void> {
       suspended: false,
       metadata: { command: `docker run -i --rm ${imageNameStr}`, type: "MCP_STDIO" },
     };
-    await discoverAndSaveTools(fakeEntry);
+    await discoverAndEnableTools(fakeEntry);
   }
 }
 
@@ -1247,87 +1388,93 @@ async function userManagementFlow(): Promise<void> {
 async function userActionsFlow(kcUser: KeycloakUser, policyData: PolicyData): Promise<void> {
   const email = kcUser.email || "(no email)";
   const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
-  const userGrants = policyData.grants[email] || [];
-  const isRevoked = policyData.revokedSubjects.includes(email);
-  const grantCount = userGrants.reduce((sum, g) => sum + g.allowedTools.length, 0);
 
-  console.log();
-  console.log(noumena.purple(`  ${displayName}`));
-  console.log(noumena.textDim(`  Email: ${email}`));
-  console.log(noumena.textDim(`  Keycloak ID: ${kcUser.id}`));
+  while (true) {
+    // Refresh grants each iteration
+    let freshData: PolicyData;
+    try {
+      freshData = await getPolicyData();
+    } catch {
+      freshData = policyData;
+    }
 
-  if (isRevoked) {
-    console.log(noumena.error("  REVOKED — all access blocked"));
-  } else if (grantCount > 0) {
-    console.log(noumena.success(`  ✓ ${userGrants.length} service(s), ${grantCount} tool(s) granted`));
-  } else {
-    console.log(noumena.grayDim("  ○ No grants"));
-  }
-  console.log();
+    const userGrants = freshData.grants[email] || [];
+    const isRevoked = freshData.revokedSubjects.includes(email);
+    const grantCount = userGrants.reduce((sum, g) => sum + g.allowedTools.length, 0);
 
-  const actionOptions: Array<{ value: string; label: string; hint?: string }> = [
-    { value: "back", label: noumena.textDim("← Back") },
-    { value: "grant", label: "Edit tool grants", hint: "Grant/revoke tools" },
-    { value: "view", label: "View all grants", hint: "Show detailed permissions" },
-  ];
+    console.log();
+    console.log(noumena.purple(`  ${displayName}`));
+    console.log(noumena.textDim(`  Email: ${email}`));
+    console.log(noumena.textDim(`  Keycloak ID: ${kcUser.id}`));
 
-  if (isRevoked) {
-    actionOptions.push({ value: "reinstate", label: noumena.success("Reinstate subject"), hint: "Lift emergency revocation" });
-  } else {
-    actionOptions.push({ value: "revoke_subject", label: noumena.error("Emergency revoke"), hint: "Block ALL access immediately" });
-  }
+    if (isRevoked) {
+      console.log(noumena.error("  REVOKED — all access blocked"));
+    } else if (grantCount > 0) {
+      console.log(noumena.success(`  ✓ ${userGrants.length} service(s), ${grantCount} tool(s) granted`));
+    } else {
+      console.log(noumena.grayDim("  ○ No grants"));
+    }
+    console.log();
 
-  actionOptions.push(
-    { value: "delete", label: noumena.purpleDim("Delete from Keycloak"), hint: "Remove identity" },
-  );
+    const actionOptions: Array<{ value: string; label: string; hint?: string }> = [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "grant", label: "Edit tool grants", hint: "Grant/revoke tools" },
+      { value: "view", label: "View all grants", hint: "Show detailed permissions" },
+    ];
 
-  const action = await p.select({ message: "Action:", options: actionOptions });
-  if (p.isCancel(action) || action === "back") return;
+    if (isRevoked) {
+      actionOptions.push({ value: "reinstate", label: noumena.success("Reinstate subject"), hint: "Lift emergency revocation" });
+    } else {
+      actionOptions.push({ value: "revoke_subject", label: noumena.error("Emergency revoke"), hint: "Block ALL access immediately" });
+    }
 
-  if (action === "grant") {
-    await editUserGrantsFlow(email, policyData);
-  } else if (action === "view") {
-    await viewUserGrantsFlow(email, policyData);
-  } else if (action === "revoke_subject") {
-    const confirmed = await p.confirm({
-      message: `Emergency revoke ALL access for ${noumena.purple(displayName)}?`,
-      initialValue: false,
-    });
-    if (!p.isCancel(confirmed) && confirmed) {
+    actionOptions.push(
+      { value: "delete", label: noumena.purpleDim("Delete from Keycloak"), hint: "Remove identity" },
+    );
+
+    const action = await p.select({ message: "Action:", options: actionOptions });
+    if (p.isCancel(action) || action === "back") break;
+
+    if (action === "grant") {
+      await editUserGrantsFlow(email, freshData);
+    } else if (action === "view") {
+      await viewUserGrantsFlow(email, freshData);
+    } else if (action === "revoke_subject") {
+      const confirmed = await p.confirm({
+        message: `Emergency revoke ALL access for ${noumena.purple(displayName)}?`,
+        initialValue: false,
+      });
+      if (!p.isCancel(confirmed) && confirmed) {
+        const s = p.spinner();
+        s.start("Revoking subject...");
+        try {
+          await revokeSubject(email);
+          s.stop(noumena.success(`✓ ${displayName} revoked`));
+        } catch (error) {
+          s.stop(noumena.error("✗ Failed"));
+          p.log.error(`${error}`);
+        }
+      }
+    } else if (action === "reinstate") {
       const s = p.spinner();
-      s.start("Revoking subject...");
+      s.start("Reinstating subject...");
       try {
-        await revokeSubject(email);
-        s.stop(noumena.success(`✓ ${displayName} revoked`));
+        await reinstateSubject(email);
+        s.stop(noumena.success(`✓ ${displayName} reinstated`));
       } catch (error) {
         s.stop(noumena.error("✗ Failed"));
         p.log.error(`${error}`);
       }
+    } else if (action === "delete") {
+      await deleteUserFromKeycloakFlow(kcUser);
+      break; // User deleted, leave the actions menu
     }
-  } else if (action === "reinstate") {
-    const s = p.spinner();
-    s.start("Reinstating subject...");
-    try {
-      await reinstateSubject(email);
-      s.stop(noumena.success(`✓ ${displayName} reinstated`));
-    } catch (error) {
-      s.stop(noumena.error("✗ Failed"));
-      p.log.error(`${error}`);
-    }
-  } else if (action === "delete") {
-    await deleteUserFromKeycloakFlow(kcUser);
   }
 }
 
 async function editUserGrantsFlow(email: string, policyData: PolicyData): Promise<void> {
-  const services = Object.values(policyData.services).filter((s) => s.enabled);
-  if (services.length === 0) {
-    p.log.warn("No services are enabled");
-    return;
-  }
-
   while (true) {
-    // Refresh grants
+    // Refresh from PolicyStore
     let freshData: PolicyData;
     try {
       freshData = await getPolicyData();
@@ -1335,27 +1482,41 @@ async function editUserGrantsFlow(email: string, policyData: PolicyData): Promis
       p.log.error("Failed to read PolicyStore");
       return;
     }
+
+    const allServices = Object.values(freshData.services);
+    // Also include services referenced in grants but not in catalog
     const userGrants = freshData.grants[email] || [];
     const grantsByService = new Map(userGrants.map((g) => [g.serviceName, g]));
+
+    // Collect all service names (from catalog + from user's grants)
+    const allServiceNames = new Set([
+      ...allServices.map((s) => s.serviceName),
+      ...userGrants.map((g) => g.serviceName),
+    ]);
+
+    if (allServiceNames.size === 0) {
+      p.log.warn("No services registered in PolicyStore");
+      return;
+    }
 
     console.log();
     console.log(noumena.purple(`  Tool Grants: ${email}`));
     console.log();
 
-    const serviceOptions = Object.values(freshData.services)
-      .filter((s) => s.enabled)
-      .map((service) => {
-        const grant = grantsByService.get(service.serviceName);
+    const serviceOptions = [...allServiceNames].map((serviceName) => {
+        const service = freshData.services[serviceName];
+        const grant = grantsByService.get(serviceName);
         const hasAccess = !!grant;
         const isWildcard = grant?.allowedTools.includes("*");
         const toolCount = grant ? grant.allowedTools.length : 0;
 
         const icon = hasAccess ? noumena.success("✓") : noumena.grayDim("–");
-        const hint = isWildcard ? "All tools" : hasAccess ? `${toolCount} tools` : "No access";
-        const displayName = service.metadata?.displayName || service.serviceName;
+        const displayName = service?.metadata?.displayName || serviceName;
+        const enabledLabel = service ? (service.enabled ? "" : noumena.grayDim(" (disabled)")) : noumena.grayDim(" (not in catalog)");
+        const hint = (isWildcard ? "All tools" : hasAccess ? `${toolCount} tools` : "No access") + enabledLabel;
 
         return {
-          value: service.serviceName,
+          value: serviceName,
           label: `${icon}  ${displayName}`,
           hint,
         };
@@ -1371,10 +1532,15 @@ async function editUserGrantsFlow(email: string, policyData: PolicyData): Promis
 
     if (p.isCancel(selected) || selected === "back") break;
 
-    const service = freshData.services[selected];
-    if (service) {
-      await manageUserServiceGrantsFlow(email, service, freshData);
-    }
+    // Build a ServiceEntry even if service isn't in catalog (grant-only reference)
+    const service = freshData.services[selected] || {
+      serviceName: selected,
+      enabled: false,
+      enabledTools: [],
+      suspended: false,
+      metadata: {},
+    };
+    await manageUserServiceGrantsFlow(email, service, freshData);
   }
 }
 
@@ -1471,6 +1637,12 @@ async function manageUserServiceGrantsFlow(
     if (action === "revoke") {
       if (grantedTools.length === 0) {
         p.log.info("No tools to revoke");
+        continue;
+      }
+
+      // Wildcard grant — can't revoke individual tools, use "Revoke all access" instead
+      if (hasWildcard) {
+        p.log.info("User has wildcard (*) access. Use 'Revoke all access' to remove the grant.");
         continue;
       }
 
