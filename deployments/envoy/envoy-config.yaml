@@ -152,12 +152,41 @@ static_resources:
                           route:
                             cluster: keycloak
                             prefix_rewrite: "/realms/mcpgateway/protocol/openid-connect/token"
-                            auto_host_rewrite: true
+                            host_rewrite_literal: "keycloak:11000"
                             timeout: 10s
                           typed_per_filter_config:
                             envoy.filters.http.ext_authz:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                               disabled: true
+
+                        # CORS preflight for /mcp (OPTIONS — no auth needed)
+                        # Must be before GET/POST so OPTIONS matches first and the
+                        # CORS filter can add headers. Without this route, OPTIONS has
+                        # no route match, bypasses the CORS filter, and gets rejected
+                        # by the JWT filter with 401.
+                        - match:
+                            prefix: "/mcp"
+                            headers:
+                              - name: ":method"
+                                string_match: {exact: "OPTIONS"}
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: ""
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+
+                        # MCP session termination (DELETE /mcp) — Streamable HTTP spec
+                        - match:
+                            prefix: "/mcp"
+                            headers:
+                              - name: ":method"
+                                string_match: {exact: "DELETE"}
+                          route:
+                            cluster: mock_calendar_mcp
+                            timeout: 5s
 
                         # MCP notification stream (GET /mcp) — long-lived SSE connection
                         # JWT required (authN) + ext_authz verifies service access (authZ)
@@ -207,6 +236,14 @@ static_resources:
                           forward: true
                           payload_in_metadata: "jwt_payload"
                       rules:
+                        # CORS preflight — no JWT required
+                        - match:
+                            prefix: "/mcp"
+                            headers:
+                              - name: ":method"
+                                string_match: {exact: "OPTIONS"}
+                          requires:
+                            allow_missing_or_failed: {}
                         - match:
                             prefix: "/mcp"
                           requires:
