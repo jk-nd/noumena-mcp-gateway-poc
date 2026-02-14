@@ -25,7 +25,7 @@ import org.junit.jupiter.api.Assertions.*
  * 
  * Prerequisites:
  * - Docker stack must be running: docker compose -f deployments/docker-compose.yml up -d
- * - Keycloak must be provisioned with test users (admin, agent)
+ * - Keycloak must be provisioned with test users (admin, gateway)
  * 
  * Run with: ./gradlew :integration-tests:test --tests "*NplIntegrationTest*"
  */
@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Assertions.*
 class NplIntegrationTest {
     
     private lateinit var adminToken: String      // For setup/admin operations (pAdmin)
-    private lateinit var agentToken: String      // For checkAccess (pAgent)
+    private lateinit var gatewayToken: String     // For checkAccess (pGateway)
     private lateinit var client: HttpClient
     private var serviceRegistryId: String? = null
     private var toolPolicyId: String? = null
@@ -61,11 +61,11 @@ class NplIntegrationTest {
         }
         
         // Get authentication tokens for different parties
-        println("    Getting tokens for admin and agent...")
+        println("    Getting tokens for admin and gateway...")
         adminToken = KeycloakAuth.getToken("admin", "Welcome123")
         println("    ✓ Admin token obtained")
-        agentToken = KeycloakAuth.getToken("agent", "Welcome123")
-        println("    ✓ Agent token obtained")
+        gatewayToken = KeycloakAuth.getToken("gateway", "Welcome123")
+        println("    ✓ Gateway token obtained")
     }
     
     @Test
@@ -276,12 +276,12 @@ class NplIntegrationTest {
         }
         
         println("    Checking access for 'search' tool...")
-        println("    Using agent token (pAgent party)")
+        println("    Using gateway token (pGateway party)")
         
         val response = client.post(
             "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/checkAccess"
         ) {
-            header("Authorization", "Bearer $agentToken")
+            header("Authorization", "Bearer $gatewayToken")
             contentType(ContentType.Application.Json)
             setBody(invokeBody.toString())
         }
@@ -316,12 +316,12 @@ class NplIntegrationTest {
         }
         
         println("    Checking access for 'nonexistent_tool'...")
-        println("    Using agent token (pAgent party)")
+        println("    Using gateway token (pGateway party)")
         
         val response = client.post(
             "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/checkAccess"
         ) {
-            header("Authorization", "Bearer $agentToken")
+            header("Authorization", "Bearer $gatewayToken")
             contentType(ContentType.Application.Json)
             setBody(invokeBody.toString())
         }

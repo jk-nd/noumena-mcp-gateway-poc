@@ -9,7 +9,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.*
 
 /**
  * Configuration for integration tests.
@@ -25,6 +25,12 @@ object TestConfig {
     // Test user credentials (from Keycloak provisioning)
     val testUsername: String = "admin"
     val testPassword: String = "Welcome123"
+
+    // Named users for OPA/NPL tests
+    val jarvisUsername = "jarvis"
+    val aliceUsername = "alice"
+    val gatewayUsername = "gateway"
+    val defaultPassword = "Welcome123"
 }
 
 /**
@@ -94,6 +100,172 @@ object KeycloakAuth {
         println("    Token obtained successfully (expires in ${tokenResponse.expires_in}s)")
         
         return tokenResponse.access_token
+    }
+}
+
+/**
+ * Build a JSON-RPC 2.0 request string.
+ */
+fun buildJsonRpc(id: Int, method: String, params: String = "{}"): String {
+    return """{"jsonrpc":"2.0","id":$id,"method":"$method","params":$params}"""
+}
+
+/**
+ * Idempotent NPL bootstrap helpers (find-or-create pattern).
+ * Used by EndToEndTest to set up OPA-required NPL state.
+ */
+object NplBootstrap {
+
+    private val json = TestClient.json
+
+    /** Find or create a ServiceRegistry instance. Returns the instance ID. */
+    suspend fun ensureServiceRegistry(adminToken: String): String {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/") {
+                header("Authorization", "Bearer $adminToken")
+            }
+            if (listResp.status.isSuccess()) {
+                val items = json.parseToJsonElement(listResp.bodyAsText()).jsonObject["items"]?.jsonArray
+                if (items != null && items.isNotEmpty()) {
+                    return items[0].jsonObject["@id"]!!.jsonPrimitive.content
+                }
+            }
+            val createResp = client.post("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"@parties": {}}""")
+            }
+            return json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Enable a service in the ServiceRegistry (idempotent — ignores already-enabled errors). */
+    suspend fun ensureServiceEnabled(registryId: String, serviceName: String, adminToken: String) {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            client.post("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/$registryId/enableService") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"serviceName": "$serviceName"}""")
+            }
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Find or create a ToolPolicy for a given service. Returns the instance ID. */
+    suspend fun ensureToolPolicy(serviceName: String, adminToken: String): String {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
+                header("Authorization", "Bearer $adminToken")
+            }
+            if (listResp.status.isSuccess()) {
+                val items = json.parseToJsonElement(listResp.bodyAsText()).jsonObject["items"]?.jsonArray
+                if (items != null) {
+                    for (item in items) {
+                        if (item.jsonObject["policyServiceName"]?.jsonPrimitive?.content == serviceName) {
+                            return item.jsonObject["@id"]!!.jsonPrimitive.content
+                        }
+                    }
+                }
+            }
+            val createResp = client.post("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"@parties": {}, "policyServiceName": "$serviceName"}""")
+            }
+            return json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Enable a tool in a ToolPolicy (idempotent). */
+    suspend fun ensureToolEnabled(policyId: String, toolName: String, adminToken: String) {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            client.post("${TestConfig.nplUrl}/npl/services/ToolPolicy/$policyId/enableTool") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"toolName": "$toolName"}""")
+            }
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Find or create a UserToolAccess instance for a given userId. Returns the instance ID. */
+    suspend fun ensureUserToolAccess(userId: String, adminToken: String): String {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/users/UserToolAccess/") {
+                header("Authorization", "Bearer $adminToken")
+            }
+            if (listResp.status.isSuccess()) {
+                val items = json.parseToJsonElement(listResp.bodyAsText()).jsonObject["items"]?.jsonArray
+                if (items != null) {
+                    for (item in items) {
+                        if (item.jsonObject["userId"]?.jsonPrimitive?.content == userId) {
+                            return item.jsonObject["@id"]!!.jsonPrimitive.content
+                        }
+                    }
+                }
+            }
+            val createResp = client.post("${TestConfig.nplUrl}/npl/users/UserToolAccess/") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"@parties": {}, "userId": "$userId"}""")
+            }
+            return json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Grant a specific tool on a service for a UserToolAccess instance (idempotent). */
+    suspend fun ensureUserToolGrant(accessId: String, serviceName: String, toolName: String, adminToken: String) {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            client.post("${TestConfig.nplUrl}/npl/users/UserToolAccess/$accessId/grantTool") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"serviceName": "$serviceName", "toolName": "$toolName"}""")
+            }
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Grant wildcard (*) access to all tools on a service (idempotent). */
+    suspend fun ensureUserToolGrantAll(accessId: String, serviceName: String, adminToken: String) {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            client.post("${TestConfig.nplUrl}/npl/users/UserToolAccess/$accessId/grantAllToolsForService") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"serviceName": "$serviceName"}""")
+            }
+        } finally {
+            client.close()
+        }
     }
 }
 

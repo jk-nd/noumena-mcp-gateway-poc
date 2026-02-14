@@ -3,376 +3,356 @@ package io.noumena.mcp.integration
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.contentnegotiation.*
-import io.ktor.client.plugins.websocket.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
-import io.ktor.websocket.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
-import kotlin.time.Duration.Companion.seconds
 
 /**
- * End-to-End Integration Tests for V2 Transparent Proxy Architecture.
- * 
- * Tests the complete flow:
- * MCP Client -> Gateway (WebSocket/HTTP) -> NPL Policy -> Upstream MCP -> Response
- * 
+ * End-to-End Integration Tests for the Envoy AI Gateway + OPA architecture.
+ *
+ * Tests the complete flow using Streamable HTTP (POST /mcp):
+ * MCP Client -> Envoy (JWT authn) -> OPA (ext_authz) -> mock-calendar-mcp -> Response
+ *
+ * NPL state (ServiceRegistry, ToolPolicy, UserToolAccess) is bootstrapped in @BeforeAll
+ * so that OPA can evaluate access policies. OPA caches NPL data for 5s, so a 6s sleep
+ * is required after bootstrap before running policy-dependent tests.
+ *
  * Prerequisites:
  * - Full Docker stack running: docker compose -f deployments/docker-compose.yml up -d
- * - All services healthy: Gateway, NPL Engine, Keycloak
- * 
+ * - All services healthy: Envoy, OPA, NPL Engine, Keycloak, mock-calendar-mcp
+ *
  * Run with: ./gradlew :integration-tests:test --tests "*EndToEndTest*"
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation::class)
 class EndToEndTest {
-    
-    private lateinit var token: String
+
+    private lateinit var adminToken: String    // For NPL bootstrap (pAdmin)
+    private lateinit var jarvisToken: String   // Allowed user (has tool grants)
+    private lateinit var aliceToken: String    // Denied user (no tool grants)
     private lateinit var client: HttpClient
-    private val json = Json { 
-        ignoreUnknownKeys = true 
+    private val json = Json {
+        ignoreUnknownKeys = true
         prettyPrint = true
     }
-    
-    // Separate client for WebSocket (no ContentNegotiation to avoid serialization conflicts)
-    private lateinit var wsClient: HttpClient
-    
+
     @BeforeAll
     fun setup() = runBlocking {
         println("╔════════════════════════════════════════════════════════════════╗")
-        println("║ END-TO-END INTEGRATION TESTS (V2 Transparent Proxy)           ║")
+        println("║ END-TO-END INTEGRATION TESTS (Envoy + OPA)                    ║")
         println("╠════════════════════════════════════════════════════════════════╣")
         println("║ Gateway URL:  ${TestConfig.gatewayUrl}")
         println("║ NPL URL:      ${TestConfig.nplUrl}")
         println("║ Keycloak URL: ${TestConfig.keycloakUrl}")
         println("╚════════════════════════════════════════════════════════════════╝")
-        
+
         // HTTP client for REST calls
         client = HttpClient(CIO) {
             install(ContentNegotiation) {
                 json(json)
             }
         }
-        
-        // Separate WebSocket client (ContentNegotiation conflicts with WebSocket sessions)
-        wsClient = HttpClient(CIO) {
-            install(WebSockets) {
-                pingInterval = 15.seconds
-            }
-        }
-        
+
         // Check if Docker stack is running
         Assumptions.assumeTrue(isDockerStackRunning()) {
             "Docker stack is not running. Start with: docker compose -f deployments/docker-compose.yml up -d"
         }
-        
+
         // Check if Gateway is running
         Assumptions.assumeTrue(isGatewayRunning()) {
             "Gateway is not running."
         }
-        
-        // Get authentication token
-        token = KeycloakAuth.getToken()
-        println("    ✓ Authentication successful")
+
+        // Get authentication tokens
+        adminToken = KeycloakAuth.getToken("admin", "Welcome123")
+        println("    ✓ Admin token obtained")
+        jarvisToken = KeycloakAuth.getToken(TestConfig.jarvisUsername, TestConfig.defaultPassword)
+        println("    ✓ Jarvis token obtained")
+        aliceToken = KeycloakAuth.getToken(TestConfig.aliceUsername, TestConfig.defaultPassword)
+        println("    ✓ Alice token obtained")
+
+        // Bootstrap NPL state for OPA policy evaluation
+        println("\n    Bootstrapping NPL state for OPA...")
+
+        // 1. ServiceRegistry → enable mock-calendar
+        val registryId = NplBootstrap.ensureServiceRegistry(adminToken)
+        println("    ✓ ServiceRegistry: $registryId")
+        NplBootstrap.ensureServiceEnabled(registryId, "mock-calendar", adminToken)
+        println("    ✓ mock-calendar service enabled")
+
+        // 2. ToolPolicy for mock-calendar → enable list_events + create_event
+        val policyId = NplBootstrap.ensureToolPolicy("mock-calendar", adminToken)
+        println("    ✓ ToolPolicy (mock-calendar): $policyId")
+        NplBootstrap.ensureToolEnabled(policyId, "list_events", adminToken)
+        NplBootstrap.ensureToolEnabled(policyId, "create_event", adminToken)
+        println("    ✓ Tools enabled: list_events, create_event")
+
+        // 3. UserToolAccess for jarvis → grant wildcard on mock-calendar
+        val jarvisAccessId = NplBootstrap.ensureUserToolAccess("jarvis@acme.com", adminToken)
+        println("    ✓ UserToolAccess (jarvis): $jarvisAccessId")
+        NplBootstrap.ensureUserToolGrantAll(jarvisAccessId, "mock-calendar", adminToken)
+        println("    ✓ jarvis granted wildcard (*) on mock-calendar")
+
+        // 4. UserToolAccess for alice → no grants (denied user)
+        val aliceAccessId = NplBootstrap.ensureUserToolAccess("alice@acme.com", adminToken)
+        println("    ✓ UserToolAccess (alice): $aliceAccessId (no grants)")
+
+        // 5. Wait for OPA cache to expire and pick up new NPL state
+        println("    Waiting 6s for OPA cache expiry...")
+        delay(6000)
+        println("    ✓ NPL bootstrap complete, OPA should have fresh state")
     }
-    
+
     @Test
     @Order(1)
-    fun `MCP initialize handshake via WebSocket`() = runBlocking {
+    fun `MCP initialize via Streamable HTTP`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: MCP Initialize Handshake via WebSocket               │")
+        println("│ TEST: MCP Initialize via Streamable HTTP                  │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        val wsUrl = TestConfig.gatewayUrl.replace("http://", "ws://") + "/mcp/ws"
-        println("    Connecting to: $wsUrl")
-        
-        wsClient.webSocket(wsUrl, request = {
-            header("Authorization", "Bearer $token")
-        }) {
-            // Send MCP initialize request
-            val initRequest = buildJsonObject {
-                put("jsonrpc", "2.0")
-                put("id", 1)
-                put("method", "initialize")
-                putJsonObject("params") {
-                    put("protocolVersion", "2024-11-05")
-                    putJsonObject("clientInfo") {
-                        put("name", "test-client")
-                        put("version", "1.0.0")
-                    }
-                    putJsonObject("capabilities") {}
-                }
-            }
-            
-            println("    Sending initialize request:")
-            println("    ${json.encodeToString(JsonObject.serializer(), initRequest)}")
-            
-            send(Frame.Text(initRequest.toString()))
-            
-            // Receive response
-            val response = withTimeout(10.seconds) {
-                incoming.receive() as Frame.Text
-            }
-            
-            val responseText = response.readText()
-            println("    Received response:")
-            println("    $responseText")
-            
-            val responseJson = json.parseToJsonElement(responseText).jsonObject
-            
-            // Verify response
-            assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
-            assertEquals(1, responseJson["id"]?.jsonPrimitive?.int)
-            assertNotNull(responseJson["result"], "Should have result object")
-            
-            val result = responseJson["result"]?.jsonObject
-            assertNotNull(result?.get("protocolVersion"), "Should have protocol version")
-            assertNotNull(result?.get("serverInfo"), "Should have server info")
-            
-            // V2: Verify server version is 2.0.0
-            val serverInfo = result?.get("serverInfo")?.jsonObject
-            assertEquals("noumena-mcp-gateway", serverInfo?.get("name")?.jsonPrimitive?.content)
-            assertEquals("2.0.0", serverInfo?.get("version")?.jsonPrimitive?.content)
-            
-            println("    ✓ MCP handshake successful (V2 proxy)")
-            println("    Server: ${result?.get("serverInfo")}")
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $jarvisToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(1, "initialize", """{"protocolVersion":"2024-11-05","clientInfo":{"name":"test-client","version":"1.0.0"},"capabilities":{}}"""))
         }
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(500)}")
+
+        assertEquals(HttpStatusCode.OK, response.status, "Initialize should succeed")
+
+        val responseJson = json.parseToJsonElement(body).jsonObject
+        assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
+        assertEquals(1, responseJson["id"]?.jsonPrimitive?.int)
+        assertNotNull(responseJson["result"], "Should have result object")
+
+        val result = responseJson["result"]!!.jsonObject
+        assertNotNull(result["protocolVersion"], "Should have protocol version")
+        assertNotNull(result["serverInfo"], "Should have server info")
+
+        val serverInfo = result["serverInfo"]!!.jsonObject
+        println("    Server: ${serverInfo["name"]?.jsonPrimitive?.content} v${serverInfo["version"]?.jsonPrimitive?.content}")
+
+        println("    ✓ MCP initialize handshake successful via Streamable HTTP")
     }
-    
+
     @Test
     @Order(2)
-    fun `MCP tools list returns namespaced tools`() = runBlocking {
+    fun `MCP tools list via Streamable HTTP`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: MCP Tools List Returns Namespaced Tools              │")
+        println("│ TEST: MCP Tools List via Streamable HTTP                  │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        val wsUrl = TestConfig.gatewayUrl.replace("http://", "ws://") + "/mcp/ws"
-        
-        wsClient.webSocket(wsUrl, request = {
-            header("Authorization", "Bearer $token")
-        }) {
-            // Send tools/list request
-            val listRequest = buildJsonObject {
-                put("jsonrpc", "2.0")
-                put("id", 2)
-                put("method", "tools/list")
-                putJsonObject("params") {}
-            }
-            
-            println("    Sending tools/list request")
-            send(Frame.Text(listRequest.toString()))
-            
-            // Receive response
-            val response = withTimeout(10.seconds) {
-                incoming.receive() as Frame.Text
-            }
-            
-            val responseText = response.readText()
-            println("    Received response:")
-            println("    $responseText")
-            
-            val responseJson = json.parseToJsonElement(responseText).jsonObject
-            
-            // Verify response
-            assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
-            assertNotNull(responseJson["result"], "Should have result")
-            
-            val result = responseJson["result"]?.jsonObject
-            val tools = result?.get("tools")?.jsonArray
-            assertNotNull(tools, "Should have tools array")
-            
-            println("    Available namespaced tools:")
-            tools?.forEach { tool ->
-                val name = tool.jsonObject["name"]?.jsonPrimitive?.content ?: ""
-                val description = tool.jsonObject["description"]?.jsonPrimitive?.content ?: ""
-                println("      - $name: $description")
-                
-                // V2: Verify tool names are namespaced (contain a dot)
-                if (name.isNotEmpty()) {
-                    assertTrue(name.contains("."), 
-                        "Tool name '$name' should be namespaced (service.tool)")
-                }
-            }
-            
-            println("    ✓ Namespaced tools list retrieved successfully")
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $jarvisToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(2, "tools/list"))
         }
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(500)}")
+
+        assertEquals(HttpStatusCode.OK, response.status, "tools/list should succeed")
+
+        val responseJson = json.parseToJsonElement(body).jsonObject
+        assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
+        assertNotNull(responseJson["result"], "Should have result")
+
+        val result = responseJson["result"]!!.jsonObject
+        val tools = result["tools"]?.jsonArray
+        assertNotNull(tools, "Should have tools array")
+
+        val toolNames = tools!!.map { it.jsonObject["name"]?.jsonPrimitive?.content ?: "" }
+        println("    Available tools: $toolNames")
+
+        assertTrue(toolNames.contains("list_events"), "Should contain list_events tool")
+        assertTrue(toolNames.contains("create_event"), "Should contain create_event tool")
+
+        println("    ✓ Tools list retrieved via Streamable HTTP")
     }
-    
+
     @Test
     @Order(3)
-    fun `MCP tool call via HTTP POST`() = runBlocking {
+    fun `tool call list_events succeeds for granted user`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: MCP Tool Call via HTTP POST                          │")
+        println("│ TEST: tool call list_events succeeds (jarvis)             │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        // V2: Use namespaced tool name (service.tool format)
-        val callRequest = buildJsonObject {
-            put("jsonrpc", "2.0")
-            put("id", 3)
-            put("method", "tools/call")
-            putJsonObject("params") {
-                put("name", "duckduckgo.search")
-                putJsonObject("arguments") {
-                    put("query", "integration test")
-                }
-            }
-        }
-        
-        println("    Sending tools/call via HTTP POST:")
-        println("    Tool: duckduckgo.search (namespaced)")
-        
+
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
-            header("Authorization", "Bearer $token")
+            header("Authorization", "Bearer $jarvisToken")
             contentType(ContentType.Application.Json)
-            setBody(callRequest.toString())
+            setBody(buildJsonRpc(3, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
         }
-        
-        val responseText = response.bodyAsText()
-        println("    HTTP Status: ${response.status}")
-        println("    Response: ${responseText.take(300)}")
-        
-        assertTrue(response.status.isSuccess(), "HTTP POST should succeed")
-        
-        val responseJson = json.parseToJsonElement(responseText).jsonObject
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(500)}")
+
+        assertEquals(HttpStatusCode.OK, response.status, "Tool call should succeed for granted user")
+
+        val responseJson = json.parseToJsonElement(body).jsonObject
         assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
-        
-        // Check for result or error (may fail if upstream not available)
+
         val result = responseJson["result"]?.jsonObject
-        if (result != null) {
-            val content = result["content"]?.jsonArray
-            assertNotNull(content, "Should have content array")
-            println("    ✓ Tool call returned result with ${content?.size} content blocks")
-        } else {
-            val error = responseJson["error"]?.jsonObject
-            println("    ⚠ Tool call returned error (upstream may not be available): ${error}")
-        }
-    }
-    
-    @Test
-    @Order(5)
-    fun `E2E - DuckDuckGo search via STDIO transport`() = runBlocking {
-        println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: E2E DuckDuckGo Search via STDIO Transport            │")
-        println("│ Agent → Gateway → NPL Policy → STDIO → Real Results       │")
-        println("└─────────────────────────────────────────────────────────────┘")
-        
-        // Prerequisites: mcp/duckduckgo Docker image must be available locally
-        // and the Gateway container must have the Docker socket mounted.
-        
-        // Step 1: Call duckduckgo.search through the Gateway
-        val callRequest = buildJsonObject {
-            put("jsonrpc", "2.0")
-            put("id", 100)
-            put("method", "tools/call")
-            putJsonObject("params") {
-                put("name", "duckduckgo.search")
-                putJsonObject("arguments") {
-                    put("query", "Noumena Protocol Language")
-                    put("max_results", 3)
-                }
-            }
-        }
-        
-        println("    Sending duckduckgo.search (STDIO transport)")
-        println("    Query: 'Noumena Protocol Language'")
-        
-        val response = withTimeout(90.seconds) {
-            client.post("${TestConfig.gatewayUrl}/mcp") {
-                header("Authorization", "Bearer $token")
-                contentType(ContentType.Application.Json)
-                setBody(callRequest.toString())
-            }
-        }
-        
-        val responseText = response.bodyAsText()
-        println("    HTTP Status: ${response.status}")
-        println("    Response (first 500 chars): ${responseText.take(500)}")
-        
-        assertTrue(response.status.isSuccess(), "HTTP POST should succeed")
-        
-        val responseJson = json.parseToJsonElement(responseText).jsonObject
-        assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
-        assertEquals(100, responseJson["id"]?.jsonPrimitive?.int)
-        
-        val result = responseJson["result"]?.jsonObject
-        assertNotNull(result, "Should have a result object")
-        
+        assertNotNull(result, "Should have result object")
+
         val content = result!!["content"]?.jsonArray
-        assertNotNull(content, "Result should have content array")
-        assertTrue(content!!.isNotEmpty(), "Content should not be empty — real search results expected")
-        
-        // Verify we got actual text content back (search results)
-        val textBlocks = content.filter { 
-            it.jsonObject["type"]?.jsonPrimitive?.content == "text" 
-        }
-        assertTrue(textBlocks.isNotEmpty(), "Should have at least one text content block")
-        
-        val firstText = textBlocks.first().jsonObject["text"]?.jsonPrimitive?.content ?: ""
-        println("    First result text (first 200 chars): ${firstText.take(200)}")
-        assertTrue(firstText.isNotEmpty(), "Text content should not be empty")
-        
-        // Verify isError is false (successful upstream call)
-        val isError = result["isError"]?.jsonPrimitive?.booleanOrNull ?: false
-        assertFalse(isError, "Tool call should succeed (isError=false)")
-        
-        // Check for Gateway context metadata (appended by McpServerHandler)
-        val contextBlocks = textBlocks.filter { 
-            it.jsonObject["text"]?.jsonPrimitive?.content?.contains("noumena-mcp-gateway") == true 
-        }
-        assertTrue(contextBlocks.isNotEmpty(), "Should have Gateway context metadata")
-        
-        println("    ✓ E2E STDIO test passed: real search results received via Gateway proxy")
-        println("    ✓ Flow: Agent → Gateway → NPL Policy → STDIO(docker run mcp/duckduckgo) → Results")
+        assertNotNull(content, "Should have content array")
+        assertTrue(content!!.isNotEmpty(), "Content should not be empty")
+
+        println("    ✓ list_events tool call succeeded for jarvis")
     }
-    
+
     @Test
     @Order(4)
-    fun `verify all services are healthy`() = runBlocking {
+    fun `tool call create_event succeeds for granted user`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: tool call create_event succeeds (jarvis)            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val params = """{"name":"create_event","arguments":{"title":"Integration Test Meeting","date":"2026-02-14","time":"14:00","duration":30}}"""
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $jarvisToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(4, "tools/call", params))
+        }
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(500)}")
+
+        assertEquals(HttpStatusCode.OK, response.status, "Tool call should succeed for granted user")
+
+        val responseJson = json.parseToJsonElement(body).jsonObject
+        assertEquals("2.0", responseJson["jsonrpc"]?.jsonPrimitive?.content)
+
+        val result = responseJson["result"]?.jsonObject
+        assertNotNull(result, "Should have result object")
+
+        val content = result!!["content"]?.jsonArray
+        assertNotNull(content, "Should have content array")
+        assertTrue(content!!.isNotEmpty(), "Content should not be empty")
+
+        println("    ✓ create_event tool call succeeded for jarvis")
+    }
+
+    @Test
+    @Order(5)
+    fun `OPA denies tool call for user without access`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: OPA denies tool call (alice - no grants)            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $aliceToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(5, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+        }
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(300)}")
+
+        assertEquals(HttpStatusCode.Forbidden, response.status,
+            "OPA should deny tool call for user without access grants")
+
+        println("    ✓ OPA correctly denied tool call for alice (no grants)")
+    }
+
+    @Test
+    @Order(6)
+    fun `OPA allows initialize for user without tool access`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: OPA allows initialize (alice - non-tool-call)       │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $aliceToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(6, "initialize", """{"protocolVersion":"2024-11-05","clientInfo":{"name":"test-client","version":"1.0.0"},"capabilities":{}}"""))
+        }
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(300)}")
+
+        assertEquals(HttpStatusCode.OK, response.status,
+            "OPA should allow non-tool-call methods (initialize) regardless of tool grants")
+
+        println("    ✓ OPA correctly allowed initialize for alice")
+    }
+
+    @Test
+    @Order(7)
+    fun `unauthenticated request returns 401`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: Unauthenticated request returns 401                 │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(7, "initialize", """{"protocolVersion":"2024-11-05","clientInfo":{"name":"test-client","version":"1.0.0"},"capabilities":{}}"""))
+        }
+
+        println("    Status: ${response.status}")
+
+        assertEquals(HttpStatusCode.Unauthorized, response.status,
+            "Envoy jwt_authn should reject unauthenticated requests")
+
+        println("    ✓ Unauthenticated request correctly rejected with 401")
+    }
+
+    @Test
+    @Order(8)
+    fun `verify all services healthy`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
         println("│ TEST: Verify All Services Healthy                          │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        // Gateway health
+
+        // Envoy gateway health
         val gatewayHealth = client.get("${TestConfig.gatewayUrl}/health")
-        println("    Gateway: ${gatewayHealth.status}")
-        assertTrue(gatewayHealth.status.isSuccess(), "Gateway should be healthy")
-        
+        println("    Envoy Gateway: ${gatewayHealth.status}")
+        assertTrue(gatewayHealth.status.isSuccess(), "Envoy gateway should be healthy")
+        val gatewayBody = json.parseToJsonElement(gatewayHealth.bodyAsText()).jsonObject
+        assertEquals("healthy", gatewayBody["status"]?.jsonPrimitive?.content)
+        assertEquals("envoy-mcp-gateway", gatewayBody["service"]?.jsonPrimitive?.content)
+
         // NPL Engine health
         val nplHealth = client.get("${TestConfig.nplUrl}/actuator/health")
         println("    NPL Engine: ${nplHealth.status}")
         assertTrue(nplHealth.status.isSuccess(), "NPL Engine should be healthy")
-        
+
         // Keycloak health
         try {
             val keycloakHealth = client.get("http://localhost:9000/health")
             println("    Keycloak: ${keycloakHealth.status}")
             assertTrue(keycloakHealth.status.isSuccess(), "Keycloak should be healthy")
         } catch (e: Exception) {
-            println("    Keycloak: Health endpoint not reachable on port 9000")
-            // Verify via token endpoint instead
+            // Verify via OIDC config endpoint instead
             val tokenCheck = client.get("${TestConfig.keycloakUrl}/realms/mcpgateway/.well-known/openid-configuration")
             println("    Keycloak OIDC Config: ${tokenCheck.status}")
             assertTrue(tokenCheck.status.isSuccess(), "Keycloak OIDC should be accessible")
         }
-        
-        println("    ✓ Core services are healthy (V2: no Executor or RabbitMQ)")
+
+        println("    ✓ All core services are healthy")
     }
-    
+
     @AfterAll
     fun teardown() {
         println("\n╔════════════════════════════════════════════════════════════════╗")
-        println("║ END-TO-END TESTS - Complete                                    ║")
+        println("║ END-TO-END TESTS (Envoy + OPA) - Complete                     ║")
         println("╚════════════════════════════════════════════════════════════════╝")
         if (::client.isInitialized) {
             client.close()
-        }
-        if (::wsClient.isInitialized) {
-            wsClient.close()
         }
     }
 }
