@@ -39,3 +39,11 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V6: Replace 4 protocols with unified PolicyStore singleton + contextual routing
+  - name: mcp-6.0-policy-store
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

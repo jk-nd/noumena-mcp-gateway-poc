@@ -1,13 +1,14 @@
 # MCP Gateway Authorization Policy — OPA ext_authz for Envoy AI Gateway
 #
-# Policy data is loaded from OPA bundle (zero network I/O during evaluation).
+# Policy data is loaded from OPA bundle (zero network I/O for Layer 1).
 # Bundle server subscribes to NPL SSE and rebuilds on every state change.
 #
-# Decision flow:
-#   1. Read policy data from bundle (in-memory, ~1ms)
-#   2. Decode user JWT from Authorization header
-#   3. Parse JSON-RPC body from Envoy ext_authz input
-#   4. Evaluate allow/deny based on method, service, tool, user
+# Two-layer architecture:
+#   Layer 1 (99% of requests, ~1ms):
+#     OPA checks catalog + grants from bundle → allow/deny
+#   Layer 2 (1% of requests, ~60ms):
+#     Layer 1 passes + contextual route matches →
+#     OPA calls NPL evaluate() via http.send → allow/deny/pending
 #
 # Fail-closed: default allow = false
 
@@ -21,59 +22,75 @@ import rego.v1
 default allow := false
 
 # --- Policy data from OPA bundle (loaded in background, zero network I/O) ---
-# Bundle server subscribes to NPL SSE and rebuilds on every state change.
 
-default enabled_services := {}
+default catalog := {}
 
-default tool_policies := {}
+default grants := {}
 
-default user_access_entries := {}
+default contextual_routing := {}
 
-enabled_services := data.enabled_services
+catalog := data.catalog
 
-tool_policies := data.tool_policies
+grants := data.grants
 
-user_access_entries := data.user_access_entries
+contextual_routing := data.contextual_routing
 
-# Check if a service's policy is in "active" state (not suspended)
-service_policy_active(service_name) if {
-	policy := tool_policies[service_name]
-	policy["@state"] == "active"
+# --- NPL URL for Layer 2 contextual calls ---
+
+npl_url := opa.runtime().env.NPL_URL
+
+# --- Catalog checks (combined service + tool) ---
+
+service_available(service_name) if {
+	entry := catalog[service_name]
+	entry.enabled == true
+	entry.suspended == false
 }
 
-# Check if a service's policy is in "active" state — no policy means not suspended
-service_policy_active(service_name) if {
-	not tool_policies[service_name]
-}
-
-# Get enabled tools for a service from ToolPolicy
 tool_enabled(service_name, tool_name) if {
-	policy := tool_policies[service_name]
-	some tool in policy.enabledTools
+	entry := catalog[service_name]
+	some tool in entry.enabledTools
 	tool == tool_name
 }
 
-# Check if user has access to a specific service+tool
-user_has_tool_access(user_id, service_name, tool_name) if {
-	entry := user_access_entries[user_id]
-	some sa in entry.serviceAccess
-	sa.serviceName == service_name
-	some tool in sa.allowedTools
+service_available_or_no_catalog(service_name) if {
+	catalog[service_name]
+	service_available(service_name)
+}
+
+service_available_or_no_catalog(service_name) if {
+	not catalog[service_name]
+}
+
+tool_enabled_or_no_catalog(service_name, tool_name) if {
+	catalog[service_name]
+	tool_enabled(service_name, tool_name)
+}
+
+tool_enabled_or_no_catalog(service_name, tool_name) if {
+	not catalog[service_name]
+}
+
+# --- Grant checks ---
+
+user_has_tool_access(subject_id, service_name, tool_name) if {
+	some grant in grants[subject_id]
+	grant.serviceName == service_name
+	some tool in grant.allowedTools
 	tool == "*"
 }
 
-user_has_tool_access(user_id, service_name, tool_name) if {
-	entry := user_access_entries[user_id]
-	some sa in entry.serviceAccess
-	sa.serviceName == service_name
-	some tool in sa.allowedTools
+user_has_tool_access(subject_id, service_name, tool_name) if {
+	some grant in grants[subject_id]
+	grant.serviceName == service_name
+	some tool in grant.allowedTools
 	tool == tool_name
 }
 
 # Check if user has ANY service access (for stream setup)
-user_has_any_access(user_id) if {
-	entry := user_access_entries[user_id]
-	count(entry.serviceAccess) > 0
+user_has_any_access(subject_id) if {
+	grant_list := grants[subject_id]
+	count(grant_list) > 0
 }
 
 # --- JWT decoding ---
@@ -154,7 +171,7 @@ parsed_tool_name := jsonrpc_tool_name if {
 	not contains(jsonrpc_tool_name, ".")
 }
 
-# For non-namespaced tools, find the service by searching user access entries
+# For non-namespaced tools, find the service by searching user grant entries
 resolved_service_name := parsed_service_name if {
 	parsed_service_name
 }
@@ -162,10 +179,9 @@ resolved_service_name := parsed_service_name if {
 resolved_service_name := svc if {
 	not parsed_service_name
 	jsonrpc_tool_name
-	entry := user_access_entries[user_id]
-	some sa in entry.serviceAccess
-	svc := sa.serviceName
-	some tool in sa.allowedTools
+	some grant in grants[user_id]
+	svc := grant.serviceName
+	some tool in grant.allowedTools
 	tool_matches(tool, parsed_tool_name)
 }
 
@@ -175,6 +191,15 @@ tool_matches(allowed_tool, requested_tool) if {
 
 tool_matches(allowed_tool, requested_tool) if {
 	allowed_tool == requested_tool
+}
+
+# --- Contextual routing (Layer 2) ---
+# Find route: specific tool > wildcard
+
+contextual_route := contextual_routing[resolved_service_name][parsed_tool_name]
+
+contextual_route := contextual_routing[resolved_service_name]["*"] if {
+	not contextual_routing[resolved_service_name][parsed_tool_name]
 }
 
 # --- Allow rules ---
@@ -210,7 +235,7 @@ allow if {
 	jsonrpc_method != "tools/call"
 }
 
-# Rule 3: tools/call — full RBAC check
+# Rule 3a: tools/call — fast path (no contextual route)
 allow if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
@@ -218,28 +243,51 @@ allow if {
 	user_id
 	resolved_service_name
 
-	# Service must be enabled in ServiceRegistry
-	enabled_services[resolved_service_name]
+	# Catalog checks
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
 
-	# Service policy must be active (not suspended)
-	service_policy_active(resolved_service_name)
-
-	# Tool must be enabled in ToolPolicy (if policy exists for this service)
-	tool_enabled_or_no_policy(resolved_service_name, parsed_tool_name)
-
-	# User must have access to this service+tool
+	# Grant check
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+
+	# No contextual route — fast path
+	not contextual_route
 }
 
-# If ToolPolicy exists for this service, the tool must be in enabledTools
-# If no ToolPolicy exists, allow (service is enabled in registry, that's enough)
-tool_enabled_or_no_policy(service_name, tool_name) if {
-	tool_policies[service_name]
-	tool_enabled(service_name, tool_name)
-}
+# Rule 3b: tools/call — contextual route (Layer 2: call NPL evaluate())
+allow if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
 
-tool_enabled_or_no_policy(service_name, tool_name) if {
-	not tool_policies[service_name]
+	# Catalog checks
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+
+	# Grant check
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+
+	# Contextual route exists — call NPL evaluate()
+	contextual_route
+	npl_eval := http.send({
+		"method": "POST",
+		"url": sprintf("%s%s", [npl_url, contextual_route.endpoint]),
+		"headers": {
+			"Authorization": sprintf("Bearer %s", [data.gateway_token]),
+			"Content-Type": "application/json",
+		},
+		"body": {
+			"toolName": parsed_tool_name,
+			"callerIdentity": user_id,
+			"sessionId": "",
+			"arguments": "",
+		},
+		"timeout": "5s",
+	}).body
+
+	npl_eval == "allow"
 }
 
 # --- Response headers for debugging ---
@@ -269,23 +317,13 @@ reason := "tools/call: no user identity" if {
 	not user_id
 }
 
-reason := sprintf("tools/call: service '%s' not enabled", [resolved_service_name]) if {
+reason := sprintf("tools/call: service '%s' not available", [resolved_service_name]) if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
 	jsonrpc_tool_name
 	user_id
 	resolved_service_name
-	not enabled_services[resolved_service_name]
-}
-
-reason := sprintf("tools/call: service '%s' is suspended", [resolved_service_name]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
-	user_id
-	resolved_service_name
-	enabled_services[resolved_service_name]
-	not service_policy_active(resolved_service_name)
+	not service_available_or_no_catalog(resolved_service_name)
 }
 
 reason := sprintf("tools/call: tool '%s' not enabled for service '%s'", [parsed_tool_name, resolved_service_name]) if {
@@ -294,9 +332,8 @@ reason := sprintf("tools/call: tool '%s' not enabled for service '%s'", [parsed_
 	jsonrpc_tool_name
 	user_id
 	resolved_service_name
-	enabled_services[resolved_service_name]
-	service_policy_active(resolved_service_name)
-	tool_policies[resolved_service_name]
+	service_available_or_no_catalog(resolved_service_name)
+	catalog[resolved_service_name]
 	not tool_enabled(resolved_service_name, parsed_tool_name)
 }
 
@@ -306,9 +343,8 @@ reason := sprintf("tools/call: user '%s' has no access to %s.%s", [user_id, reso
 	jsonrpc_tool_name
 	user_id
 	resolved_service_name
-	enabled_services[resolved_service_name]
-	service_policy_active(resolved_service_name)
-	tool_enabled_or_no_policy(resolved_service_name, parsed_tool_name)
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
 	not user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 }
 

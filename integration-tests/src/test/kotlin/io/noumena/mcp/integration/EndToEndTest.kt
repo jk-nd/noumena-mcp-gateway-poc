@@ -19,9 +19,9 @@ import org.junit.jupiter.api.Assertions.*
  * Tests the complete flow using Streamable HTTP (POST /mcp):
  * MCP Client -> Envoy (JWT authn) -> OPA (ext_authz) -> mock-calendar-mcp -> Response
  *
- * NPL state (ServiceRegistry, ToolPolicy, UserToolAccess) is bootstrapped in @BeforeAll
- * so that OPA can evaluate access policies. OPA caches NPL data for 5s, so a 6s sleep
- * is required after bootstrap before running policy-dependent tests.
+ * NPL state (PolicyStore singleton) is bootstrapped in @BeforeAll so that OPA can
+ * evaluate access policies. Bundle server subscribes to SSE and rebuilds on state
+ * changes, so a short sleep is required after bootstrap.
  *
  * Prerequisites:
  * - Full Docker stack running: docker compose -f deployments/docker-compose.yml up -d
@@ -37,9 +37,15 @@ class EndToEndTest {
     private lateinit var jarvisToken: String   // Allowed user (has tool grants)
     private lateinit var aliceToken: String    // Denied user (no tool grants)
     private lateinit var client: HttpClient
+    private lateinit var storeId: String       // PolicyStore singleton ID (for dynamic tests)
     private val json = Json {
         ignoreUnknownKeys = true
         prettyPrint = true
+    }
+
+    companion object {
+        /** Time to wait for SSE-triggered OPA bundle rebuild (ms). */
+        const val BUNDLE_REBUILD_WAIT = 6000L
     }
 
     @BeforeAll
@@ -77,35 +83,29 @@ class EndToEndTest {
         aliceToken = KeycloakAuth.getToken(TestConfig.aliceUsername, TestConfig.defaultPassword)
         println("    ✓ Alice token obtained")
 
-        // Bootstrap NPL state for OPA policy evaluation
-        println("\n    Bootstrapping NPL state for OPA...")
+        // Bootstrap NPL state via PolicyStore singleton
+        println("\n    Bootstrapping NPL state via PolicyStore...")
 
-        // 1. ServiceRegistry → enable mock-calendar
-        val registryId = NplBootstrap.ensureServiceRegistry(adminToken)
-        println("    ✓ ServiceRegistry: $registryId")
-        NplBootstrap.ensureServiceEnabled(registryId, "mock-calendar", adminToken)
-        println("    ✓ mock-calendar service enabled")
+        // 1. PolicyStore singleton — find or create
+        storeId = NplBootstrap.ensurePolicyStore(adminToken)
+        println("    ✓ PolicyStore: $storeId")
 
-        // 2. ToolPolicy for mock-calendar → enable list_events + create_event
-        val policyId = NplBootstrap.ensureToolPolicy("mock-calendar", adminToken)
-        println("    ✓ ToolPolicy (mock-calendar): $policyId")
-        NplBootstrap.ensureToolEnabled(policyId, "list_events", adminToken)
-        NplBootstrap.ensureToolEnabled(policyId, "create_event", adminToken)
+        // 2. Register + enable mock-calendar service, enable tools
+        NplBootstrap.ensureCatalogService(storeId, "mock-calendar", adminToken)
+        println("    ✓ mock-calendar service registered + enabled")
+        NplBootstrap.ensureCatalogToolEnabled(storeId, "mock-calendar", "list_events", adminToken)
+        NplBootstrap.ensureCatalogToolEnabled(storeId, "mock-calendar", "create_event", adminToken)
         println("    ✓ Tools enabled: list_events, create_event")
 
-        // 3. UserToolAccess for jarvis → grant wildcard on mock-calendar
-        val jarvisAccessId = NplBootstrap.ensureUserToolAccess("jarvis@acme.com", adminToken)
-        println("    ✓ UserToolAccess (jarvis): $jarvisAccessId")
-        NplBootstrap.ensureUserToolGrantAll(jarvisAccessId, "mock-calendar", adminToken)
+        // 3. Grant jarvis wildcard access on mock-calendar
+        NplBootstrap.ensureGrantAll(storeId, "jarvis@acme.com", "mock-calendar", adminToken)
         println("    ✓ jarvis granted wildcard (*) on mock-calendar")
 
-        // 4. UserToolAccess for alice → no grants (denied user)
-        val aliceAccessId = NplBootstrap.ensureUserToolAccess("alice@acme.com", adminToken)
-        println("    ✓ UserToolAccess (alice): $aliceAccessId (no grants)")
+        // 4. Alice gets no grants (denied user) — nothing to do
 
-        // 5. Wait for OPA cache to expire and pick up new NPL state
-        println("    Waiting 6s for OPA cache expiry...")
-        delay(6000)
+        // 5. Wait for SSE-triggered bundle rebuild
+        println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for OPA bundle rebuild via SSE...")
+        delay(BUNDLE_REBUILD_WAIT)
         println("    ✓ NPL bootstrap complete, OPA should have fresh state")
     }
 
@@ -344,6 +344,155 @@ class EndToEndTest {
         }
 
         println("    ✓ All core services are healthy")
+    }
+
+    // ── Non-tool-call bypass ────────────────────────────────────────────────
+
+    @Test
+    @Order(9)
+    fun `OPA allows tools list for user without grants`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: OPA allows tools/list (alice - non-tool-call)        │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $aliceToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(9, "tools/list"))
+        }
+
+        println("    Status: ${response.status}")
+        val body = response.bodyAsText()
+        println("    Body: ${body.take(300)}")
+
+        assertEquals(HttpStatusCode.OK, response.status,
+            "OPA should allow non-tool-call methods (tools/list) regardless of tool grants")
+
+        println("    ✓ OPA correctly allowed tools/list for alice (no grants)")
+    }
+
+    // ── Dynamic pipeline: NPL → SSE → bundle → OPA ─────────────────────────
+
+    @Test
+    @Order(10)
+    fun `dynamic grant-revoke proves full pipeline`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: Dynamic grant → allow → revoke → deny (full pipeline)│")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        // Phase 1: Grant alice list_events
+        println("    Phase 1: Granting alice list_events on mock-calendar...")
+        val grantResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"subjectId": "alice@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
+        }
+        assertTrue(grantResp.status.isSuccess(), "grantTool should succeed")
+
+        println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for bundle rebuild...")
+        delay(BUNDLE_REBUILD_WAIT)
+
+        // Phase 2: Alice tool call should now succeed
+        println("    Phase 2: Alice calls list_events (should succeed)...")
+        val allowedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $aliceToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(10, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+        }
+        println("    Alice tool call status: ${allowedResp.status}")
+        assertEquals(HttpStatusCode.OK, allowedResp.status,
+            "Alice should be allowed after grant (NPL→SSE→bundle→OPA pipeline)")
+        println("    ✓ Alice tool call succeeded after dynamic grant")
+
+        // Phase 3: Revoke alice
+        println("    Phase 3: Revoking alice's access...")
+        val revokeResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeTool"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"subjectId": "alice@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
+        }
+        assertTrue(revokeResp.status.isSuccess(), "revokeTool should succeed")
+
+        println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for bundle rebuild...")
+        delay(BUNDLE_REBUILD_WAIT)
+
+        // Phase 4: Alice tool call should be denied again
+        println("    Phase 4: Alice calls list_events (should be denied)...")
+        val deniedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $aliceToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(11, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+        }
+        println("    Alice tool call status: ${deniedResp.status}")
+        assertEquals(HttpStatusCode.Forbidden, deniedResp.status,
+            "Alice should be denied after revoke (NPL→SSE→bundle→OPA pipeline)")
+
+        println("    ✓ Full pipeline proven: grant→allow→revoke→deny")
+    }
+
+    @Test
+    @Order(11)
+    fun `suspended service denies tool calls E2E`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: Suspended service denies tool calls (E2E)            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        // Phase 1: Suspend mock-calendar
+        println("    Phase 1: Suspending mock-calendar...")
+        val suspendResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/suspendService"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar"}""")
+        }
+        assertTrue(suspendResp.status.isSuccess(), "suspendService should succeed")
+
+        println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for bundle rebuild...")
+        delay(BUNDLE_REBUILD_WAIT)
+
+        // Phase 2: Jarvis tool call should be denied (service suspended)
+        println("    Phase 2: Jarvis calls list_events (should be denied)...")
+        val deniedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $jarvisToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(12, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+        }
+        println("    Jarvis tool call status: ${deniedResp.status}")
+        assertEquals(HttpStatusCode.Forbidden, deniedResp.status,
+            "OPA should deny tool call when service is suspended")
+        println("    ✓ Suspended service correctly blocked tool call")
+
+        // Phase 3: Resume mock-calendar (cleanup)
+        println("    Phase 3: Resuming mock-calendar...")
+        val resumeResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/resumeService"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar"}""")
+        }
+        assertTrue(resumeResp.status.isSuccess(), "resumeService should succeed")
+
+        println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for bundle rebuild...")
+        delay(BUNDLE_REBUILD_WAIT)
+
+        // Phase 4: Verify jarvis can call again
+        println("    Phase 4: Jarvis calls list_events (should succeed again)...")
+        val allowedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $jarvisToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(13, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+        }
+        println("    Jarvis tool call status: ${allowedResp.status}")
+        assertEquals(HttpStatusCode.OK, allowedResp.status,
+            "Jarvis should be allowed after service resume")
+
+        println("    ✓ Suspend→deny→resume→allow cycle proven E2E")
     }
 
     @AfterAll

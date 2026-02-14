@@ -3,7 +3,7 @@
 # Run with: opa test policies/ -v
 #
 # These tests use mock input (simulating Envoy ext_authz requests)
-# and mock NPL data (overriding http.send responses).
+# and mock policy data (catalog + grants from OPA bundle).
 
 package envoy.authz
 
@@ -61,45 +61,41 @@ mock_jwt_unknown := token if {
 
 mock_bearer(jwt) := sprintf("Bearer %s", [jwt])
 
-# --- Mock NPL data ---
-# These override the http.send-based rules in the main policy via `with` keyword.
+# --- Mock policy data (catalog + grants) ---
 
-mock_enabled_services := {"duckduckgo", "mock-calendar"}
-
-mock_tool_policies := {"duckduckgo": {
-	"@id": "tp-1",
-	"@state": "active",
-	"policyServiceName": "duckduckgo",
-	"enabledTools": ["search", "fetch_content"],
-}, "mock-calendar": {
-	"@id": "tp-2",
-	"@state": "active",
-	"policyServiceName": "mock-calendar",
-	"enabledTools": ["list_events", "create_event"],
-}}
-
-mock_suspended_tool_policies := {"duckduckgo": {
-	"@id": "tp-1",
-	"@state": "suspended",
-	"policyServiceName": "duckduckgo",
-	"enabledTools": ["search"],
-}}
-
-mock_user_access_entries := {
-	"jarvis@acme.com": {
-		"@id": "ua-1",
-		"userId": "jarvis@acme.com",
-		"serviceAccess": [
-			{"serviceName": "duckduckgo", "allowedTools": ["*"]},
-			{"serviceName": "mock-calendar", "allowedTools": ["*"]},
-		],
+mock_catalog := {
+	"duckduckgo": {
+		"enabled": true,
+		"enabledTools": ["search", "fetch_content"],
+		"suspended": false,
+		"metadata": {},
 	},
-	"alice@acme.com": {
-		"@id": "ua-2",
-		"userId": "alice@acme.com",
-		"serviceAccess": [],
+	"mock-calendar": {
+		"enabled": true,
+		"enabledTools": ["list_events", "create_event"],
+		"suspended": false,
+		"metadata": {},
 	},
 }
+
+mock_suspended_catalog := {
+	"duckduckgo": {
+		"enabled": true,
+		"enabledTools": ["search"],
+		"suspended": true,
+		"metadata": {},
+	},
+}
+
+mock_grants := {
+	"jarvis@acme.com": [
+		{"serviceName": "duckduckgo", "allowedTools": ["*"]},
+		{"serviceName": "mock-calendar", "allowedTools": ["*"]},
+	],
+	"alice@acme.com": [],
+}
+
+mock_contextual_routing := {}
 
 # ============================================================================
 # Test: Non-tool-call methods are always allowed
@@ -111,9 +107,9 @@ test_allow_initialize if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_allow_tools_list if {
@@ -122,9 +118,9 @@ test_allow_tools_list if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_allow_ping if {
@@ -133,9 +129,9 @@ test_allow_ping if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_allow_notifications if {
@@ -144,9 +140,9 @@ test_allow_notifications if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
@@ -155,23 +151,23 @@ test_allow_notifications if {
 
 test_allow_stream_setup_for_granted_user if {
 	allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_jarvis), "")
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_stream_setup_for_user_without_access if {
 	not allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_alice), "")
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_stream_setup_for_unknown_user if {
 	not allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_unknown), "")
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
@@ -184,9 +180,9 @@ test_allow_namespaced_tool_call if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_allow_calendar_tool_call if {
@@ -195,24 +191,24 @@ test_allow_calendar_tool_call if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-13\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
 # Test: tools/call — denied cases
 # ============================================================================
 
-test_deny_tool_call_service_not_enabled if {
+test_deny_tool_call_service_not_available if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"github.create_issue\",\"arguments\":{}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_tool_call_service_suspended if {
@@ -221,18 +217,18 @@ test_deny_tool_call_service_suspended if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_suspended_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_suspended_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_tool_call_tool_not_enabled if {
-	# ToolPolicy for duckduckgo only has "search" enabled, not "nonexistent_tool"
-	limited_policies := {"duckduckgo": {
-		"@id": "tp-1",
-		"@state": "active",
-		"policyServiceName": "duckduckgo",
+	# Catalog for duckduckgo only has "search" enabled, not "fetch_content"
+	limited_catalog := {"duckduckgo": {
+		"enabled": true,
 		"enabledTools": ["search"],
+		"suspended": false,
+		"metadata": {},
 	}}
 
 	not allow with input as mock_input(
@@ -240,9 +236,9 @@ test_deny_tool_call_tool_not_enabled if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_content\",\"arguments\":{\"url\":\"http://example.com\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as limited_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as limited_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_tool_call_user_no_access if {
@@ -251,9 +247,9 @@ test_deny_tool_call_user_no_access if {
 		mock_bearer(mock_jwt_alice),
 		"{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_tool_call_unknown_user if {
@@ -262,9 +258,9 @@ test_deny_tool_call_unknown_user if {
 		mock_bearer(mock_jwt_unknown),
 		"{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_tool_call_missing_tool_name if {
@@ -273,9 +269,9 @@ test_deny_tool_call_missing_tool_name if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_deny_tool_call_no_auth if {
@@ -283,24 +279,24 @@ test_deny_tool_call_no_auth if {
 		"POST", "/mcp",
 		"{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
-# Test: Fail-closed — empty NPL data denies everything
+# Test: Fail-closed — empty policy data denies everything
 # ============================================================================
 
-test_deny_tools_call_when_npl_data_empty if {
+test_deny_tools_call_when_policy_data_empty if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as set()
-		with tool_policies as {}
-		with user_access_entries as {}
+		with catalog as {}
+		with grants as {}
+		with contextual_routing as {}
 }
 
 # ============================================================================
@@ -314,9 +310,9 @@ test_wildcard_grants_any_tool if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_content\",\"arguments\":{\"url\":\"http://example.com\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
@@ -324,12 +320,10 @@ test_wildcard_grants_any_tool if {
 # ============================================================================
 
 test_specific_tool_access_allowed if {
-	specific_access := {
-		"jarvis@acme.com": {
-			"@id": "ua-1",
-			"userId": "jarvis@acme.com",
-			"serviceAccess": [{"serviceName": "duckduckgo", "allowedTools": ["search"]}],
-		},
+	specific_grants := {
+		"jarvis@acme.com": [
+			{"serviceName": "duckduckgo", "allowedTools": ["search"]},
+		],
 	}
 
 	allow with input as mock_input(
@@ -337,18 +331,16 @@ test_specific_tool_access_allowed if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as specific_access
+		with catalog as mock_catalog
+		with grants as specific_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 test_specific_tool_access_denied_for_other_tool if {
-	specific_access := {
-		"jarvis@acme.com": {
-			"@id": "ua-1",
-			"userId": "jarvis@acme.com",
-			"serviceAccess": [{"serviceName": "duckduckgo", "allowedTools": ["search"]}],
-		},
+	specific_grants := {
+		"jarvis@acme.com": [
+			{"serviceName": "duckduckgo", "allowedTools": ["search"]},
+		],
 	}
 
 	not allow with input as mock_input(
@@ -356,24 +348,24 @@ test_specific_tool_access_denied_for_other_tool if {
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_content\",\"arguments\":{\"url\":\"http://example.com\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as specific_access
+		with catalog as mock_catalog
+		with grants as specific_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
-# Test: No ToolPolicy for service — allow if service is enabled and user has access
+# Test: No catalog entry for service — allow if user has grant
 # ============================================================================
 
-test_allow_when_no_tool_policy_exists if {
+test_allow_when_no_catalog_entry_exists if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-13\"}}}",
 	)
-		with enabled_services as mock_enabled_services
-		with tool_policies as {}
-		with user_access_entries as mock_user_access_entries
+		with catalog as {}
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
 }
 
 # ============================================================================
@@ -382,7 +374,81 @@ test_allow_when_no_tool_policy_exists if {
 
 test_default_deny_empty_body_post if {
 	not allow with input as mock_input("POST", "/mcp", "", "")
-		with enabled_services as mock_enabled_services
-		with tool_policies as mock_tool_policies
-		with user_access_entries as mock_user_access_entries
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+}
+
+# ============================================================================
+# Test: Contextual routing — Layer 2 (route lookup only, no http.send in unit tests)
+# ============================================================================
+
+test_fast_path_no_contextual_route if {
+	# No contextual routes configured — should take fast path (Rule 3a)
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as {}
+}
+
+test_contextual_route_lookup_specific_tool if {
+	# Verify contextual_route resolves for specific tool
+	routes := {"duckduckgo": {"search": {
+		"policyProtocol": "PiiGuardPolicy",
+		"instanceId": "pii-001",
+		"endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate",
+	}}}
+
+	# With a contextual route, Rule 3a (fast path) should NOT match
+	# Rule 3b would match but requires http.send — so allow should be false
+	# (http.send will fail in unit tests since there's no server)
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as routes
+}
+
+test_contextual_route_lookup_wildcard if {
+	# Verify contextual_route resolves for wildcard
+	routes := {"duckduckgo": {"*": {
+		"policyProtocol": "PiiGuardPolicy",
+		"instanceId": "pii-001",
+		"endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate",
+	}}}
+
+	# Wildcard route should block fast path too
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as routes
+}
+
+test_contextual_route_no_match_other_service if {
+	# Route for slack, not duckduckgo — should take fast path
+	routes := {"slack": {"*": {
+		"policyProtocol": "PiiGuardPolicy",
+		"instanceId": "pii-001",
+		"endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate",
+	}}}
+
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":73,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as routes
 }

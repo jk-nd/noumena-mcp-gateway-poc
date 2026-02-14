@@ -90,93 +90,62 @@ def auth_header() -> dict:
     return {"Authorization": f"Bearer {token_manager.get_token()}"}
 
 
-# --- NPL data fetching ---
+# --- NPL data fetching (2 HTTP calls: list singleton + getPolicyData) ---
 def fetch_npl_data() -> dict:
-    """Fetch all policy data from NPL Engine REST API."""
+    """Fetch all policy data from NPL PolicyStore singleton."""
     headers = auth_header()
 
-    # 1. ServiceRegistry → enabled_services
-    enabled_services = {}
-    try:
-        resp = requests.get(
-            f"{NPL_URL}/npl/registry/ServiceRegistry/", headers=headers, timeout=10
-        )
-        resp.raise_for_status()
-        for item in resp.json().get("items", []):
-            for svc in item.get("enabledServices", []):
-                enabled_services[svc] = True
-    except Exception as e:
-        log.error("Failed to fetch ServiceRegistry: %s", e)
+    # 1. Find the PolicyStore singleton
+    resp = requests.get(
+        f"{NPL_URL}/npl/policy/PolicyStore/", headers=headers, timeout=10
+    )
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    if not items:
+        log.warning("No PolicyStore singleton found — returning empty policy data")
+        return {
+            "catalog": {},
+            "grants": {},
+            "contextual_routing": {},
+            "gateway_token": token_manager.get_token(),
+        }
 
-    # 2. ToolPolicy → tool_policies (need action call for private enabledTools)
-    tool_policies = {}
-    try:
-        resp = requests.get(
-            f"{NPL_URL}/npl/services/ToolPolicy/", headers=headers, timeout=10
-        )
-        resp.raise_for_status()
-        for item in resp.json().get("items", []):
-            service_name = item.get("policyServiceName")
-            if not service_name:
-                continue
-            # Fetch enabledTools via action endpoint
-            try:
-                tools_resp = requests.post(
-                    f"{NPL_URL}/npl/services/ToolPolicy/{item['@id']}/getEnabledTools",
-                    headers={**headers, "Content-Type": "application/json"},
-                    json={},
-                    timeout=10,
-                )
-                tools_resp.raise_for_status()
-                enabled_tools = tools_resp.json()
-            except Exception as e:
-                log.error("Failed to fetch enabledTools for %s: %s", service_name, e)
-                enabled_tools = []
+    store_id = items[0]["@id"]
 
-            tool_policies[service_name] = {
-                "@state": item.get("@state", "active"),
-                "policyServiceName": service_name,
-                "enabledTools": enabled_tools,
-            }
-    except Exception as e:
-        log.error("Failed to fetch ToolPolicy: %s", e)
+    # 2. Get everything in one call
+    data_resp = requests.post(
+        f"{NPL_URL}/npl/policy/PolicyStore/{store_id}/getPolicyData",
+        headers={**headers, "Content-Type": "application/json"},
+        json={},
+        timeout=10,
+    )
+    data_resp.raise_for_status()
+    policy_data = data_resp.json()
 
-    # 3. UserToolAccess → user_access_entries (need action call for private accessList)
-    user_access_entries = {}
-    try:
-        resp = requests.get(
-            f"{NPL_URL}/npl/users/UserToolAccess/", headers=headers, timeout=10
-        )
-        resp.raise_for_status()
-        for item in resp.json().get("items", []):
-            uid = item.get("userId")
-            if not uid:
-                continue
-            # Fetch serviceAccess via action endpoint
-            try:
-                access_resp = requests.post(
-                    f"{NPL_URL}/npl/users/UserToolAccess/{item['@id']}/getAccessList",
-                    headers={**headers, "Content-Type": "application/json"},
-                    json={},
-                    timeout=10,
-                )
-                access_resp.raise_for_status()
-                service_access = access_resp.json()
-            except Exception as e:
-                log.error("Failed to fetch accessList for %s: %s", uid, e)
-                service_access = []
+    # Transform into OPA bundle shape
+    catalog = {}
+    for svc_name, entry in policy_data.get("services", {}).items():
+        catalog[svc_name] = {
+            "enabled": entry.get("enabled", False),
+            "enabledTools": entry.get("enabledTools", []),
+            "suspended": entry.get("suspended", False),
+            "metadata": entry.get("metadata", {}),
+        }
 
-            user_access_entries[uid] = {
-                "userId": uid,
-                "serviceAccess": service_access,
-            }
-    except Exception as e:
-        log.error("Failed to fetch UserToolAccess: %s", e)
+    grants = {}
+    revoked = policy_data.get("revokedSubjects", [])
+    for subject_id, grant_list in policy_data.get("grants", {}).items():
+        if subject_id not in revoked:
+            grants[subject_id] = grant_list
+        # Revoked subjects get empty grants (fail-closed)
+
+    contextual_routing = policy_data.get("contextualRoutes", {})
 
     return {
-        "enabled_services": enabled_services,
-        "tool_policies": tool_policies,
-        "user_access_entries": user_access_entries,
+        "catalog": catalog,
+        "grants": grants,
+        "contextual_routing": contextual_routing,
+        "gateway_token": token_manager.get_token(),
     }
 
 
@@ -190,7 +159,7 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str]:
     manifest = json.dumps(
         {
             "revision": revision,
-            "roots": ["enabled_services", "tool_policies", "user_access_entries"],
+            "roots": ["catalog", "grants", "contextual_routing", "gateway_token"],
         },
         separators=(",", ":"),
     )
@@ -224,11 +193,11 @@ def rebuild():
             current_etag = etag
         data_ready.set()
         log.info(
-            "Bundle rebuilt: etag=%s services=%d policies=%d users=%d",
+            "Bundle rebuilt: etag=%s catalog=%d grants=%d routes=%d",
             etag,
-            len(policy_data["enabled_services"]),
-            len(policy_data["tool_policies"]),
-            len(policy_data["user_access_entries"]),
+            len(policy_data["catalog"]),
+            len(policy_data["grants"]),
+            len(policy_data["contextual_routing"]),
         )
     except Exception as e:
         log.error("Failed to rebuild bundle: %s", e)
