@@ -1,17 +1,18 @@
 # NOUMENA MCP Gateway Wizard
 
-Interactive CLI for managing MCP Gateway services, users, and credentials. Powered by [@clack/prompts](https://github.com/natemoo-re/clack).
+Interactive CLI for managing MCP Gateway services, users, and policy. Powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ## Features
 
-- **Service management** - Add, enable/disable, remove services with NPL sync
+- **Service management** - Add, enable/disable, suspend/resume, remove services via PolicyStore
 - **Tool management** - Enable/disable individual tools per service
-- **User management** - Register/deregister Keycloak users, grant/revoke tool access
-- **Credential management** - Store secrets in Vault, configure tenant-level or user-level scopes
+- **User management** - Grant/revoke tool access per Keycloak user (grants-only model)
+- **Emergency controls** - Suspend services, revoke all user access instantly
 - **Container control** - Pull Docker images, manage HTTP service containers
 - **Docker Hub search** - Find and add MCP servers from the `mcp/*` namespace
-- **NPL-first operations** - All state changes write to NPL first, then update services.yaml as persistent cache
-- **Real-time status** - Gateway connection, container, and NPL sync indicators
+- **PolicyStore-first** - All state changes write to the NPL PolicyStore singleton (single source of truth)
+- **Import/Export** - Bulk import from `services.yaml`, export PolicyStore snapshots to YAML
+- **Real-time status** - Gateway connection, container, and PolicyStore indicators
 
 ## Status Indicators
 
@@ -19,6 +20,7 @@ Interactive CLI for managing MCP Gateway services, users, and credentials. Power
 |--------|---------|
 | `●` | Service/tool enabled |
 | `–` | Service/tool disabled |
+| `⏸` | Service suspended (emergency) |
 | `■` | Docker image pulled and ready (green) |
 | `·` | Docker image not pulled |
 | `▶` | Container running (HTTP services only) |
@@ -61,7 +63,7 @@ Select a service directly to manage it, or use these actions:
 |--------|-------------|
 | **+ Search Docker Hub** | Find and add MCP servers from the `mcp/*` namespace |
 | **+ Add custom image** | Add local or private registry Docker images |
-| **Configuration Manager** | View, edit, backup, import services.yaml |
+| **Import / Export** | Import YAML to PolicyStore, export snapshots, create backups |
 | **Quit** | Exit the wizard |
 
 ## Service Actions
@@ -70,52 +72,58 @@ When you select a service:
 
 | Action | Description |
 |--------|-------------|
-| **Enable/Disable** | Toggle service (syncs with NPL policy) |
+| **Enable/Disable** | Toggle service availability in PolicyStore |
+| **Suspend/Resume** | Emergency kill switch (blocks all tool calls instantly) |
 | **Pull image** | Download Docker image (if not pulled) |
 | **Start/Stop container** | Control container (HTTP services only) |
 | **Discover tools** | Query service for available tools (Docker and NPM/command-based) |
 | **Manage tools** | Enable/disable individual tools |
 | **View details** | Show service configuration |
-| **Delete** | Remove service (removes from NPL and config) |
+| **Delete** | Remove service from PolicyStore |
 
 ## Tool Management
 
-When enabling a service, you're prompted to select which tools to enable:
+When managing tools for a service:
 
-1. Choose **Enable tools** or **Disable tools**
-2. Use **SPACE** to select/deselect tools
+1. Choose **Enable tool** (enter tool name) or **Disable tools** (multi-select)
+2. For disable: use **SPACE** to select/deselect tools
 3. Press **ENTER** to apply changes
 
-Or use **Enable all** / **Disable all** for bulk operations.
+Changes are written directly to the PolicyStore catalog.
 
-### NPL-First Sync
+## User Management
 
-When you enable/disable a service or toggle individual tools, the TUI automatically:
-1. Writes the change to NPL (source of truth) first
-2. Updates `services.yaml` (persistent cache) on success
-3. Calls `POST /admin/services/reload` on the Gateway (best-effort)
+Users are managed through a **grants-only** model:
 
-If the NPL write fails, `services.yaml` is unchanged and an error is shown. The Gateway reload is best-effort — if it fails (e.g. Gateway is down), changes take effect on next Gateway restart.
+- Users are sourced from **Keycloak** (identity provider)
+- Tool access is controlled via **PolicyStore grants** (authorization)
+- No separate registration step — grant tools directly to any Keycloak user
+
+| Action | Description |
+|--------|-------------|
+| **Grant tools** | Give a user access to specific tools on a service |
+| **Grant all tools** | Wildcard access to all tools on a service |
+| **Revoke tools** | Remove specific tool access |
+| **Revoke service** | Remove all access to a service |
+| **Emergency revoke** | Instantly revoke ALL access for a user (fail-closed) |
+| **Reinstate** | Restore access for a previously revoked user |
 
 ## Default Behavior
 
 - **New services** are disabled by default
-- **New tools** are disabled by default
+- **New tools** must be explicitly enabled
 - You must explicitly enable what you want to use
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SERVICES_CONFIG_PATH` | `../configs/services.yaml` | Path to services config |
+| `SERVICES_CONFIG_PATH` | `../configs/services.yaml` | Path to services config (import/export) |
 | `GATEWAY_URL` | `http://localhost:8000` | Gateway URL |
 | `NPL_URL` | `http://localhost:12000` | NPL Engine URL |
 | `KEYCLOAK_URL` | `http://localhost:11000` | Keycloak URL |
 | `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
 | `KEYCLOAK_CLIENT_ID` | `mcpgateway` | Keycloak client ID |
-| `VAULT_ADDR` | `http://localhost:8200` | Vault server URL |
-| `VAULT_TOKEN` | (none) | Vault access token |
-| `CREDENTIALS_CONFIG_PATH` | `../configs/credentials.yaml` | Path to credentials config |
 
 ## Architecture
 
@@ -124,38 +132,49 @@ tui/
 ├── src/
 │   ├── cli.ts              # Main wizard (Clack-based)
 │   └── lib/
-│       ├── config.ts       # YAML config read/write
-│       └── api.ts          # Gateway, NPL, Docker Hub APIs
+│       ├── config.ts       # YAML import/export utility
+│       └── api.ts          # PolicyStore, Keycloak, Docker APIs
 ├── package.json
 └── tsconfig.json
 ```
 
 ## How It Works
 
-1. **Config File**: Services are defined in `configs/services.yaml`
-2. **Gateway**: Reads config to know which tools to expose
-3. **NPL Policy**: Controls which services are allowed (enable = allowed, disable = denied)
-4. **Wizard**: Manages all three layers through a unified interface
+1. **PolicyStore**: NPL singleton that holds all policy data (services, tools, grants, revocations)
+2. **Bundle Server**: Reads PolicyStore and generates OPA policy bundles
+3. **OPA/Envoy**: Enforces policy at the Gateway proxy layer
+4. **Keycloak**: Identity provider (who exists)
+5. **Wizard**: Manages PolicyStore and Keycloak through a unified interface
 
-## NPL Integration
+```
+┌─────────┐     ┌──────────────┐     ┌───────────────┐     ┌─────┐
+│   TUI   │────▶│  PolicyStore │────▶│ Bundle Server │────▶│ OPA │
+│ (admin) │     │  (NPL)       │     │               │     │     │
+└─────────┘     └──────────────┘     └───────────────┘     └─────┘
+     │                                                        │
+     ▼                                                        ▼
+┌──────────┐                                           ┌───────────┐
+│ Keycloak │                                           │  Gateway  │
+│ (users)  │                                           │  (Envoy)  │
+└──────────┘                                           └───────────┘
+```
 
-All TUI operations follow the **NPL-first** pattern: NPL (source of truth) is written first, then `services.yaml` is updated as a persistent cache. If the NPL write fails, `services.yaml` remains unchanged.
+## PolicyStore Integration
 
-> **Note**: The TUI currently references the old 3-layer NPL protocol model (ServiceRegistry, ToolPolicy, UserToolAccess). The backend has been migrated to a unified **PolicyStore** singleton. TUI code needs updating to call PolicyStore endpoints instead. The policy enforcement chain (OPA + bundle server) works correctly regardless.
+All TUI operations follow the **PolicyStore-first** pattern: the NPL PolicyStore singleton is the single source of truth for all policy data. `services.yaml` serves only as an import/export format for bulk configuration.
 
-When you enable a service:
-- Service is registered and enabled in the PolicyStore catalog
-- Enabled tools are added to the PolicyStore catalog
-
-When you disable a service:
-- Service is disabled in the PolicyStore catalog
-- Requests to that service will be denied by policy
+When you add a service:
+1. Service is registered in the PolicyStore catalog (`registerService`)
+2. Metadata is set (displayName, type, command, etc.) via `setServiceMetadata`
+3. Discovered tools are enabled in the catalog (`enableTool`)
+4. Service is enabled when ready (`enableService`)
 
 When you manage users:
-- Tool access is granted/revoked via PolicyStore grants
-- Changes are synced to Keycloak for authentication
+- Tool access is granted/revoked via PolicyStore grants (`grantTool`, `revokeTool`)
+- Keycloak manages user identity (authentication)
+- PolicyStore manages tool access (authorization)
 
-Tool-level enabling syncs with the PolicyStore catalog — only explicitly enabled tools pass the policy check.
+The bundle server reads PolicyStore in a single `getPolicyData()` call and generates OPA bundles. Policy enforcement happens at the Envoy proxy layer via OPA — the Gateway itself never makes policy decisions.
 
 ## Container Management
 
@@ -186,7 +205,6 @@ NPM-based services use the pattern `docker run -i --rm node:22-slim npx -y <pack
 - Containers automatically exit when the request completes
 - **You cannot manually start/stop STDIO containers** - they require an active stdin/stdout pipe
 - The TUI does not show start/stop options for STDIO services
-- For services requiring credentials, the Gateway injects them as `-e KEY=VALUE` Docker flags
 
 **What this means:**
 - For Docker services: pull the image and enable the service
@@ -199,9 +217,7 @@ NPM-based services use the pattern `docker run -i --rm node:22-slim npx -y <pack
 The TUI can discover tools from any STDIO service:
 
 - **Docker services**: Runs the Docker image and queries via MCP JSON-RPC handshake
-- **NPM/command services**: Spawns the command with credentials (fetched transiently from Vault) and queries via the same handshake
-
-For services requiring credentials (e.g., Google Gemini needs `GEMINI_API_KEY`), the TUI fetches the API key from Vault at discovery time, holds it in memory only for the duration of the discovery, and passes it as an environment variable to the spawned process.
+- **NPM/command services**: Spawns the command and queries via the same handshake
 
 ### HTTP Services (Less Common)
 

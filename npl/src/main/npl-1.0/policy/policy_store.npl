@@ -373,6 +373,34 @@ protocol[pAdmin, pGateway] PolicyStore() {
         info("[PolicyStore] Removed route: " + serviceName + "." + toolName);
     };
 
+    /**
+     * Set a metadata key on a service entry.
+     * Used by TUI to store operational config (displayName, type, command, etc.)
+     */
+    @api
+    permission[pAdmin] setServiceMetadata(serviceName: Text, key: Text, value: Text) | active {
+        var maybeEntry = services.getOrNone(serviceName);
+        require(maybeEntry.isPresent(), "Service not found");
+        var entry = maybeEntry.getOrFail();
+        var updated = ServiceEntry(
+            serviceName = entry.serviceName,
+            enabled = entry.enabled,
+            enabledTools = entry.enabledTools,
+            suspended = entry.suspended,
+            metadata = entry.metadata.with(key, value)
+        );
+        services = services.with(serviceName, updated);
+    };
+
+    /**
+     * Remove a service entirely from the catalog.
+     */
+    @api
+    permission[pAdmin] removeService(serviceName: Text) | active {
+        require(services.getOrNone(serviceName).isPresent(), "Service not found");
+        services = services.without(serviceName);
+    };
+
     // ========================================================================
     // Bundle server reads everything in ONE call
     // ========================================================================
@@ -382,7 +410,7 @@ protocol[pAdmin, pGateway] PolicyStore() {
      * Bundle server calls this once per rebuild (2 HTTP calls total).
      */
     @api
-    permission[pGateway] getPolicyData() returns PolicyData | active {
+    permission[pAdmin | pGateway] getPolicyData() returns PolicyData | active {
         return PolicyData(
             services = services,
             grants = grants,
