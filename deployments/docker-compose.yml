@@ -4,12 +4,13 @@
 # Architecture:
 #   Envoy AI Gateway (port 8000) — MCP protocol, JWT auth, tool filtering, aggregation
 #   OPA Sidecar (port 9191 gRPC / 8181 HTTP) — ext_authz policy evaluation via Rego
-#   NPL Engine (port 12000) — Policy state manager (OPA self-polls via http.send)
+#   Bundle Server (port 8282) — subscribes to NPL SSE, serves OPA bundle
+#   NPL Engine (port 12000) — Policy state manager (push via SSE to bundle server)
 #   Supergateway sidecars — wrap STDIO MCP tools as Streamable HTTP
 #
 # Network topology:
 #   public-net:  Envoy Gateway, Keycloak (agent-facing)
-#   policy-net:  OPA, NPL Engine (policy checks)
+#   policy-net:  OPA, Bundle Server, NPL Engine (policy checks)
 #   backend-net: Envoy Gateway, supergateway MCP containers (tool execution)
 #   secrets-net: Credential Proxy, Vault (credential injection)
 
@@ -217,12 +218,40 @@ services:
         condition: service_healthy
 
   # ─────────────────────────────────────────────────────────────────────────
+  # OPA Bundle Server (policy-net — serves NPL policy data as OPA bundle)
+  #
+  # Subscribes to NPL Engine SSE /api/streams/states for push notifications.
+  # Rebuilds OPA bundle on every state change. OPA polls bundle every 1-2s.
+  # Zero network I/O during policy evaluation — all data in OPA memory.
+  # ─────────────────────────────────────────────────────────────────────────
+  bundle-server:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.bundle-server
+    ports:
+      - "8282:8282"
+    environment:
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      GATEWAY_USERNAME: "gateway"
+      GATEWAY_PASSWORD: "Welcome123"
+      PORT: "8282"
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - policy-net
+      - public-net  # For Keycloak token requests
+
+  # ─────────────────────────────────────────────────────────────────────────
   # OPA Sidecar (policy-net — ext_authz backend for Envoy)
   #
   # Evaluates Rego policy for every ext_authz request from Envoy.
-  # Self-polls NPL Engine via http.send() with 5s cache TTL.
-  # Fetches gateway token from Keycloak via http.send() with 60s cache TTL.
-  # No separate policy-sync service needed.
+  # Policy data loaded from OPA bundle (served by bundle-server).
+  # Zero network I/O during evaluation — all data in memory.
   # ─────────────────────────────────────────────────────────────────────────
   opa:
     image: openpolicyagent/opa:latest-envoy
@@ -232,28 +261,20 @@ services:
       - "8181:8181"   # HTTP API (debugging, data inspection)
     volumes:
       - ../policies:/policies:ro
+      - ./opa/opa-config.yaml:/config/opa-config.yaml:ro
     command:
       - "run"
       - "--server"
       - "--addr=:8181"
-      - "--set=plugins.envoy_ext_authz_grpc.addr=:9191"
-      - "--set=plugins.envoy_ext_authz_grpc.path=envoy/authz/allow"
-      - "--set=decision_logs.console=true"
+      - "--config-file=/config/opa-config.yaml"
       - "/policies"
-    environment:
-      NPL_URL: "http://npl-engine:12000"
-      KEYCLOAK_URL: "http://keycloak:11000"
-      KEYCLOAK_REALM: "mcpgateway"
-      GATEWAY_USERNAME: "gateway"
-      GATEWAY_PASSWORD: "Welcome123"
     depends_on:
+      bundle-server:
+        condition: service_started
       npl-engine:
-        condition: service_healthy
-      keycloak:
         condition: service_healthy
     networks:
       - policy-net
-      - public-net  # For Keycloak token requests
 
   # ─────────────────────────────────────────────────────────────────────────
   # Envoy AI Gateway (public-net — agent-facing MCP endpoint)

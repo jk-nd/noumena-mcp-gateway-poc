@@ -1,0 +1,19 @@
+services:
+  bundle-server:
+    url: http://bundle-server:8282
+
+bundles:
+  mcp-policy-data:
+    service: bundle-server
+    resource: /bundles/mcp/data.tar.gz
+    polling:
+      min_delay_seconds: 1
+      max_delay_seconds: 2
+
+plugins:
+  envoy_ext_authz_grpc:
+    addr: ":9191"
+    path: envoy/authz/allow
+
+decision_logs:
+  console: true

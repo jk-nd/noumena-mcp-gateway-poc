@@ -1,17 +1,13 @@
 # MCP Gateway Authorization Policy — OPA ext_authz for Envoy AI Gateway
 #
-# Replaces the Kotlin governance service with a single Rego policy.
-# OPA self-polls NPL Engine via http.send() with response caching.
+# Policy data is loaded from OPA bundle (zero network I/O during evaluation).
+# Bundle server subscribes to NPL SSE and rebuilds on every state change.
 #
 # Decision flow:
-#   1. Fetch gateway token from Keycloak (cached 60s)
-#   2. Fetch NPL state via http.send() (cached 5s):
-#      - ServiceRegistry → enabled services
-#      - ToolPolicy instances → enabled tools + suspended state
-#      - UserToolAccess instances → user-to-service-to-tool matrix
-#   3. Decode user JWT from Authorization header
-#   4. Parse JSON-RPC body from Envoy ext_authz input
-#   5. Evaluate allow/deny based on method, service, tool, user
+#   1. Read policy data from bundle (in-memory, ~1ms)
+#   2. Decode user JWT from Authorization header
+#   3. Parse JSON-RPC body from Envoy ext_authz input
+#   4. Evaluate allow/deny based on method, service, tool, user
 #
 # Fail-closed: default allow = false
 
@@ -24,89 +20,20 @@ import rego.v1
 
 default allow := false
 
-# --- Environment configuration ---
-# Passed via OPA --set or env vars in docker-compose
+# --- Policy data from OPA bundle (loaded in background, zero network I/O) ---
+# Bundle server subscribes to NPL SSE and rebuilds on every state change.
 
-npl_url := opa.runtime().env.NPL_URL
+default enabled_services := {}
 
-keycloak_url := opa.runtime().env.KEYCLOAK_URL
+default tool_policies := {}
 
-keycloak_realm := opa.runtime().env.KEYCLOAK_REALM
+default user_access_entries := {}
 
-gateway_username := opa.runtime().env.GATEWAY_USERNAME
+enabled_services := data.enabled_services
 
-gateway_password := opa.runtime().env.GATEWAY_PASSWORD
+tool_policies := data.tool_policies
 
-# --- Gateway token from Keycloak (cached 60s) ---
-
-gateway_token := token if {
-	token_response := http.send({
-		"method": "POST",
-		"url": sprintf("%s/realms/%s/protocol/openid-connect/token", [keycloak_url, keycloak_realm]),
-		"headers": {"Content-Type": "application/x-www-form-urlencoded"},
-		"raw_body": sprintf(
-			"grant_type=password&client_id=mcpgateway&username=%s&password=%s",
-			[gateway_username, gateway_password],
-		),
-		"force_cache": true,
-		"force_cache_duration_seconds": 60,
-	})
-	token_response.status_code == 200
-	token := token_response.body.access_token
-}
-
-# --- NPL data fetches (cached 5s) ---
-
-npl_auth_header := sprintf("Bearer %s", [gateway_token])
-
-# ServiceRegistry: list all instances, extract enabledServices from the first one
-npl_service_registry_response := http.send({
-	"method": "GET",
-	"url": sprintf("%s/npl/registry/ServiceRegistry/", [npl_url]),
-	"headers": {"Authorization": npl_auth_header},
-	"force_cache": true,
-	"force_cache_duration_seconds": 5,
-})
-
-enabled_services[svc] if {
-	npl_service_registry_response.status_code == 200
-	some item in npl_service_registry_response.body.items
-	some svc in item.enabledServices
-}
-
-# ToolPolicy: list all instances, then fetch enabledTools via action endpoint
-# The list response includes @id, policyServiceName, @state but NOT enabledTools (private var)
-npl_tool_policy_response := http.send({
-	"method": "GET",
-	"url": sprintf("%s/npl/services/ToolPolicy/", [npl_url]),
-	"headers": {"Authorization": npl_auth_header},
-	"force_cache": true,
-	"force_cache_duration_seconds": 5,
-})
-
-# Map: service name → ToolPolicy enriched with enabledTools from action call
-tool_policies[service_name] := policy if {
-	npl_tool_policy_response.status_code == 200
-	some item in npl_tool_policy_response.body.items
-	service_name := item.policyServiceName
-
-	# Fetch enabledTools via POST action endpoint (cached 5s)
-	tools_response := http.send({
-		"method": "POST",
-		"url": sprintf("%s/npl/services/ToolPolicy/%s/getEnabledTools", [npl_url, item["@id"]]),
-		"headers": {"Authorization": npl_auth_header, "Content-Type": "application/json"},
-		"raw_body": "{}",
-		"force_cache": true,
-		"force_cache_duration_seconds": 5,
-	})
-	tools_response.status_code == 200
-
-	policy := {
-		"@state": item["@state"],
-		"policyServiceName": service_name,
-		"enabledTools": tools_response.body,
-	}
-}
+user_access_entries := data.user_access_entries
 
 # Check if a service's policy is in "active" state (not suspended)
 service_policy_active(service_name) if {
@@ -124,39 +51,6 @@ tool_enabled(service_name, tool_name) if {
 	policy := tool_policies[service_name]
 	some tool in policy.enabledTools
 	tool == tool_name
-}
-
-# UserToolAccess: list all instances, then fetch serviceAccess via action endpoint
-# The list response includes @id, userId but NOT serviceAccess (private var)
-npl_user_access_response := http.send({
-	"method": "GET",
-	"url": sprintf("%s/npl/users/UserToolAccess/", [npl_url]),
-	"headers": {"Authorization": npl_auth_header},
-	"force_cache": true,
-	"force_cache_duration_seconds": 5,
-})
-
-# Map: userId → UserToolAccess enriched with serviceAccess from action call
-user_access_entries[uid] := entry if {
-	npl_user_access_response.status_code == 200
-	some item in npl_user_access_response.body.items
-	uid := item.userId
-
-	# Fetch serviceAccess via POST action endpoint (cached 5s)
-	access_response := http.send({
-		"method": "POST",
-		"url": sprintf("%s/npl/users/UserToolAccess/%s/getAccessList", [npl_url, item["@id"]]),
-		"headers": {"Authorization": npl_auth_header, "Content-Type": "application/json"},
-		"raw_body": "{}",
-		"force_cache": true,
-		"force_cache_duration_seconds": 5,
-	})
-	access_response.status_code == 200
-
-	entry := {
-		"userId": uid,
-		"serviceAccess": access_response.body,
-	}
 }
 
 # Check if user has access to a specific service+tool

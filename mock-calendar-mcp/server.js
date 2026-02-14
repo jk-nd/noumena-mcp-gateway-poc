@@ -198,7 +198,7 @@ function handleToolCall(params) {
   switch (name) {
     case 'list_events': {
       const date = args?.date || '2026-02-13';
-      const events = MOCK_EVENTS.filter((e) => e.start.startsWith(date));
+      const events = MOCK_EVENTS.filter((e) => e.start && e.start.startsWith(date));
       return {
         content: [
           {

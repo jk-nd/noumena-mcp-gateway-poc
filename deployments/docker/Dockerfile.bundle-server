@@ -1,0 +1,14 @@
+# OPA Bundle Server — serves NPL policy data as OPA bundle via SSE subscription
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY bundle-server/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY bundle-server/ .
+
+EXPOSE 8282
+
+CMD ["python", "server.py"]
