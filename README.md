@@ -1,6 +1,6 @@
 # Noumena MCP Gateway
 
-An MCP (Model Context Protocol) gateway that enables AI agents and users to securely access upstream MCP services through Envoy-based routing, OPA policy evaluation with cached NPL state, JWT authentication, and credential injection.
+An MCP (Model Context Protocol) gateway that enables AI agents and users to securely access upstream MCP services through Envoy-based routing, OPA policy evaluation with NPL-backed bundles, JWT authentication, and credential injection.
 
 ## Architecture
 
@@ -24,18 +24,18 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
                    └─────┬─────┘ │  │ │DuckDuck │ │GitHub ││
                          │       │  │ │Go  MCP  │ │ MCP   ││...
                    ┌─────┴─────┐ │  │ └─────────┘ └───────┘│
-                   │NPL Engine │ │  └──────────────────────┘
-                   │(State Mgr)│ │
-                   └───────────┘ │ secrets-net
-                                 │
-                          ┌──────┴──────┐
-                          │ Credential  │
-                          │   Proxy     │
-                          └──────┬──────┘
-                          ┌──────┴──────┐
-                          │    Vault    │
-                          │  (secrets)  │
-                          └─────────────┘
+                   │  Bundle   │ │  └──────────────────────┘
+                   │  Server   │ │
+                   └─────┬─────┘ │ secrets-net
+                         │       │
+                   ┌─────┴─────┐ ┌──────┴──────┐
+                   │NPL Engine │ │ Credential  │
+                   │(PolicyStore)│ │   Proxy     │
+                   └───────────┘ └──────┬──────┘
+                                 ┌──────┴──────┐
+                                 │    Vault    │
+                                 │  (secrets)  │
+                                 └─────────────┘
 ```
 
 **Four-tier network isolation**: Agents can only reach Envoy and Keycloak (public-net). OPA and NPL Engine are on policy-net. Vault and Credential Proxy are on secrets-net. Backend MCP services (supergateway sidecars) are on backend-net.
@@ -45,8 +45,9 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
 | Component | Role |
 |-----------|------|
 | **Envoy AI Gateway** | MCP protocol handling, JWT validation (Keycloak JWKS), routing to backends, SSE streaming |
-| **OPA Sidecar** | ext_authz policy evaluation via Rego; self-polls NPL for state (cached 5s) |
-| **NPL Engine** | Policy state manager: ServiceRegistry, ToolPolicy, UserToolAccess (admin mutations via TUI/API) |
+| **OPA Sidecar** | ext_authz policy evaluation via Rego; loads policy data from OPA bundles (in-memory, zero network I/O) |
+| **NPL Engine** | Policy state manager: unified PolicyStore singleton (catalog + grants + contextual routing) |
+| **Bundle Server** | Reads NPL PolicyStore, serves OPA bundles; SSE-triggered rebuild on NPL mutations |
 | **Supergateway Sidecars** | Wrap STDIO MCP tools as Streamable HTTP endpoints |
 | **Mock Calendar MCP** | HTTP-native MCP server for bilateral streaming tests (SSE notifications) |
 | **Keycloak** | OIDC authentication provider with user/role management |
@@ -85,12 +86,12 @@ Log in with admin credentials (`admin` / `Welcome123`).
 
 The TUI guides you through:
 
-1. **NPL Bootstrap** -- Creates protocol instances (ServiceRegistry, UserRegistry)
+1. **NPL Bootstrap** -- Creates the PolicyStore singleton
 2. **Add a service** -- e.g., Quick Start > DuckDuckGo, or search Docker Hub
-3. **Enable the service** -- Activates it in NPL ServiceRegistry
-4. **Enable tools** -- Select which tools to activate in NPL ToolPolicy
+3. **Enable the service** -- Activates it in the PolicyStore catalog
+4. **Enable tools** -- Select which tools to activate in the PolicyStore catalog
 5. **Register users** -- Add Keycloak users for gateway access
-6. **Grant tool access** -- Assign tools to users via NPL UserToolAccess
+6. **Grant tool access** -- Assign per-user tool grants in the PolicyStore
 7. **Set up credentials** (optional) -- Store API keys in Vault via TUI
 
 ### 4. Connect with MCP Inspector
@@ -135,23 +136,22 @@ Envoy routes GET /mcp with `timeout: 0s` (never timeout) so notification streams
 
 ## OPA Policy Authorization
 
-Every MCP request passes through Envoy's `ext_authz` filter, which calls OPA via gRPC. OPA evaluates a Rego policy (`policies/mcp_authz.rego`) that fetches NPL state via `http.send()` with response caching.
+Every MCP request passes through Envoy's `ext_authz` filter, which calls OPA via gRPC. OPA evaluates a Rego policy (`policies/mcp_authz.rego`) using in-memory bundle data — zero network I/O in the request path.
 
 ### How It Works
 
 ```
+NPL PolicyStore ──SSE──► Bundle Server ──bundle──► OPA (in-memory data)
+
 Envoy (port 8000)
   │ ext_authz (gRPC)
   ▼
 OPA Sidecar (port 9191 gRPC / 8181 HTTP)
-  ├─ Fast path: Rego rules + cached NPL data via http.send() (~0.1ms from cache)
-  │   Cache refreshes every 5s — OPA polls NPL directly, no sync service needed
-  │
-  └─ Slow path: http.send() → NPL Engine (uncached, ~50ms)
-      Only for first request or after cache expires
+  └─ Layer 1: Rego rules + in-memory bundle data (~11ms avg E2E)
+     Zero network I/O. Bundle rebuilt on NPL mutation via SSE push.
 ```
 
-**Only two components in the policy chain: OPA + NPL. No governance service. No policy-sync service.**
+**Three components in the policy chain: OPA + Bundle Server + NPL. Bundle server bridges NPL state into OPA bundles. No polling, no cache expiry — SSE push on every mutation.**
 
 ### Authorization Flow
 
@@ -161,14 +161,12 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 3. Envoy → OPA              ext_authz (gRPC): forwards JSON-RPC body + headers
 4. OPA                      Decodes JWT: userId=jarvis@acme.com
 5. OPA                      Parses JSON-RPC: method=tools/call, tool=duckduckgo.search
-6. OPA                      Fetches NPL data via http.send() (cached 5s):
-                              - ServiceRegistry → enabled services
-                              - ToolPolicy → enabled tools per service
-                              - UserToolAccess → user-to-service-to-tool matrix
-7. OPA                      Evaluates: service enabled? tool enabled? user has access?
-8. OPA → Envoy              allow or deny
-9. Envoy → Backend MCP      Routes to supergateway sidecar (if allowed)
-10. Backend → Envoy → Agent SSE response streamed back
+6. OPA                      Evaluates against in-memory bundle data:
+                              - catalog: service enabled? tool enabled? not suspended?
+                              - grants: user has access to this tool?
+7. OPA → Envoy              allow or deny (with X-OPA-Reason header)
+8. Envoy → Backend MCP      Routes to supergateway sidecar (if allowed)
+9. Backend → Envoy → Agent  SSE response streamed back
 ```
 
 ### Policy Rules
@@ -176,31 +174,27 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 | Request Type | Rule |
 |-------------|------|
 | `initialize`, `tools/list`, `ping`, `notifications/*` | Always allowed (non-tool methods) |
-| `GET /mcp` (stream setup) | Allowed if user has any tool access |
-| `tools/call` | Service must be enabled, tool must be enabled, user must have access |
+| `GET /mcp` (stream setup) | Allowed if user has any tool grants |
+| `tools/call` | Service enabled + not suspended, tool enabled, user granted access |
 | Missing JWT or unknown user | Denied |
-| NPL unavailable (cache expired) | Denied (fail-closed) |
 
-### Cache Behavior
+### Bundle Propagation
 
-- **NPL data**: cached 5s — OPA polls NPL on next request after expiry
-- **Keycloak gateway token**: cached 60s
-- **On NPL unavailable**: serves stale cache until TTL expires, then fail-closed
-- **Admin mutations propagate**: disable a tool in NPL → within 5s, OPA reflects the change
+- **NPL mutation** (e.g., admin disables a tool) → SSE event → bundle server rebuilds → OPA reloads
+- **Propagation latency**: near-instant (SSE push, not polling)
+- **No cold calls**: OPA always has data in memory after first bundle load
 
-### NPL Protocol Hierarchy
+### PolicyStore (Unified NPL Singleton)
 
 ```
-ServiceRegistry              Which services are enabled org-wide
-    |
-ToolPolicy (per service)     Which tools are enabled per service
-    |
-UserRegistry                 Which users/agents are registered
-    |
-UserToolAccess (per user)    Which tools each user can access
-    |
-CredentialInjectionPolicy    Which credentials to inject per request
+PolicyStore                     Single protocol, single instance
+  ├── Catalog                   Services + enabled tools (org-wide)
+  ├── Grants                    Per-user tool access (wildcard or specific)
+  ├── Revoked Subjects          Emergency kill switch
+  └── Contextual Routes         Layer 2 policy routing table (Phase 3)
 ```
+
+All policy state is managed through the PolicyStore singleton. Bundle server reads everything in 2 HTTP calls (list singleton + `getPolicyData()`), regardless of user/service count.
 
 ## Credential Injection
 
@@ -244,7 +238,7 @@ cd tui && npm start
 
 All TUI operations that modify state follow the **NPL-first** pattern:
 
-1. Changes are written to NPL (source of truth) first
+1. Changes are written to NPL PolicyStore (source of truth) first
 2. On success, `services.yaml` is updated as a persistent cache
 3. If the NPL write fails, `services.yaml` is unchanged
 
@@ -254,7 +248,7 @@ All TUI operations that modify state follow the **NPL-first** pattern:
 
 ### services.yaml (Bootstrap Only)
 
-Defines upstream MCP services and their tools. Used by the TUI for service management and as a persistent cache of NPL state. **Not read at runtime** — OPA fetches all policy data directly from NPL.
+Defines upstream MCP services and their tools. Used by the TUI for service management and as a persistent cache of NPL state. **Not read at runtime** — OPA loads policy data from bundles built by the bundle server.
 
 ```yaml
 services:
@@ -300,7 +294,7 @@ service_defaults:
 
 ### Environment Variables
 
-#### OPA Sidecar
+#### Bundle Server
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -309,6 +303,7 @@ service_defaults:
 | `KEYCLOAK_REALM` | `mcpgateway` | Keycloak realm |
 | `GATEWAY_USERNAME` | `gateway` | Service account for NPL calls |
 | `GATEWAY_PASSWORD` | `Welcome123` | Service account password |
+| `BUNDLE_PORT` | `8282` | Bundle server HTTP port |
 
 #### Credential Proxy
 
@@ -324,8 +319,11 @@ service_defaults:
 ```
 noumena-mcp-gateway/
 ├── policies/              # OPA Rego policies (ext_authz)
-│   ├── mcp_authz.rego     # Authorization policy: JWT decode, JSON-RPC parse, NPL data fetch, RBAC
+│   ├── mcp_authz.rego     # Authorization policy: JWT decode, JSON-RPC parse, bundle data RBAC
 │   └── mcp_authz_test.rego # Rego unit tests (opa test policies/ -v)
+│
+├── bundle-server/          # OPA bundle server (Python)
+│   └── server.py           # Reads NPL PolicyStore, serves OPA bundles, SSE-triggered rebuild
 │
 ├── credential-proxy/       # Credential injection service (Kotlin/Ktor)
 │   └── src/main/kotlin/    # VaultClient, CredentialSelector
@@ -335,9 +333,7 @@ noumena-mcp-gateway/
 │
 ├── npl/                    # NPL protocol definitions
 │   └── src/main/npl-1.0/
-│       ├── registry/       # ServiceRegistry
-│       ├── services/       # ToolPolicy
-│       ├── users/          # UserRegistry, UserToolAccess
+│       ├── policy/         # PolicyStore (unified catalog + grants + routing)
 │       └── policies/       # CredentialInjectionPolicy
 │
 ├── tui/                    # Gateway Wizard (interactive CLI)
@@ -363,7 +359,7 @@ noumena-mcp-gateway/
 │
 ├── keycloak/               # Custom Keycloak image
 ├── keycloak-provisioning/  # Terraform for Keycloak setup
-├── integration-tests/      # Integration test suite
+├── integration-tests/      # Integration test suite (JUnit5: NPL + E2E)
 └── docs/                   # Documentation
 ```
 
@@ -379,10 +375,21 @@ opa test policies/ -v
 
 ## Testing
 
-> **Warning:** The integration test suite has not been updated to reflect the OPA refactoring. Integration and E2E tests will likely fail. Test update is pending.
+### Integration Tests (JUnit5)
 
 ```bash
-# Manual verification (requires Docker stack running)
+# Requires Docker stack running (docker compose up -d)
+cd integration-tests
+./gradlew test
+```
+
+The test suite covers:
+- **NPL Tests** (16 tests): PolicyStore CRUD — register/enable services, enable tools, grant/revoke access, suspend/resume, contextual routes, getPolicyData
+- **E2E Tests** (11 tests): Full pipeline through Envoy → OPA → backend — initialize, tools/list, tools/call allow/deny, dynamic grant-revoke pipeline, suspended service denial
+
+### Manual Verification
+
+```bash
 # 1. Get a token
 TOKEN=$(curl -sf -X POST 'http://localhost:11000/realms/mcpgateway/protocol/openid-connect/token' \
   -d 'grant_type=password&client_id=mcpgateway&username=jarvis&password=Welcome123' \
@@ -393,11 +400,9 @@ curl -X POST 'http://localhost:8000/mcp' \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"duckduckgo.search","arguments":{"query":"hello"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_events","arguments":{"date":"2026-02-14"}}}'
 
-# 3. Test denial (user without access should get 403)
-
-# 4. Inspect OPA data (debugging)
+# 3. Inspect OPA bundle data
 curl http://localhost:8181/v1/data
 ```
 
@@ -405,12 +410,8 @@ curl http://localhost:8181/v1/data
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/ARCHITECTURE_V2.md) | Full architecture: Envoy gateway, OPA policy, NPL state management |
+| [Policy Architecture v3](docs/POLICY_ARCHITECTURE_V3.md) | Two-layer architecture: OPA bundles (Layer 1) + contextual NPL evaluation (Layer 2) |
 | [Credential Injection](docs/CREDENTIAL_INJECTION.md) | Credential injection system design and Vault integration |
-| [User Access Control](docs/USER_ACCESS_CONTROL.md) | Per-user/agent tool access control via NPL |
-| [NPL as Source of Truth](docs/NPL_AS_SOURCE_OF_TRUTH.md) | NPL as runtime source of truth for policies |
-| [Declarative NPL Sync](docs/DECLARATIVE_NPL_SYNC.md) | YAML-to-NPL declarative sync model |
-| [NPL Party Strategy](docs/NPL_PARTY_ASSIGNMENT_STRATEGY.md) | Party assignment strategy across protocols |
 | [TUI Credential Management](docs/TUI_CREDENTIAL_MANAGEMENT.md) | Credential management via TUI |
 | [TUI Add Service Guide](docs/TUI_ADD_SERVICE_GUIDE.md) | Adding MCP services via TUI |
 | [CIQ Offer Scope](docs/CIQ_OFFER_SCOPE.md) | Phase 1/Phase 2 architecture for CIQ deployment |

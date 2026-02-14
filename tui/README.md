@@ -141,21 +141,21 @@ tui/
 
 All TUI operations follow the **NPL-first** pattern: NPL (source of truth) is written first, then `services.yaml` is updated as a persistent cache. If the NPL write fails, `services.yaml` remains unchanged.
 
+> **Note**: The TUI currently references the old 3-layer NPL protocol model (ServiceRegistry, ToolPolicy, UserToolAccess). The backend has been migrated to a unified **PolicyStore** singleton. TUI code needs updating to call PolicyStore endpoints instead. The policy enforcement chain (OPA + bundle server) works correctly regardless.
+
 When you enable a service:
-- Service is registered in NPL ServiceRegistry
-- A per-service ToolPolicy instance is created (if it doesn't already exist)
-- Enabled tools are added to the ToolPolicy's allowed set
+- Service is registered and enabled in the PolicyStore catalog
+- Enabled tools are added to the PolicyStore catalog
 
 When you disable a service:
-- Service is removed from NPL ServiceRegistry
+- Service is disabled in the PolicyStore catalog
 - Requests to that service will be denied by policy
 
 When you manage users:
-- Users are registered/deregistered in NPL UserRegistry
-- Tool access is granted/revoked via NPL UserToolAccess
+- Tool access is granted/revoked via PolicyStore grants
 - Changes are synced to Keycloak for authentication
 
-Tool-level enabling syncs with ToolPolicy -- only explicitly enabled tools pass the policy check.
+Tool-level enabling syncs with the PolicyStore catalog — only explicitly enabled tools pass the policy check.
 
 ## Container Management
 

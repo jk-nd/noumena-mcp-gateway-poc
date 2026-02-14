@@ -2,9 +2,11 @@
 
 ## Status
 
-**Draft** — Design discussion captured 2026-02-14.
+**Implemented** (Phases 1-2) — Design captured 2026-02-14, implemented 2026-02-14.
 
-This document captures the design direction for refactoring the NPL policy model and OPA integration. The current 3-layer model works but was shaped by TUI screens rather than access control best practices. With the addition of contextual evaluation (layer 4), now is the right time to redesign for the cleanest, most scalable abstractions.
+Phases 1-2 are complete: bundle server with SSE push + PolicyStore singleton replacing the old 3-layer model. Phase 3 (contextual evaluation) infrastructure is in place (routing table in PolicyStore, Rego router ready) but no concrete contextual policy protocols have been implemented yet. Phase 4 (decision audit trail) is not yet started.
+
+**Implementation notes**: The original design proposed two protocols (ToolCatalog + AccessGrant). The actual implementation consolidated further into a single **PolicyStore** singleton that holds catalog, grants, revoked subjects, and contextual routing in one protocol. Bundle server reads everything in 2 HTTP calls (list singleton + `getPolicyData()`), constant time regardless of user/service count.
 
 ---
 
@@ -30,7 +32,7 @@ OPA fetches NPL state via `http.send()` with a 5-second response cache. Three NP
 | ToolPolicy | `/npl/services/ToolPolicy/` | Per-service tool enable/disable | pAdmin writes, pGateway reads |
 | UserToolAccess | `/npl/users/UserToolAccess/` | Per-user tool grants | pAdmin writes, pGateway reads |
 
-### Measured performance (2026-02-14)
+### Measured performance (v2, before redesign)
 
 | Path | Steady state (cached) | Cold (cache miss) |
 |------|----------------------|-------------------|
@@ -39,7 +41,21 @@ OPA fetches NPL state via `http.send()` with a 5-second response cache. Three NP
 | Full tool call (Envoy + OPA + backend) | 15-20 ms | 110-150 ms |
 | NPL direct action call | 44-80 ms | — |
 
-The 110ms cold call happens once every 5 seconds when the OPA cache expires. Under continuous traffic, the cache is always warm and the governance overhead is ~10-15ms per request.
+The 110ms cold call happened every 5 seconds when the OPA cache expired.
+
+### Measured performance (v3, after redesign — bundle-based)
+
+| Path | Avg | Min | Max |
+|------|-----|-----|-----|
+| E2E tool call ALLOW (Envoy → OPA → backend) | 11 ms | 7 ms | 23 ms |
+| E2E tool call DENY (Envoy → OPA short-circuit) | 7 ms | 4 ms | 13 ms |
+| E2E no-auth (Envoy JWT reject) | 2 ms | 1 ms | 4 ms |
+| OPA direct ALLOW (no Envoy) | 11 ms | 7 ms | 25 ms |
+| OPA direct DENY (no Envoy) | 6 ms | 4 ms | 12 ms |
+| NPL getPolicyData | 10 ms | 7 ms | 15 ms |
+| Bundle download | 1 ms | 1 ms | 2 ms |
+
+**No cold calls.** OPA always has data in memory. Bundle rebuilds are SSE-triggered (near-instant propagation).
 
 ### What's wrong with the current model
 
@@ -53,7 +69,7 @@ The 110ms cold call happens once every 5 seconds when the OPA cache expires. Und
 
 ---
 
-## Proposed Architecture (v3)
+## Architecture (v3) — Implemented
 
 ### Design principles
 
@@ -100,13 +116,13 @@ The 110ms cold call happens once every 5 seconds when the OPA cache expires. Und
 
 ---
 
-## Layer 1: Static Access Control (Redesigned)
+## Layer 1: Static Access Control (Implemented)
 
-### Current model (3 protocols) → Proposed model (2 protocols)
+### Original design: 2 protocols → Actual implementation: 1 singleton
 
-The current three protocols collapse into two cleaner abstractions:
+The original design below proposed two protocols (ToolCatalog + AccessGrant). The actual implementation went further and consolidated into a **single PolicyStore singleton** (see `npl/src/main/npl-1.0/policy/policy_store.npl`). The PolicyStore holds catalog, grants, revoked subjects, and contextual routing in one protocol with 2 parties (pAdmin, pGateway). The bundle shape (catalog/grants/contextual_routing) is the same as proposed.
 
-#### ToolCatalog (replaces ServiceRegistry + ToolPolicy)
+#### ToolCatalog (original design — merged into PolicyStore)
 
 Defines what exists and what's enabled. This is the **resource side** of access control.
 
@@ -139,7 +155,7 @@ protocol[pAdmin, pGateway] ToolCatalog() {
 
 One protocol, one instance, one bundle endpoint. Combines the org-level enable/disable (ServiceRegistry) with per-service tool management (ToolPolicy) because they're the same administrative concern: "what tools are available in this organization?"
 
-#### AccessGrant (replaces UserToolAccess)
+#### AccessGrant (original design — merged into PolicyStore)
 
 Defines who can use what. This is the **subject-resource binding**.
 
@@ -497,9 +513,9 @@ The Rego is a **generic router**. It reads the routing table from the bundle, ca
 
 ---
 
-## OPA Integration: From Polling to Bundles
+## OPA Integration: From Polling to Bundles (Implemented)
 
-### Current: `http.send` with response cache
+### Previous: `http.send` with response cache
 
 ```
 Every request:
@@ -511,7 +527,7 @@ Every request:
 
 Problems: network I/O during evaluation, 5s staleness window, 110ms cold-call penalty.
 
-### Proposed: OPA bundle API
+### Implemented: OPA bundle API
 
 ```
 Background (decoupled from requests):
@@ -524,20 +540,17 @@ Every request:
   Layer 2 (if triggered): one http.send to NPL evaluate() (~60ms)
 ```
 
-### Bundle server
+### Bundle server (Implemented)
 
-A lightweight HTTP endpoint (could be an NPL controller, a sidecar, or a standalone service) that:
+A Python HTTP service (`bundle-server/server.py`) that:
 
-1. On `GET /opa/bundle`:
-   - Calls `ToolCatalog.getCatalog()`
-   - Calls `AccessGrant.getGrants()` for all instances
-   - Calls contextual policy `getRules()` for all instances
-   - Packages as JSON, returns with `ETag` header
-2. On subsequent requests with `If-None-Match`:
-   - Returns `304 Not Modified` if nothing changed (OPA skips reload)
-   - Returns new bundle if NPL state mutated
+1. Subscribes to NPL's SSE event stream for real-time mutation notifications
+2. On SSE event (or startup): calls `PolicyStore.getPolicyData()` (2 HTTP calls total)
+3. Builds an OPA bundle (tar.gz with `data.json` + `.manifest`)
+4. Serves at `GET /bundles/mcp/data.tar.gz` with `ETag` header
+5. OPA polls the bundle endpoint; `304 Not Modified` if nothing changed
 
-OPA supports long-polling: the bundle server holds the connection until data changes, then responds immediately. Policy changes propagate in milliseconds.
+Policy changes propagate near-instantly: NPL mutation → SSE event → bundle rebuild → OPA reload.
 
 ---
 
@@ -582,19 +595,19 @@ This is the credit card model: approve fast (OPA cache), verify after (NPL autho
 
 ## Migration Path
 
-### Phase 1: Bundle API (no protocol changes)
+### Phase 1: Bundle API (no protocol changes) — DONE
 
-Keep the current 3 NPL protocols. Build a bundle server that reads them and serves to OPA. Change OPA config from `http.send` to bundle polling. This eliminates the 110ms cold call and the 5s staleness window without any NPL refactoring.
+Built bundle server with SSE push. Replaced `http.send` polling with OPA bundles. Eliminated 110ms cold calls and 5s staleness window. The original 3 NPL protocols were used initially.
 
-### Phase 2: Protocol refactor
+### Phase 2: Protocol refactor — DONE
 
-Replace ServiceRegistry + ToolPolicy with ToolCatalog. Rename UserToolAccess to AccessGrant. Update TUI to match. Update bundle server. OPA Rego changes are minimal (different data paths in bundle JSON).
+Replaced all 4 NPL protocols (ServiceRegistry, ToolPolicy, UserToolAccess, UserRegistry) with a single **PolicyStore** singleton. Bundle server reads everything in 2 HTTP calls. The original design proposed ToolCatalog + AccessGrant (2 protocols), but implementation consolidated into PolicyStore (1 protocol). Rego updated to use `catalog`/`grants` data paths. Integration tests fully rewritten (27 tests passing).
 
-### Phase 3: Contextual evaluation
+### Phase 3: Contextual evaluation — INFRASTRUCTURE READY
 
-Implement the `evaluate()` interface. Build the first contextual policy protocol (PiiGuardPolicy or ApprovalPolicy). Add contextual routing to the bundle. Extend OPA Rego with the generic router.
+The routing table is in PolicyStore (`contextualRoutes`). Admin can register/remove routes via `registerRoute()`/`removeRoute()`. Routes flow into the bundle as `contextual_routing`. The Rego Layer 2 router structure is ready. **No concrete contextual policy protocols have been implemented yet** (PiiGuardPolicy, ApprovalPolicy, BudgetPolicy are designs only).
 
-### Phase 4: Decision audit trail
+### Phase 4: Decision audit trail — NOT STARTED
 
 Enable OPA decision logs. Build the NPL audit ingestion endpoint. Wire up the TUI dashboard.
 
@@ -606,19 +619,21 @@ Enable OPA decision logs. Build the NPL audit ingestion endpoint. Wire up the TU
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        NPL (single source of truth)                   │
 │                                                                       │
-│  ToolCatalog          AccessGrant         ContextualPolicy*           │
-│  (what exists)        (who can use it)    (when/how to evaluate)      │
+│  PolicyStore (singleton)                  ContextualPolicy* (future)  │
+│  ├── Catalog (what exists)                                            │
+│  ├── Grants (who can use it)              * PiiGuardPolicy,           │
+│  ├── Revoked Subjects (emergency kill)      ApprovalPolicy,           │
+│  └── Contextual Routes (Layer 2 routing)    BudgetPolicy, ...         │
 │                                                                       │
-│  * PiiGuardPolicy, ApprovalPolicy, BudgetPolicy, ...                  │
-│    Each is a custom NPL protocol implementing evaluate()              │
 └───────────────┬───────────────────────────────┬──────────────────────┘
-                │ bundle (background sync)       │ http.send (on-demand)
+                │ bundle (SSE-triggered rebuild)  │ http.send (on-demand)
                 v                                v
 ┌──────────────────────────────────┐  ┌──────────────────────────────┐
 │  OPA Layer 1: Static Access       │  │  OPA Layer 2: Contextual     │
 │  In-memory data lookups           │  │  Calls NPL evaluate()        │
-│  ~1-2ms, zero network I/O        │  │  ~60ms, only when triggered   │
-│  99% of requests resolve here     │  │  1% of requests need this    │
+│  ~11ms E2E, zero network I/O     │  │  ~60ms, only when triggered   │
+│  99% of requests resolve here     │  │  Infrastructure ready,        │
+│  ✅ IMPLEMENTED                   │  │  no concrete policies yet     │
 └──────────────────────────────────┘  └──────────────────────────────┘
                 │                                │
                 └────────── single decision ─────┘
