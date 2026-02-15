@@ -10,6 +10,7 @@ package policies
  * @param verb         Classified verb (e.g., "create", "delete")
  * @param labels       Comma-separated resolved labels (e.g., "scope:external,category:communication")
  * @param argumentDigest  SHA-256 of tool arguments (for matching retries)
+ * @param approvers    Comma-separated required approver roles/identities (empty = anyone)
  * @param status       "pending" | "approved" | "denied"
  * @param reason       Denial reason (empty if approved/pending)
  * @param decidedBy    Identity of approver/denier (empty if pending)
@@ -22,6 +23,7 @@ struct PendingApproval {
     verb: Text,
     labels: Text,
     argumentDigest: Text,
+    approvers: List<Text>,
     status: Text,
     reason: Text,
     decidedBy: Text
@@ -36,6 +38,10 @@ struct PendingApproval {
  *   3. First call: creates pending approval, returns "pending:<id>"
  *   4. Human approves/denies via approve()/deny()
  *   5. Agent retries → evaluate() finds approved record → returns "allow"
+ *
+ * Scoped approvals: the security policy rule specifies who can approve
+ * (e.g., "compliance,legal"). Only matching approver identities can act.
+ * Empty approvers = anyone with the pApprover role can approve.
  *
  * Approvals are one-time: consumed after returning "allow" or "deny" to
  * prevent replay. The same (user, tool, arguments) combination always
@@ -71,6 +77,7 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
      * @param labels          Comma-separated labels (scope:external,data:pii)
      * @param annotations     Comma-separated active hints (destructiveHint,openWorldHint)
      * @param argumentDigest  SHA-256 of tool arguments (for matching retries)
+     * @param approvers       Comma-separated required approver roles/identities (empty = anyone)
      */
     @api
     permission[pGateway] evaluate(
@@ -80,7 +87,8 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
         verb: Text,
         labels: Text,
         annotations: Text,
-        argumentDigest: Text
+        argumentDigest: Text,
+        approvers: List<Text>
     ) returns Text | active {
         var lookupKey = callerIdentity + ":" + toolName + ":" + argumentDigest;
 
@@ -121,6 +129,7 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             verb = verb,
             labels = labels,
             argumentDigest = argumentDigest,
+            approvers = approvers,
             status = "pending",
             reason = "",
             decidedBy = ""
@@ -128,7 +137,7 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
 
         approvals = approvals.with(pending);
 
-        info("[ApprovalPolicy] Pending approval " + approvalId + " for " + callerIdentity + " -> " + toolName + " [" + verb + "] labels=[" + labels + "]");
+        info("[ApprovalPolicy] Pending approval " + approvalId + " for " + callerIdentity + " -> " + toolName + " [" + verb + "] approvers=" + approvers.size().toText());
 
         return "pending:" + approvalId;
     };
@@ -140,11 +149,16 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
     /**
      * Approve a pending tool call request.
      *
-     * @param approvalId  ID of the pending approval (e.g., "APR-1")
+     * Scoped: if the approval has required approvers, the approverIdentity
+     * must be listed. Empty approvers = anyone can approve.
+     * Admin can always approve regardless of scope.
+     *
+     * @param approvalId        ID of the pending approval (e.g., "APR-1")
+     * @param approverIdentity  Identity of the person approving
      * @return "approved"
      */
     @api
-    permission[pApprover | pAdmin] approve(approvalId: Text) returns Text | active {
+    permission[pApprover | pAdmin] approve(approvalId: Text, approverIdentity: Text) returns Text | active {
         var maybeApproval = approvals.findFirstOrNone(
             function(a: PendingApproval) -> a.approvalId == approvalId
         );
@@ -152,6 +166,15 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
 
         var existing = maybeApproval.getOrFail();
         require(existing.status == "pending", "Approval is not pending");
+
+        // Scope check: if approvers are specified, caller must be listed
+        // Empty approvers means anyone can approve
+        if (existing.approvers.size() > 0) {
+            var matched = existing.approvers.filter(
+                function(a: Text) -> a == approverIdentity
+            );
+            require(matched.size() > 0, "Not authorized to approve");
+        };
 
         var updated = PendingApproval(
             approvalId = existing.approvalId,
@@ -161,14 +184,15 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             verb = existing.verb,
             labels = existing.labels,
             argumentDigest = existing.argumentDigest,
+            approvers = existing.approvers,
             status = "approved",
             reason = "",
-            decidedBy = ""
+            decidedBy = approverIdentity
         );
 
         approvals = approvals.without(existing).with(updated);
 
-        info("[ApprovalPolicy] Approved " + approvalId + " for " + existing.callerIdentity + " -> " + existing.toolName);
+        info("[ApprovalPolicy] Approved " + approvalId + " by " + approverIdentity + " for " + existing.callerIdentity + " -> " + existing.toolName);
 
         return "approved";
     };
@@ -176,12 +200,15 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
     /**
      * Deny a pending tool call request.
      *
-     * @param approvalId  ID of the pending approval
-     * @param reason      Human-readable reason for denial
+     * Scoped: same rules as approve().
+     *
+     * @param approvalId        ID of the pending approval
+     * @param approverIdentity  Identity of the person denying
+     * @param reason            Human-readable reason for denial
      * @return "denied"
      */
     @api
-    permission[pApprover | pAdmin] deny(approvalId: Text, reason: Text) returns Text | active {
+    permission[pApprover | pAdmin] deny(approvalId: Text, approverIdentity: Text, reason: Text) returns Text | active {
         var maybeApproval = approvals.findFirstOrNone(
             function(a: PendingApproval) -> a.approvalId == approvalId
         );
@@ -189,6 +216,14 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
 
         var existing = maybeApproval.getOrFail();
         require(existing.status == "pending", "Approval is not pending");
+
+        // Scope check
+        if (existing.approvers.size() > 0) {
+            var matched = existing.approvers.filter(
+                function(a: Text) -> a == approverIdentity
+            );
+            require(matched.size() > 0, "Not authorized to deny");
+        };
 
         var updated = PendingApproval(
             approvalId = existing.approvalId,
@@ -198,14 +233,15 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             verb = existing.verb,
             labels = existing.labels,
             argumentDigest = existing.argumentDigest,
+            approvers = existing.approvers,
             status = "denied",
             reason = reason,
-            decidedBy = ""
+            decidedBy = approverIdentity
         );
 
         approvals = approvals.without(existing).with(updated);
 
-        info("[ApprovalPolicy] Denied " + approvalId + " for " + existing.callerIdentity + " -> " + existing.toolName);
+        info("[ApprovalPolicy] Denied " + approvalId + " by " + approverIdentity + " for " + existing.callerIdentity + " -> " + existing.toolName);
 
         return "denied";
     };

@@ -907,7 +907,7 @@ mock_sp_with_approval := {
 	"policies": [
 		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
 		{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
-		{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "require_approval", "priority": 20},
+		{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "require_approval", "priority": 20, "approvers": ["compliance", "legal"]},
 		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
 	],
 }
@@ -1080,4 +1080,57 @@ test_approval_policy_deny_reason if {
 		with npl_evaluate_response as "deny"
 
 	contains(r, "denied by approval policy")
+}
+
+# Test: sp_approvers extracted from winning require_approval policy
+test_sp_approvers_extracted if {
+	result := sp_approvers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":403,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+
+	result == ["compliance", "legal"]
+}
+
+# Test: sp_approvers defaults to empty when no approvers specified
+test_sp_approvers_empty_when_not_specified if {
+	sp_no_approvers := {
+		"version": "1.0",
+		"tool_annotations": {
+			"gmail": {
+				"send_email": {
+					"annotations": {"openWorldHint": true},
+					"verb": "create",
+					"labels": ["category:communication"],
+				},
+			},
+		},
+		"classifiers": {
+			"gmail": {
+				"send_email": [
+					{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
+				],
+			},
+		},
+		"policies": [
+			{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "require_approval", "priority": 20},
+		],
+	}
+
+	result := sp_approvers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":404,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as sp_no_approvers
+
+	result == []
 }

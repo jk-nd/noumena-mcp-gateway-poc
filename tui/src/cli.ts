@@ -59,6 +59,7 @@ import {
   approveRequest,
   denyRequest,
   clearResolvedApprovals,
+  getAdminUsername,
   setSecurityPolicy,
   clearSecurityPolicy,
   type KeycloakUser,
@@ -1944,6 +1945,8 @@ async function reviewApprovalFlow(approval: PendingApproval): Promise<void> {
   console.log(noumena.textDim(`  Tool:     ${approval.toolName}`));
   console.log(noumena.textDim(`  Verb:     ${approval.verb}`));
   console.log(noumena.textDim(`  Labels:   ${approval.labels || "(none)"}`));
+  const approversDisplay = approval.approvers?.length > 0 ? approval.approvers.join(", ") : "(anyone)";
+  console.log(noumena.textDim(`  Approvers: ${approversDisplay}`));
   if (approval.argumentDigest) {
     console.log(noumena.textDim(`  Digest:   ${approval.argumentDigest.substring(0, 16)}...`));
   }
@@ -1964,7 +1967,7 @@ async function reviewApprovalFlow(approval: PendingApproval): Promise<void> {
     const s = p.spinner();
     s.start(`Approving ${approval.approvalId}...`);
     try {
-      await approveRequest(approval.approvalId);
+      await approveRequest(approval.approvalId, getAdminUsername());
       s.stop(noumena.success(`Approved: ${approval.approvalId}`));
     } catch (err) {
       s.stop(noumena.error("Failed"));
@@ -1981,7 +1984,7 @@ async function reviewApprovalFlow(approval: PendingApproval): Promise<void> {
     const s = p.spinner();
     s.start(`Denying ${approval.approvalId}...`);
     try {
-      await denyRequest(approval.approvalId, String(reason).trim());
+      await denyRequest(approval.approvalId, getAdminUsername(), String(reason).trim());
       s.stop(noumena.success(`Denied: ${approval.approvalId}`));
     } catch (err) {
       s.stop(noumena.error("Failed"));

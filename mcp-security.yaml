@@ -1,0 +1,104 @@
+# mcp-security.yaml — Example deployment config for Acme Corp
+#
+# This file lives in the project repo. It imports community profiles,
+# adds operator overrides, and defines the policy rules.
+#
+# Usage: the gateway CLI loads this file and pushes the merged config
+# to NPL PolicyStore, which propagates to OPA via the bundle pipeline.
+
+version: "1.0"
+
+# Tenant-specific values interpolated into classifier patterns
+tenant:
+  company_domain: acme.com
+
+# Community-maintained security profiles
+profiles:
+  - "@openclaw/security-gmail"
+
+# Operator overrides: take precedence over community profiles
+tool_overrides:
+  gmail:
+    send_email:
+      # Acme policy: sending email is not inherently destructive,
+      # but external sends require approval (handled in policies below)
+      destructiveHint: false
+
+# Policies: evaluated in priority order (lowest number = highest priority)
+# First matching rule wins.
+policies:
+  # --- Hard denials (priority 0-9) ---
+
+  - name: Block BCC usage
+    description: >
+      BCC is a social engineering risk — block tool calls that use BCC.
+      If legitimate BCC is needed, request an exception.
+    when:
+      labels: [data:bcc-used]
+    action: deny
+    priority: 0
+
+  # --- Approval requirements (priority 10-49) ---
+
+  - name: Approve external email
+    description: >
+      Sending email to recipients outside @acme.com requires manager approval.
+      Only applies to tools that actually transmit data (openWorldHint: true),
+      not to drafts which are saved locally.
+    when:
+      labels: [scope:external]
+      openWorldHint: true
+    match: all
+    action: require_approval
+    approvers: [compliance, manager]
+    timeout: 60m
+    priority: 10
+
+  - name: Approve destructive operations
+    description: >
+      Deleting emails or filters requires admin approval.
+      Prevents accidental or malicious data loss.
+    when:
+      destructiveHint: true
+    action: require_approval
+    approvers: [admin]
+    timeout: 30m
+    priority: 20
+
+  # --- Auto-allows (priority 50+) ---
+
+  - name: Allow read-only operations
+    description: Searching, reading, and listing are always allowed.
+    when:
+      readOnlyHint: true
+    action: allow
+    priority: 50
+
+  - name: Allow internal email
+    description: Emails to @acme.com addresses are auto-approved.
+    when:
+      labels: [scope:internal]
+      verb: create
+    match: all
+    action: allow
+    priority: 50
+
+  - name: Allow email drafts
+    description: >
+      Creating email drafts is always allowed — they're not sent yet.
+      External drafts will be caught when send_email is called.
+    when:
+      verb: create
+      openWorldHint: false
+      labels: [category:communication]
+    match: all
+    action: allow
+    priority: 60
+
+  # --- Fallback ---
+
+  - name: Default deny
+    description: Any tool call not explicitly allowed is denied.
+    when: {}
+    action: deny
+    priority: 999

@@ -442,6 +442,15 @@ sp_matched_rule := "no matching policy (default allow)" if {
 	count(matching_policies) == 0
 }
 
+# Approvers from the winning security policy rule (for require_approval)
+sp_approvers := p.approvers if {
+	some p in matching_policies
+	p.priority == sp_winning_priority
+	p.approvers
+}
+
+default sp_approvers := []
+
 # --- NPL body enrichment ---
 # Serialize resolved classification for contextual policy calls
 
@@ -626,6 +635,7 @@ npl_evaluate_response := resp if {
 			"labels": sp_labels_text,
 			"annotations": sp_annotations_text,
 			"argumentDigest": argument_digest,
+			"approvers": sp_approvers,
 		},
 		"timeout": "5s",
 	}).body

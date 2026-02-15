@@ -61,6 +61,7 @@ export interface PendingApproval {
   verb: string;
   labels: string;
   argumentDigest: string;
+  approvers: string[];
   status: string;
   reason: string;
   decidedBy: string;
@@ -161,6 +162,11 @@ export function setAdminCredentials(username: string, password: string): void {
 
 export function hasAdminCredentials(): boolean {
   return adminUsername !== null && adminPassword !== null;
+}
+
+export function getAdminUsername(): string {
+  if (!adminUsername) throw new Error("Admin credentials not set");
+  return adminUsername;
 }
 
 export async function getKeycloakToken(): Promise<string> {
@@ -415,8 +421,8 @@ export async function getAllApprovals(): Promise<PendingApproval[]> {
   return await response.json();
 }
 
-export async function approveRequest(approvalId: string): Promise<string> {
-  const response = await callApprovalPolicy("approve", { approvalId });
+export async function approveRequest(approvalId: string, approverIdentity: string): Promise<string> {
+  const response = await callApprovalPolicy("approve", { approvalId, approverIdentity });
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`approve failed: ${error}`);
@@ -424,8 +430,8 @@ export async function approveRequest(approvalId: string): Promise<string> {
   return await response.json();
 }
 
-export async function denyRequest(approvalId: string, reason: string): Promise<string> {
-  const response = await callApprovalPolicy("deny", { approvalId, reason });
+export async function denyRequest(approvalId: string, approverIdentity: string, reason: string): Promise<string> {
+  const response = await callApprovalPolicy("deny", { approvalId, approverIdentity, reason });
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`deny failed: ${error}`);
