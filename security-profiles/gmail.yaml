@@ -1,0 +1,181 @@
+# @openclaw/security-gmail v0.1.0
+#
+# Community security profile for Gmail MCP servers.
+# Covers GongRzhe/Gmail-MCP-Server tool names (most popular).
+# Alternative naming (shinzo-labs): send_message, get_message, list_messages, etc.
+#
+# Vocabulary:
+#   - MCP Tool Annotations: readOnlyHint, destructiveHint, openWorldHint, idempotentHint
+#   - Kubernetes RBAC verbs: get, list, create, update, delete
+#   - Namespaced labels: scope:*, category:*, data:*
+#
+# Template variables (interpolated from tenant config):
+#   {company_domain} — e.g., "acme.com"
+
+service: gmail
+description: Security profile for Gmail MCP server (GongRzhe/Gmail-MCP-Server)
+
+tools:
+  # ── Core email operations ────────────────────────────────────────────────
+
+  send_email:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: true        # sends data outside the system
+    idempotentHint: false
+    verb: create
+    labels: [category:communication]
+    classify:
+      - field: to
+        contains: "@{company_domain}"
+        set_labels: [scope:internal]
+      - field: to
+        not_contains: "@{company_domain}"
+        set_labels: [scope:external]
+      - field: bcc
+        present: true
+        set_labels: [data:bcc-used]
+
+  draft_email:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false       # draft is not sent yet
+    idempotentHint: false
+    verb: create
+    labels: [category:communication]
+    classify:
+      - field: to
+        not_contains: "@{company_domain}"
+        set_labels: [scope:external]
+
+  read_email:
+    readOnlyHint: true
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: get
+    labels: [category:communication]
+
+  search_emails:
+    readOnlyHint: true
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: list
+    labels: [category:communication]
+
+  modify_email:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: update
+    labels: [category:communication]
+
+  delete_email:
+    readOnlyHint: false
+    destructiveHint: true
+    openWorldHint: false
+    idempotentHint: true
+    verb: delete
+    labels: [category:communication]
+
+  download_attachment:
+    readOnlyHint: true
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: get
+    labels: [category:communication, data:attachment]
+
+  # ── Batch operations ─────────────────────────────────────────────────────
+
+  batch_modify_emails:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: update
+    labels: [category:communication]
+
+  batch_delete_emails:
+    readOnlyHint: false
+    destructiveHint: true
+    openWorldHint: false
+    idempotentHint: true
+    verb: delete
+    labels: [category:communication]
+
+  # ── Label management ─────────────────────────────────────────────────────
+
+  list_email_labels:
+    readOnlyHint: true
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: list
+
+  create_label:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: false
+    verb: create
+
+  update_label:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: update
+
+  delete_label:
+    readOnlyHint: false
+    destructiveHint: true
+    openWorldHint: false
+    idempotentHint: true
+    verb: delete
+
+  get_or_create_label:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: create
+
+  # ── Filter management ────────────────────────────────────────────────────
+
+  list_filters:
+    readOnlyHint: true
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: list
+
+  get_filter:
+    readOnlyHint: true
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: true
+    verb: get
+
+  create_filter:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: false
+    verb: create
+
+  create_filter_from_template:
+    readOnlyHint: false
+    destructiveHint: false
+    openWorldHint: false
+    idempotentHint: false
+    verb: create
+
+  delete_filter:
+    readOnlyHint: false
+    destructiveHint: true
+    openWorldHint: false
+    idempotentHint: true
+    verb: delete

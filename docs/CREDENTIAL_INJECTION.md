@@ -2,35 +2,60 @@
 
 ## Overview
 
-The Noumena MCP Gateway uses a **credential proxy interceptor pattern** to securely inject credentials into upstream MCP connections. The system supports two modes:
+The Noumena MCP Gateway uses a **startup-time credential injection pattern** to securely inject credentials into MCP tool containers. Credentials are resolved once at container startup -- not per-request. The system supports two modes:
 
 - **Simple Mode** (default): YAML-based, one credential per service
 - **Expert Mode** (opt-in): NPL-based with conditional rules and full audit trail
 
 ## Architecture
 
+**At startup (credential injection):**
+
 ```
-Agent → Gateway → NPL Interceptor → Credential Proxy → Upstream MCP
-         (JWT)         ↓                   ↓
-                  Authorization      Credential Injection
-                  
+Supergateway sidecar starts
+         ↓
+  Entrypoint script
+         ↓
+  Credential Proxy → Vault
+         ↓
+  Environment variables exported
+         ↓
+  STDIO MCP tool spawned (with credentials in env)
+```
+
+**At runtime (request flow):**
+
+```
+Agent → Envoy → Supergateway sidecar → STDIO MCP tool
+        (JWT)    (credentials already in environment)
+```
+
+```
 ┌────────────────────────────────────────────────────────────────┐
-│  Gateway (NO Vault access)                                     │
-│  - Authenticates agents                                        │
-│  - Checks NPL tool policy                                      │
-│  - Requests credentials from proxy                             │
+│  Envoy (NO Vault access)                                       │
+│  - Authenticates agents (JWT validation)                       │
+│  - Routes requests to supergateway sidecars                    │
 └────────────────────────────────────────────────────────────────┘
                             ↓
+┌────────────────────────────────────────────────────────────────┐
+│  Supergateway sidecar (NO Vault access at runtime)             │
+│  - Entrypoint calls Credential Proxy once at startup           │
+│  - Spawns STDIO MCP tool with credentials in env               │
+│  - Proxies SSE/streamable-HTTP ↔ STDIO                        │
+└────────────────────────────────────────────────────────────────┘
+
 ┌────────────────────────────────────────────────────────────────┐
 │  Credential Proxy (HAS Vault access)                           │
+│  - Called at container startup (not per-request)               │
 │  - Selects which credential to use                             │
 │  - Fetches secrets from Vault                                  │
-│  - Injects into upstream connection                            │
+│  - Returns credentials for env var injection                   │
 └────────────────────────────────────────────────────────────────┘
-                            ↓
+
 ┌────────────────────────────────────────────────────────────────┐
-│  Upstream MCP (github, slack, etc.)                            │
-│  - Receives requests with credentials injected                 │
+│  STDIO MCP tool (github, slack, etc.)                          │
+│  - Runs inside supergateway sidecar container                  │
+│  - Receives credentials via environment variables              │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -40,16 +65,19 @@ The system uses a four-tier network architecture:
 
 | Network | Purpose | Components |
 |---------|---------|------------|
-| `public-net` | Agent-facing | Gateway, Keycloak |
-| `policy-net` | Policy checks | Gateway ↔ NPL Engine |
-| `secrets-net` | Credential injection | Gateway ↔ Credential Proxy ↔ Vault |
-| `backend-net` | Upstream MCPs | Gateway ↔ MCP containers |
+| `public-net` | Agent-facing | Envoy, Keycloak |
+| `policy-net` | Policy checks | Governance Service ↔ NPL Engine, Credential Proxy |
+| `secrets-net` | Credential injection | Supergateway sidecars ↔ Credential Proxy ↔ Vault |
+| `backend-net` | Upstream MCPs | Envoy ↔ Supergateway sidecars |
+
+Note: Credential Proxy is on both `secrets-net` (for Vault access) and `policy-net` (for NPL credential policy evaluation in expert mode).
 
 **Security properties:**
-- ✅ Gateway has NO Vault access (only Credential Proxy does)
+- ✅ Envoy has NO Vault access (only Credential Proxy does)
+- ✅ Governance Service has NO Vault access
 - ✅ NPL Engine has NO secret access (policy only)
 - ✅ Upstream MCPs isolated from agents and policy layer
-- ✅ Credentials only exist in Credential Proxy memory
+- ✅ Credentials only exist in Credential Proxy memory and supergateway container env
 
 ---
 
@@ -96,13 +124,13 @@ The `tenant` field specifies the default tenant for Vault path resolution. The `
 
 ### How It Works
 
-1. **Gateway receives request** for `github.create_issue`
-2. **Gateway checks NPL** for tool policy authorization
-3. **Gateway calls Credential Proxy** with service name
-4. **Credential Proxy** looks up `service_defaults[github]` → `"work_github"`
-5. **Credential Proxy** looks up `credentials[work_github]` → vault path
-6. **Credential Proxy** fetches from Vault and injects
-7. **Gateway** spawns upstream MCP with injected credentials
+1. **Supergateway container starts** for `github` service
+2. **Entrypoint script calls Credential Proxy** with service name
+3. **Credential Proxy** looks up `service_defaults[github]` → `"work_github"`
+4. **Credential Proxy** looks up `credentials[work_github]` → vault path
+5. **Credential Proxy** fetches from Vault and returns credentials
+6. **Credentials exported as environment variables**, STDIO tool spawned
+7. **At runtime**, agent requests flow through Envoy → supergateway → STDIO tool (credentials already in env)
 
 ### When to Use
 
@@ -140,17 +168,17 @@ POST /npl/policies/CredentialInjectionPolicy/addInjectionRule
 
 ### How It Works
 
-1. **Gateway receives request** for `github.create_issue` with metadata `{repo: "acme/foo"}`
-2. **Gateway checks NPL** for tool policy authorization
-3. **Gateway calls Credential Proxy** with service, operation, metadata
-4. **Credential Proxy calls NPL** `CredentialInjectionPolicy.selectCredential()`
-5. **NPL evaluates rules**:
+1. **Supergateway container starts** for `github` service with metadata `{repo: "acme/foo"}`
+2. **Entrypoint script calls Credential Proxy** with service, operation, metadata
+3. **Credential Proxy calls NPL** `CredentialInjectionPolicy.selectCredential()`
+4. **NPL evaluates rules**:
    - Rule (priority 10): `metadata.repo startsWith 'acme/'` → MATCH → `"work_github"`
    - Rule (priority 1): `true` → SKIP (lower priority)
-6. **NPL returns** `"work_github"` + **logs decision to audit trail**
-7. **Credential Proxy** looks up `credentials[work_github]` → vault path
-8. **Credential Proxy** fetches from Vault and injects
-9. **Gateway** spawns upstream MCP with injected credentials
+5. **NPL returns** `"work_github"` + **logs decision to audit trail**
+6. **Credential Proxy** looks up `credentials[work_github]` → vault path
+7. **Credential Proxy** fetches from Vault and returns credentials
+8. **Credentials exported as environment variables**, STDIO tool spawned
+9. **At runtime**, agent requests flow through Envoy → supergateway → STDIO tool (credentials already in env)
 
 ### Advanced Rules
 
@@ -299,12 +327,15 @@ credentials:
         api_key: "GITHUB_API_KEY"
 ```
 
-**Result:** For Docker-based STDIO services, credentials are injected as `-e` flags:
+**Result:** Docker STDIO services run inside supergateway sidecar containers. The supergateway entrypoint script calls the Credential Proxy at startup and exports the returned credentials as environment variables before spawning the STDIO tool:
 ```bash
-docker run -i --rm -e GITHUB_TOKEN=ghp_xxx -e GITHUB_API_KEY=sk_xxx mcp/github
+# Inside supergateway container entrypoint:
+export GITHUB_TOKEN=ghp_xxx
+export GITHUB_API_KEY=sk_xxx
+exec npx -y supergateway --stdio "npx -y @modelcontextprotocol/server-github"
 ```
 
-For non-Docker processes, credentials are injected as process environment variables.
+The STDIO tool inherits the environment variables from its parent supergateway process.
 
 ### HTTP Headers (HTTP/WebSocket Transport)
 
@@ -395,12 +426,14 @@ Gateway → RabbitMQ → Executor → Vault → Upstream
                     Static injection
 ```
 
-### V2 (Credential Proxy Pattern)
+### V2 (Startup Injection Pattern)
 
 ```
-Gateway → Credential Proxy → Vault → Upstream
-              ↓
-         Dynamic injection
+Supergateway sidecar startup → Credential Proxy → Vault → env vars → STDIO tool
+                                      ↓
+                                Dynamic injection (at startup)
+
+Agent → Envoy → Supergateway sidecar → STDIO tool (at runtime)
 ```
 
 **Benefits:**
@@ -477,20 +510,27 @@ cd tui && npm start
 
 ### Latency Breakdown
 
-**Simple Mode:**
-- Gateway → Credential Proxy: ~1-2ms
-- YAML lookup: ~1ms
-- Vault fetch (cached): ~5ms
-- Process spawn with env vars: ~20ms
-- **Total overhead: ~27ms**
+Credential injection now happens **once at container startup**, not per-request. Per-request overhead for credentials is **0ms**.
 
-**Expert Mode:**
-- Gateway → Credential Proxy: ~1-2ms
+**Startup (one-time, Simple Mode):**
+- Entrypoint → Credential Proxy: ~1-2ms
+- YAML lookup: ~1ms
+- Vault fetch: ~5-50ms (first fetch, no cache)
+- Export env vars + spawn STDIO tool: ~20ms
+- **Total startup overhead: ~27-73ms** (one-time)
+
+**Startup (one-time, Expert Mode):**
+- Entrypoint → Credential Proxy: ~1-2ms
 - Credential Proxy → NPL: ~10ms
 - YAML lookup: ~1ms
-- Vault fetch (cached): ~5ms
-- Process spawn with env vars: ~20ms
-- **Total overhead: ~37ms**
+- Vault fetch: ~5-50ms (first fetch, no cache)
+- Export env vars + spawn STDIO tool: ~20ms
+- **Total startup overhead: ~37-83ms** (one-time)
+
+**Per-request (both modes):**
+- Credential resolution: **0ms** (already in environment)
+- Agent → Envoy → Supergateway → STDIO tool: normal request latency
+- **Total per-request credential overhead: 0ms**
 
 ### Caching
 
@@ -504,23 +544,28 @@ cd tui && npm start
 
 ### Zero Trust Principles
 
-1. **Gateway has NO Vault access**
-   - Only forwards requests to Credential Proxy
+1. **Envoy has NO Vault access**
+   - Only routes requests to supergateway sidecars
    - Never sees actual secrets
 
-2. **NPL has NO Vault access**
+2. **Governance Service has NO Vault access**
+   - Only evaluates tool-level policy via NPL
+   - Never sees actual secrets
+
+3. **NPL has NO Vault access**
    - Only makes policy decisions
    - Never sees actual secrets
 
-3. **Credential Proxy is isolated**
-   - Only accessible via `secrets-net`
+4. **Credential Proxy is isolated**
+   - Only accessible via `secrets-net` (and `policy-net` for NPL in expert mode)
    - Only component with Vault credentials
+   - Called by supergateway sidecar entrypoint scripts at startup
    - Credentials cached in memory only (5min TTL)
 
-4. **Credentials injected at last moment**
-   - Just before spawning upstream process
-   - Never logged or persisted
-   - Scoped to single process lifetime
+5. **Credentials injected at container startup**
+   - Exported as environment variables before STDIO tool spawns
+   - Never logged or persisted outside the container
+   - Scoped to supergateway container lifetime
 
 ### Compliance
 

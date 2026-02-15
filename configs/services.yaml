@@ -1,6 +1,6 @@
 # Dynamic MCP Service Configuration
-# This file defines all upstream services and their tools.
-# The Gateway reads this config for tool listing and upstream routing.
+# This file is an import/export format for bulk configuration.
+# PolicyStore is the runtime source of truth.
 
 services:
   - name: "duckduckgo"
@@ -8,124 +8,42 @@ services:
     type: "MCP_STDIO"
     enabled: true
     command: "docker run -i --rm mcp/duckduckgo"
-    args: []
     requiresCredentials: false
     description: "A Model Context Protocol (MCP) server that provides web search capabilities through DuckDuckGo, w..."
     tools:
       - name: "search"
-        description: "Search DuckDuckGo and return formatted results.      Args:         query: The search query string         max_results: Maximum number of results to return (default: 10)         ctx: MCP context for logging"
-        inputSchema:
-          type: "object"
-          properties:
-            query:
-              type: "string"
-              description: ""
-            max_results:
-              type: "integer"
-              description: ""
-          required:
-            - "query"
-        enabled: true
-      - name: "fetch_content"
-        description: "Fetch and parse content from a webpage URL.      Args:         url: The webpage URL to fetch content from         ctx: MCP context for logging"
-        inputSchema:
-          type: "object"
-          properties:
-            url:
-              type: "string"
-              description: ""
-          required:
-            - "url"
-        enabled: true
-  - name: "gemini"
-    displayName: "Google Gemini"
-    type: "MCP_STDIO"
-    enabled: true
-    command: "docker run -i --rm node:22-slim npx"
-    args:
-      - "-y"
-      - "@houtini/gemini-mcp"
-    requiresCredentials: true
-    description: "Google Gemini AI API for text generation and chat"
-    tools:
-      - name: "gemini_chat"
-        description: "Chat with Google Gemini models"
-        inputSchema:
-          type: "object"
-          properties:
-            message:
-              type: "string"
-              description: "The message to send"
-            model:
-              type: "string"
-              description: "Model to use (defaults to latest available)"
-            temperature:
-              type: "number"
-              description: "Controls randomness (0.0 to 1.0)"
-            max_tokens:
-              type: "integer"
-              description: "Maximum tokens in response"
-            system_prompt:
-              type: "string"
-              description: "Optional system instruction"
-            grounding:
-              type: "boolean"
-              description: "Enable Google Search grounding for real-time information"
-          required:
-            - "message"
-        enabled: true
-      - name: "gemini_list_models"
-        description: "List available Gemini models and their descriptions"
+        description: ""
         inputSchema:
           type: "object"
           properties: {}
           required: []
         enabled: true
-      - name: "gemini_deep_research"
-        description: "Conduct deep research on complex topics using iterative multi-step analysis with Gemini. This performs multiple searches and synthesizes comprehensive research reports (takes several minutes). [MCP_RECOMMENDED_TIMEOUT_MS: 900000]"
+  - name: "mock-calendar"
+    displayName: "Mock Calendar"
+    type: "MCP_HTTP"
+    enabled: true
+    requiresCredentials: false
+    description: "Mock calendar MCP server for bilateral streaming tests. Supports SSE notifications."
+    tools:
+      - name: "list_events"
+        description: ""
         inputSchema:
           type: "object"
-          properties:
-            research_question:
-              type: "string"
-              description: "The complex research question or topic to investigate deeply"
-            model:
-              type: "string"
-              description: "Model to use for deep research (defaults to latest available)"
-            max_iterations:
-              type: "integer"
-              description: "Number of research iterations (3-10, default 5). Environment guidance: Claude Desktop: use 3-4 (4-min timeout). Agent SDK/IDEs (VSCode, Cursor, Windsurf)/AI platforms (Cline, Roo-Cline): can use 7-10 (longer timeout tolerance)"
-            focus_areas:
-              type: "array"
-              description: "Optional: specific areas to focus the research on"
-          required:
-            - "research_question"
+          properties: {}
+          required: []
+        enabled: true
+      - name: "create_event"
+        description: ""
+        inputSchema:
+          type: "object"
+          properties: {}
+          required: []
         enabled: true
 user_access:
-  default_template:
-    enabled: false
-    description: "Default access template (disabled - grant explicit per-user access)"
-    tools: {}
   users:
     - userId: "jarvis@acme.com"
-      keycloakId: "14a31f3a-233a-4838-a799-4d544c08b7af"
-      displayName: "Jarvis AI Agent"
-      createdAt: "2026-02-09T00:20:04.340Z"
       tools:
         duckduckgo:
           - "*"
-        gemini:
-          - "gemini_chat"
-          - "gemini_list_models"
-          - "gemini_deep_research"
-      vaultPaths: {}
-    - userId: "dave@acme.com"
-      keycloakId: "bb95e6ee-a168-44cb-985d-5af2e4cae38d"
-      displayName: "Dave Beckham"
-      createdAt: "2026-02-09T00:20:46.940Z"
-      tools:
-        duckduckgo:
-          - "*"
-        gemini:
-          - "*"
-      vaultPaths: {}
+    - userId: "testuser@test.com"
+      tools: {}

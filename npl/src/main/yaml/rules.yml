@@ -8,67 +8,18 @@
 # - pGateway: Gateway system service (runtime policy enforcement)
 #
 # Note: Tool users (humans and AI) are NOT parties. They're governed by
-# UserToolAccess protocol instances identified by userId parameter.
+# grants inside the PolicyStore singleton, identified by subjectId.
 
 # ============================================================================
-# REGISTRY PACKAGE - Service Management
+# POLICY PACKAGE - Unified PolicyStore
 # ============================================================================
 
-registry.ServiceRegistry:
-  # Admin has full control
+policy.PolicyStore:
   pAdmin:
     set:
       claims:
         role:
           - admin
-  # Gateway system service reads enabled services at runtime
-  pGateway:
-    set:
-      claims:
-        role:
-          - gateway
-
-# ============================================================================
-# SERVICES PACKAGE - Tool Governance
-# ============================================================================
-
-# Per-service ToolPolicy (service-level governance)
-services.ToolPolicy:
-  # Admin creates instances, enables/disables tools
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
-  # Gateway system service checks access at runtime
-  pGateway:
-    set:
-      claims:
-        role:
-          - gateway
-
-# ============================================================================
-# USERS PACKAGE - Per-user Access Control (V3)
-# ============================================================================
-
-# UserRegistry — master list of registered users
-users.UserRegistry:
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
-
-# UserToolAccess — per-tool-user access control (user-level governance)
-# Note: Tool users (humans/AI) are NOT parties - they're identified by userId parameter
-users.UserToolAccess:
-  # Admin creates instances and grants/revokes tools via TUI/API
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
-  # Gateway system service enforces/queries access at runtime
   pGateway:
     set:
       claims:

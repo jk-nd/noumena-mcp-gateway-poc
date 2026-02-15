@@ -1,0 +1,14 @@
+{
+  "name": "mcp-aggregator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP aggregator — routes tool calls to multiple backend MCP servers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "uuid": "^11.0.0"
+  }
+}

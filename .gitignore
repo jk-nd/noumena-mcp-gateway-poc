@@ -43,3 +43,7 @@ test-results/
 
 # Extracted archives
 npl-connectors/
+
+# Confidential business documents
+PITCH_DECK*
+docs/PITCH_DECK*

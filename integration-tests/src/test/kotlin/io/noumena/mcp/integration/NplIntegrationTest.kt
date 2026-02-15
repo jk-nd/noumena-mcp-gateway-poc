@@ -13,445 +13,634 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 
 /**
- * Integration tests for NPL Engine — V2 Architecture.
- * 
- * Tests the V2 policy flow:
- * 1. Create ServiceRegistry and enable services
- * 2. Create per-service ToolPolicy instances
- * 3. Enable tools within ToolPolicy
- * 4. checkAccess — Gateway checks if a tool call is allowed
- * 5. Disabled tool rejection
- * 6. Suspended policy rejection
- * 
+ * Integration tests for the NPL Engine — PolicyStore singleton.
+ *
+ * PolicyStore is the unified policy data store backing OPA. It holds:
+ * - Catalog: services + their enabled tools (organization-wide)
+ * - Grants: per-user tool access
+ * - Emergency revocation: fail-closed subject blocking
+ * - Contextual routes: Layer 2 policy routing table
+ *
+ * Party model (from rules.yml):
+ * - pAdmin (role=admin) — manages catalog, grants, routes
+ * - pGateway (role=gateway) — reads policy data (getPolicyData)
+ *
  * Prerequisites:
  * - Docker stack must be running: docker compose -f deployments/docker-compose.yml up -d
- * - Keycloak must be provisioned with test users (admin, agent)
- * 
+ * - Keycloak must be provisioned with test users (admin, gateway)
+ *
  * Run with: ./gradlew :integration-tests:test --tests "*NplIntegrationTest*"
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation::class)
 class NplIntegrationTest {
-    
-    private lateinit var adminToken: String      // For setup/admin operations (pAdmin)
-    private lateinit var agentToken: String      // For checkAccess (pAgent)
+
+    private lateinit var adminToken: String      // For admin operations (pAdmin)
+    private lateinit var gatewayToken: String     // For getPolicyData (pGateway)
     private lateinit var client: HttpClient
-    private var serviceRegistryId: String? = null
-    private var toolPolicyId: String? = null
-    
+    private lateinit var storeId: String          // PolicyStore singleton ID
+
+    private val json = Json {
+        ignoreUnknownKeys = true
+        prettyPrint = true
+    }
+
     @BeforeAll
     fun setup() = runBlocking {
         println("╔════════════════════════════════════════════════════════════════╗")
-        println("║ NPL INTEGRATION TESTS (V2 ToolPolicy) - Setup                ║")
+        println("║ NPL INTEGRATION TESTS (PolicyStore) - Setup                  ║")
         println("╠════════════════════════════════════════════════════════════════╣")
         println("║ NPL URL:      ${TestConfig.nplUrl}")
         println("║ Keycloak URL: ${TestConfig.keycloakUrl}")
         println("╚════════════════════════════════════════════════════════════════╝")
-        
-        // Create HTTP client for this test class
+
         client = HttpClient(CIO) {
             install(ContentNegotiation) {
-                json(TestClient.json)
+                json(json)
             }
         }
-        
-        // Check if Docker stack is running
+
         Assumptions.assumeTrue(isDockerStackRunning()) {
             "Docker stack is not running. Start with: docker compose -f deployments/docker-compose.yml up -d"
         }
-        
-        // Get authentication tokens for different parties
-        println("    Getting tokens for admin and agent...")
+
+        println("    Getting tokens for admin and gateway...")
         adminToken = KeycloakAuth.getToken("admin", "Welcome123")
-        println("    ✓ Admin token obtained")
-        agentToken = KeycloakAuth.getToken("agent", "Welcome123")
-        println("    ✓ Agent token obtained")
+        println("    ✓ Admin token obtained (pAdmin)")
+        gatewayToken = KeycloakAuth.getToken("gateway", "Welcome123")
+        println("    ✓ Gateway token obtained (pGateway)")
     }
-    
+
+    // ── Health + Setup ──────────────────────────────────────────────────────
+
     @Test
     @Order(1)
     fun `NPL engine health check`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
         println("│ TEST: NPL Engine Health Check                              │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
+
         val response = client.get("${TestConfig.nplUrl}/actuator/health")
-        
+
         println("    Status: ${response.status}")
         assertTrue(response.status.isSuccess(), "NPL Engine should be healthy")
         println("    ✓ NPL Engine is healthy")
     }
-    
+
     @Test
     @Order(2)
-    fun `create ServiceRegistry protocol instance`() = runBlocking {
+    fun `create PolicyStore singleton`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Create ServiceRegistry Instance                      │")
+        println("│ TEST: PolicyStore — find or create singleton               │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        // Check if ServiceRegistry already exists
-        val listResponse = client.get("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/") {
-            header("Authorization", "Bearer $adminToken")
-        }
-        
-        if (listResponse.status.isSuccess()) {
-            val listBody = listResponse.bodyAsText()
-            val listJson = TestClient.json.parseToJsonElement(listBody).jsonObject
-            val items = listJson["items"]?.jsonArray
-            if (items != null && items.isNotEmpty()) {
-                serviceRegistryId = items[0].jsonObject["@id"]?.jsonPrimitive?.content
-                println("    ServiceRegistry already exists: $serviceRegistryId")
-                println("    ✓ Using existing instance")
-                return@runBlocking
-            }
-        }
-        
-        // Create new ServiceRegistry
-        val createBody = """{"@parties": {}}"""
-        
-        println("    Creating ServiceRegistry...")
-        
-        val response = client.post("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/") {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody(createBody)
-        }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: ${responseBody.take(200)}")
-        
-        if (response.status.isSuccess()) {
-            val json = TestClient.json.parseToJsonElement(responseBody).jsonObject
-            serviceRegistryId = json["@id"]?.jsonPrimitive?.content
-            println("    ✓ ServiceRegistry created: $serviceRegistryId")
-        } else {
-            println("    ⚠ Could not create ServiceRegistry: ${response.status}")
-        }
+
+        storeId = NplBootstrap.ensurePolicyStore(adminToken)
+        println("    ✓ PolicyStore singleton: $storeId")
+        assertNotNull(storeId)
+        assertTrue(storeId.isNotBlank(), "Store ID should not be blank")
     }
-    
+
+    // ── Catalog Management ──────────────────────────────────────────────────
+
     @Test
     @Order(3)
-    fun `enable duckduckgo service in ServiceRegistry`() = runBlocking {
+    fun `register and enable mock-calendar service`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Enable duckduckgo Service                            │")
+        println("│ TEST: PolicyStore — register + enable mock-calendar        │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (serviceRegistryId == null) {
-            println("    ⚠ No ServiceRegistry available, skipping")
-            Assumptions.assumeTrue(false, "ServiceRegistry not created")
-            return@runBlocking
-        }
-        
-        val enableBody = """{"serviceName": "duckduckgo"}"""
-        
-        println("    Enabling duckduckgo service...")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/registry/ServiceRegistry/$serviceRegistryId/enableService"
-        ) {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody(enableBody)
-        }
-        
-        println("    Response status: ${response.status}")
-        
-        if (response.status.isSuccess()) {
-            println("    ✓ duckduckgo service enabled")
-        } else {
-            val body = response.bodyAsText()
-            println("    Response: $body")
-        }
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        NplBootstrap.ensureCatalogService(storeId, "mock-calendar", adminToken)
+        println("    ✓ mock-calendar registered + enabled")
+
+        // Verify via getPolicyData
+        val policyData = getPolicyData()
+        val services = policyData["services"]?.jsonObject
+        assertNotNull(services, "Should have services")
+
+        val mockCal = services!!["mock-calendar"]?.jsonObject
+        assertNotNull(mockCal, "Should have mock-calendar entry")
+        assertEquals(true, mockCal!!["enabled"]?.jsonPrimitive?.boolean, "mock-calendar should be enabled")
+        assertEquals(false, mockCal["suspended"]?.jsonPrimitive?.boolean, "mock-calendar should not be suspended")
+
+        println("    ✓ getPolicyData confirms mock-calendar is enabled")
     }
-    
+
     @Test
     @Order(4)
-    fun `create ToolPolicy instance for duckduckgo`() = runBlocking {
+    fun `enable tools for mock-calendar`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Create ToolPolicy Instance for duckduckgo            │")
+        println("│ TEST: PolicyStore — enable list_events + create_event      │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        // Check if ToolPolicy already exists for duckduckgo
-        val listResponse = client.get("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
-            header("Authorization", "Bearer $adminToken")
-        }
-        
-        if (listResponse.status.isSuccess()) {
-            val listBody = listResponse.bodyAsText()
-            val listJson = TestClient.json.parseToJsonElement(listBody).jsonObject
-            val items = listJson["items"]?.jsonArray
-            if (items != null) {
-                for (item in items) {
-                    val serviceName = item.jsonObject["policyServiceName"]?.jsonPrimitive?.content
-                    if (serviceName == "duckduckgo") {
-                        toolPolicyId = item.jsonObject["@id"]?.jsonPrimitive?.content
-                        println("    ToolPolicy for duckduckgo already exists: $toolPolicyId")
-                        println("    ✓ Using existing instance")
-                        return@runBlocking
-                    }
-                }
-            }
-        }
-        
-        // Create new ToolPolicy for duckduckgo
-        val createBody = buildJsonObject {
-            putJsonObject("@parties") {}
-            put("policyServiceName", "duckduckgo")
-        }
-        
-        println("    Creating ToolPolicy for duckduckgo (party assignment via rules.yml)")
-        
-        val response = client.post("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody(createBody.toString())
-        }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: ${responseBody.take(300)}")
-        
-        if (response.status.isSuccess()) {
-            val json = TestClient.json.parseToJsonElement(responseBody).jsonObject
-            toolPolicyId = json["@id"]?.jsonPrimitive?.content
-            println("    ✓ ToolPolicy created: $toolPolicyId")
-        } else {
-            println("    ⚠ Could not create ToolPolicy: ${response.status}")
-        }
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        NplBootstrap.ensureCatalogToolEnabled(storeId, "mock-calendar", "list_events", adminToken)
+        NplBootstrap.ensureCatalogToolEnabled(storeId, "mock-calendar", "create_event", adminToken)
+        println("    ✓ Tools enabled: list_events, create_event")
+
+        // Verify via getPolicyData
+        val policyData = getPolicyData()
+        val enabledTools = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("enabledTools")?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+
+        assertNotNull(enabledTools, "Should have enabledTools")
+        assertTrue(enabledTools!!.contains("list_events"), "Should contain list_events")
+        assertTrue(enabledTools.contains("create_event"), "Should contain create_event")
+
+        println("    ✓ getPolicyData confirms tools: $enabledTools")
     }
-    
+
+    // ── Grant Management ────────────────────────────────────────────────────
+
     @Test
     @Order(5)
-    fun `enable search tool in ToolPolicy`() = runBlocking {
+    fun `grant jarvis wildcard access on mock-calendar`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: Enable 'search' Tool in ToolPolicy                   │")
+        println("│ TEST: PolicyStore — grant jarvis wildcard on mock-calendar  │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (toolPolicyId == null) {
-            println("    ⚠ No ToolPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolPolicy not created")
-            return@runBlocking
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        NplBootstrap.ensureGrantAll(storeId, "jarvis@acme.com", "mock-calendar", adminToken)
+        println("    ✓ Granted jarvis@acme.com wildcard (*) on mock-calendar")
+
+        // Verify via getPolicyData
+        val policyData = getPolicyData()
+        val jarvisGrants = policyData["grants"]?.jsonObject?.get("jarvis@acme.com")?.jsonArray
+
+        assertNotNull(jarvisGrants, "jarvis should have grants")
+        assertTrue(jarvisGrants!!.isNotEmpty(), "jarvis should have at least one grant")
+
+        val mockCalGrant = jarvisGrants.firstOrNull {
+            it.jsonObject["serviceName"]?.jsonPrimitive?.content == "mock-calendar"
         }
-        
-        val enableBody = """{"toolName": "search"}"""
-        
-        println("    Enabling 'search' tool...")
-        println("    Using admin token (pAdmin party)")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/enableTool"
-        ) {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody(enableBody)
-        }
-        
-        println("    Response status: ${response.status}")
-        
-        if (response.status.isSuccess()) {
-            println("    ✓ 'search' tool enabled")
-        } else {
-            val body = response.bodyAsText()
-            println("    Response: $body")
-        }
+        assertNotNull(mockCalGrant, "jarvis should have mock-calendar grant")
+
+        val allowedTools = mockCalGrant!!.jsonObject["allowedTools"]?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+        assertNotNull(allowedTools)
+        assertTrue(allowedTools!!.contains("*"), "jarvis should have wildcard (*) access")
+
+        println("    ✓ getPolicyData confirms jarvis grant: mock-calendar.* ")
     }
-    
+
     @Test
     @Order(6)
-    fun `checkAccess returns true for enabled tool`() = runBlocking {
+    fun `grant specific tool to alice`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: checkAccess Returns True for Enabled Tool            │")
+        println("│ TEST: PolicyStore — grant alice specific tool               │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (toolPolicyId == null) {
-            println("    ⚠ No ToolPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolPolicy not created")
-            return@runBlocking
-        }
-        
-        val invokeBody = buildJsonObject {
-            put("toolName", "search")
-            put("callerIdentity", "test-agent")
-        }
-        
-        println("    Checking access for 'search' tool...")
-        println("    Using agent token (pAgent party)")
-        
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Grant alice only list_events (not wildcard)
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/checkAccess"
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool"
         ) {
-            header("Authorization", "Bearer $agentToken")
+            header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody(invokeBody.toString())
+            setBody("""{"subjectId": "alice@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
         }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
-        
-        assertTrue(response.status.isSuccess(), "checkAccess should succeed")
-        
-        val allowed = responseBody.trim().removeSurrounding("\"").toBooleanStrictOrNull() ?: false
-        assertTrue(allowed, "checkAccess should return true for enabled tool")
-        println("    ✓ Access allowed for enabled tool")
+        println("    grantTool response: ${response.status}")
+
+        // Verify via getPolicyData
+        val policyData = getPolicyData()
+        val aliceGrants = policyData["grants"]?.jsonObject?.get("alice@acme.com")?.jsonArray
+
+        assertNotNull(aliceGrants, "alice should have grants")
+        val mockCalGrant = aliceGrants!!.firstOrNull {
+            it.jsonObject["serviceName"]?.jsonPrimitive?.content == "mock-calendar"
+        }
+        assertNotNull(mockCalGrant, "alice should have mock-calendar grant")
+
+        val allowedTools = mockCalGrant!!.jsonObject["allowedTools"]?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+        assertTrue(allowedTools!!.contains("list_events"), "alice should have list_events")
+        assertFalse(allowedTools.contains("*"), "alice should NOT have wildcard")
+        assertFalse(allowedTools.contains("create_event"), "alice should NOT have create_event")
+
+        println("    ✓ alice granted only list_events on mock-calendar")
     }
-    
+
     @Test
     @Order(7)
-    fun `checkAccess returns false for disabled tool`() = runBlocking {
+    fun `revoke specific tool from alice`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: checkAccess Returns False for Disabled Tool           │")
+        println("│ TEST: PolicyStore — revoke alice's tool access              │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (toolPolicyId == null) {
-            println("    ⚠ No ToolPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolPolicy not created")
-            return@runBlocking
-        }
-        
-        val invokeBody = buildJsonObject {
-            put("toolName", "nonexistent_tool")
-            put("callerIdentity", "test-agent")
-        }
-        
-        println("    Checking access for 'nonexistent_tool'...")
-        println("    Using agent token (pAgent party)")
-        
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/checkAccess"
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeTool"
         ) {
-            header("Authorization", "Bearer $agentToken")
+            header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody(invokeBody.toString())
+            setBody("""{"subjectId": "alice@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
         }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
-        
-        assertTrue(response.status.isSuccess(), "API call should succeed")
-        
-        val allowed = responseBody.trim().removeSurrounding("\"").toBooleanStrictOrNull() ?: true
-        assertFalse(allowed, "checkAccess should return false for disabled tool")
-        println("    ✓ Access correctly denied for disabled tool")
+        println("    revokeTool response: ${response.status}")
+        assertTrue(response.status.isSuccess(), "revokeTool should succeed")
+
+        // Verify alice has no more mock-calendar grants
+        val policyData = getPolicyData()
+        val aliceGrants = policyData["grants"]?.jsonObject?.get("alice@acme.com")?.jsonArray
+
+        // After revoking the only tool, the grant entry should be removed
+        val mockCalGrant = aliceGrants?.firstOrNull {
+            it.jsonObject["serviceName"]?.jsonPrimitive?.content == "mock-calendar"
+        }
+        assertNull(mockCalGrant, "alice should have no mock-calendar grant after revocation")
+
+        println("    ✓ alice's mock-calendar access revoked")
     }
-    
+
+    // ── Emergency Revocation ────────────────────────────────────────────────
+
     @Test
     @Order(8)
-    fun `getEnabledTools returns enabled tool set`() = runBlocking {
+    fun `revoke subject blocks all access`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: getEnabledTools Returns Tool Set                      │")
+        println("│ TEST: PolicyStore — revokeSubject (emergency kill)          │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (toolPolicyId == null) {
-            println("    ⚠ No ToolPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolPolicy not created")
-            return@runBlocking
-        }
-        
-        println("    Using admin token (pAdmin party)")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/getEnabledTools"
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Revoke mallory
+        val revokeResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeSubject"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("{}")
+            setBody("""{"subjectId": "mallory@evil.com"}""")
         }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
-        
-        assertTrue(response.status.isSuccess(), "getEnabledTools should succeed")
-        assertTrue(responseBody.contains("search"), "Enabled tools should contain 'search'")
-        println("    ✓ Enabled tools retrieved")
+        assertTrue(revokeResp.status.isSuccess(), "revokeSubject should succeed")
+
+        // Verify in revokedSubjects
+        val policyData = getPolicyData()
+        val revoked = policyData["revokedSubjects"]?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+
+        assertNotNull(revoked, "Should have revokedSubjects")
+        assertTrue(revoked!!.contains("mallory@evil.com"), "mallory should be revoked")
+
+        println("    ✓ mallory@evil.com is in revokedSubjects")
     }
-    
+
     @Test
     @Order(9)
-    fun `getRequestCount returns number of policy checks`() = runBlocking {
+    fun `reinstate subject restores access`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: getRequestCount Returns Policy Check Count           │")
+        println("│ TEST: PolicyStore — reinstateSubject                        │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        if (toolPolicyId == null) {
-            println("    ⚠ No ToolPolicy available, skipping")
-            Assumptions.assumeTrue(false, "ToolPolicy not created")
-            return@runBlocking
-        }
-        
-        println("    Using admin token (pAdmin party)")
-        
-        val response = client.post(
-            "${TestConfig.nplUrl}/npl/services/ToolPolicy/$toolPolicyId/getRequestCount"
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        val reinstateResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/reinstateSubject"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("{}")
+            setBody("""{"subjectId": "mallory@evil.com"}""")
         }
-        
-        println("    Response status: ${response.status}")
-        val responseBody = response.bodyAsText()
-        println("    Response body: $responseBody")
-        
-        assertTrue(response.status.isSuccess(), "getRequestCount should succeed")
-        
-        val count = responseBody.trim().toIntOrNull() ?: -1
-        assertTrue(count >= 2, "Should have processed at least 2 policy checks (allowed + denied)")
-        println("    ✓ Policy check count: $count")
+        assertTrue(reinstateResp.status.isSuccess(), "reinstateSubject should succeed")
+
+        // Verify removed from revokedSubjects
+        val policyData = getPolicyData()
+        val revoked = policyData["revokedSubjects"]?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+
+        assertFalse(revoked?.contains("mallory@evil.com") ?: false,
+            "mallory should no longer be revoked")
+
+        println("    ✓ mallory@evil.com reinstated")
     }
-    
+
+    // ── Service Suspend/Resume ──────────────────────────────────────────────
+
     @Test
     @Order(10)
-    fun `list protocol instances`() = runBlocking {
+    fun `suspend and resume service`() = runBlocking {
         println("\n┌─────────────────────────────────────────────────────────────┐")
-        println("│ TEST: List Protocol Instances                              │")
+        println("│ TEST: PolicyStore — suspend + resume mock-calendar          │")
         println("└─────────────────────────────────────────────────────────────┘")
-        
-        // List ServiceRegistry instances
-        val registryResponse = client.get("${TestConfig.nplUrl}/npl/registry/ServiceRegistry/") {
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Suspend
+        val suspendResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/suspendService"
+        ) {
             header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar"}""")
         }
-        
-        println("    ServiceRegistry instances:")
-        if (registryResponse.status.isSuccess()) {
-            val body = registryResponse.bodyAsText()
-            val json = TestClient.json.parseToJsonElement(body).jsonObject
-            val items = json["items"]?.jsonArray
-            println("      Count: ${items?.size ?: 0}")
-            items?.forEach { instance ->
-                val id = instance.jsonObject["@id"]?.jsonPrimitive?.content
-                println("      - $id")
-            }
-        }
-        
-        // List ToolPolicy instances (V2)
-        val policyResponse = client.get("${TestConfig.nplUrl}/npl/services/ToolPolicy/") {
+        assertTrue(suspendResp.status.isSuccess(), "suspendService should succeed")
+
+        // Verify suspended
+        var policyData = getPolicyData()
+        var suspended = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("suspended")?.jsonPrimitive?.boolean
+        assertEquals(true, suspended, "mock-calendar should be suspended")
+        println("    ✓ mock-calendar suspended")
+
+        // Resume
+        val resumeResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/resumeService"
+        ) {
             header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar"}""")
         }
-        
-        println("    ToolPolicy instances:")
-        if (policyResponse.status.isSuccess()) {
-            val body = policyResponse.bodyAsText()
-            val json = TestClient.json.parseToJsonElement(body).jsonObject
-            val items = json["items"]?.jsonArray
-            println("      Count: ${items?.size ?: 0}")
-            items?.forEach { instance ->
-                val id = instance.jsonObject["@id"]?.jsonPrimitive?.content
-                val serviceName = instance.jsonObject["policyServiceName"]?.jsonPrimitive?.content
-                println("      - $id (service: $serviceName)")
-            }
-        }
-        
-        println("    ✓ Protocol instances listed")
+        assertTrue(resumeResp.status.isSuccess(), "resumeService should succeed")
+
+        // Verify resumed
+        policyData = getPolicyData()
+        suspended = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("suspended")?.jsonPrimitive?.boolean
+        assertEquals(false, suspended, "mock-calendar should no longer be suspended")
+        println("    ✓ mock-calendar resumed")
     }
-    
+
+    // ── Disable Service/Tool ────────────────────────────────────────────────
+
+    @Test
+    @Order(11)
+    fun `disable and re-enable service`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — disable + re-enable mock-calendar      │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Disable
+        val disableResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/disableService"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar"}""")
+        }
+        assertTrue(disableResp.status.isSuccess(), "disableService should succeed")
+
+        var policyData = getPolicyData()
+        var enabled = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("enabled")?.jsonPrimitive?.boolean
+        assertEquals(false, enabled, "mock-calendar should be disabled")
+        println("    ✓ mock-calendar disabled")
+
+        // Re-enable
+        val enableResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/enableService"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar"}""")
+        }
+        assertTrue(enableResp.status.isSuccess(), "enableService should succeed")
+
+        policyData = getPolicyData()
+        enabled = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("enabled")?.jsonPrimitive?.boolean
+        assertEquals(true, enabled, "mock-calendar should be re-enabled")
+        println("    ✓ mock-calendar re-enabled")
+    }
+
+    @Test
+    @Order(12)
+    fun `disable and re-enable tool`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — disable + re-enable list_events        │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Disable list_events
+        val disableResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/disableTool"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events"}""")
+        }
+        assertTrue(disableResp.status.isSuccess(), "disableTool should succeed")
+
+        var policyData = getPolicyData()
+        var tools = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("enabledTools")?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+        assertFalse(tools!!.contains("list_events"), "list_events should be disabled")
+        assertTrue(tools.contains("create_event"), "create_event should still be enabled")
+        println("    ✓ list_events disabled (create_event still enabled)")
+
+        // Re-enable list_events
+        NplBootstrap.ensureCatalogToolEnabled(storeId, "mock-calendar", "list_events", adminToken)
+
+        policyData = getPolicyData()
+        tools = policyData["services"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("enabledTools")?.jsonArray
+            ?.map { it.jsonPrimitive.content }
+        assertTrue(tools!!.contains("list_events"), "list_events should be re-enabled")
+        println("    ✓ list_events re-enabled")
+    }
+
+    // ── Revoke Service Access ───────────────────────────────────────────────
+
+    @Test
+    @Order(13)
+    fun `revoke all service access from user`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — revokeServiceAccess (bulk revoke)      │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // First grant bob two tools
+        client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool") {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
+        }
+        client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool") {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar", "toolName": "create_event"}""")
+        }
+
+        // Verify bob has 2 tools
+        var policyData = getPolicyData()
+        var bobGrants = policyData["grants"]?.jsonObject?.get("bob@acme.com")?.jsonArray
+        val bobTools = bobGrants?.firstOrNull {
+            it.jsonObject["serviceName"]?.jsonPrimitive?.content == "mock-calendar"
+        }?.jsonObject?.get("allowedTools")?.jsonArray?.map { it.jsonPrimitive.content }
+        assertTrue(bobTools!!.contains("list_events") && bobTools.contains("create_event"),
+            "bob should have both tools before revocation")
+        println("    ✓ bob has list_events + create_event")
+
+        // Revoke all service access at once
+        val revokeResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeServiceAccess"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar"}""")
+        }
+        assertTrue(revokeResp.status.isSuccess(), "revokeServiceAccess should succeed")
+
+        // Verify bob has no mock-calendar grants
+        policyData = getPolicyData()
+        bobGrants = policyData["grants"]?.jsonObject?.get("bob@acme.com")?.jsonArray
+        val remaining = bobGrants?.firstOrNull {
+            it.jsonObject["serviceName"]?.jsonPrimitive?.content == "mock-calendar"
+        }
+        assertNull(remaining, "bob should have no mock-calendar grants after revokeServiceAccess")
+
+        println("    ✓ revokeServiceAccess removed all mock-calendar grants for bob")
+    }
+
+    // ── Contextual Routing (Layer 2) ────────────────────────────────────────
+
+    @Test
+    @Order(14)
+    fun `register and remove contextual route`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — registerRoute + removeRoute            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Register a wildcard route for mock-calendar
+        val registerResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/registerRoute"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "PiiGuardPolicy", "instanceId": "pii-001", "endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate"}""")
+        }
+        assertTrue(registerResp.status.isSuccess(), "registerRoute should succeed")
+
+        // Verify route in getPolicyData
+        var policyData = getPolicyData()
+        val route = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(route, "Should have wildcard route for mock-calendar")
+        assertEquals("PiiGuardPolicy", route!!["policyProtocol"]?.jsonPrimitive?.content)
+        assertEquals("pii-001", route["instanceId"]?.jsonPrimitive?.content)
+        println("    ✓ Route registered: mock-calendar.* → PiiGuardPolicy/pii-001")
+
+        // Remove the route
+        val removeResp = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/removeRoute"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*"}""")
+        }
+        assertTrue(removeResp.status.isSuccess(), "removeRoute should succeed")
+
+        // Verify route removed
+        policyData = getPolicyData()
+        val routes = policyData["contextualRoutes"]?.jsonObject
+        val mockCalRoutes = routes?.get("mock-calendar")?.jsonObject
+        // After removing the only route, the service entry should be gone
+        assertTrue(mockCalRoutes == null || !mockCalRoutes.containsKey("*"),
+            "Wildcard route should be removed")
+
+        println("    ✓ Route removed: mock-calendar.* no longer exists")
+    }
+
+    // ── getPolicyData (gateway party) ───────────────────────────────────────
+
+    @Test
+    @Order(15)
+    fun `getPolicyData returns complete policy snapshot`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — getPolicyData (full snapshot)           │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        val policyData = getPolicyData()
+
+        // Services
+        val services = policyData["services"]?.jsonObject
+        assertNotNull(services, "Should have services map")
+        assertTrue(services!!.containsKey("mock-calendar"), "Should contain mock-calendar")
+        println("    Services: ${services.keys}")
+
+        // Grants
+        val grants = policyData["grants"]?.jsonObject
+        assertNotNull(grants, "Should have grants map")
+        assertTrue(grants!!.containsKey("jarvis@acme.com"), "Should have jarvis grants")
+        println("    Grant subjects: ${grants.keys}")
+
+        // Revoked subjects
+        val revoked = policyData["revokedSubjects"]?.jsonArray
+        assertNotNull(revoked, "Should have revokedSubjects set")
+        println("    Revoked subjects: $revoked")
+
+        // Contextual routes
+        val routes = policyData["contextualRoutes"]?.jsonObject
+        assertNotNull(routes, "Should have contextualRoutes map")
+        println("    Contextual routes: ${routes!!.keys}")
+
+        println("    ✓ getPolicyData returned complete policy snapshot")
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(16)
+    fun `list PolicyStore singleton`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: List PolicyStore Singleton                            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val listResp = client.get("${TestConfig.nplUrl}/npl/policy/PolicyStore/") {
+            header("Authorization", "Bearer $adminToken")
+        }
+
+        assertTrue(listResp.status.isSuccess(), "List should succeed")
+
+        val items = json.parseToJsonElement(listResp.bodyAsText())
+            .jsonObject["items"]?.jsonArray
+        assertNotNull(items, "Should have items")
+        assertEquals(1, items!!.size, "Should have exactly 1 PolicyStore singleton")
+
+        val id = items[0].jsonObject["@id"]?.jsonPrimitive?.content
+        println("    PolicyStore singleton: $id")
+        println("    ✓ Exactly 1 PolicyStore instance exists")
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    /** Call getPolicyData on the PolicyStore singleton using the gateway token. */
+    private suspend fun getPolicyData(): JsonObject {
+        val response = client.post(
+            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/getPolicyData"
+        ) {
+            header("Authorization", "Bearer $gatewayToken")
+            contentType(ContentType.Application.Json)
+            setBody("{}")
+        }
+        assertTrue(response.status.isSuccess(), "getPolicyData should succeed")
+        return json.parseToJsonElement(response.bodyAsText()).jsonObject
+    }
+
     @AfterAll
     fun teardown() {
         println("\n╔════════════════════════════════════════════════════════════════╗")
-        println("║ NPL INTEGRATION TESTS (V2) - Complete                         ║")
+        println("║ NPL INTEGRATION TESTS (PolicyStore) - Complete               ║")
         println("╚════════════════════════════════════════════════════════════════╝")
         if (::client.isInitialized) {
             client.close()

@@ -13,9 +13,6 @@ application {
 }
 
 dependencies {
-    implementation(project(":shared"))
-    
-    // Ktor (version must match gateway)
     val ktorVersion = "3.2.3"
     
     // Ktor server
