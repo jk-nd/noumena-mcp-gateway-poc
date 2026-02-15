@@ -300,9 +300,7 @@ services:
         condition: service_healthy
       opa:
         condition: service_started
-      duckduckgo-mcp:
-        condition: service_started
-      mock-calendar-mcp:
+      mcp-aggregator:
         condition: service_started
     networks:
       - public-net
@@ -349,6 +347,25 @@ services:
       - secrets-net  # For credential proxy access
     profiles:
       - github  # Only enable when GitHub credentials are configured
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # MCP Aggregator (backend-net — multi-backend routing gateway)
+  #
+  # Sits between Envoy and backend MCP servers. Aggregates tools from all
+  # backends and routes tool calls by namespace prefix.
+  # ─────────────────────────────────────────────────────────────────────────
+  mcp-aggregator:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.mcp-aggregator
+    environment:
+      PORT: "8000"
+      BACKENDS: "duckduckgo:http://duckduckgo-mcp:8000,mock-calendar:http://mock-calendar-mcp:8000"
+    depends_on:
+      - duckduckgo-mcp
+      - mock-calendar-mcp
+    networks:
+      - backend-net
 
   # Mock Calendar MCP — HTTP-native Streamable HTTP (bilateral streaming)
   mock-calendar-mcp:

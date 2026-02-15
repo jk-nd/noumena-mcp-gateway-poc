@@ -351,3 +351,47 @@ reason := sprintf("tools/call: user '%s' has no access to %s.%s", [user_id, reso
 reason := "Authorized" if {
 	allow
 }
+
+# --- Granted service names (for tools/list filtering) ---
+
+# Compute the set of service names the user has grants for,
+# filtered by catalog availability (suspended/disabled services excluded)
+granted_service_names contains svc if {
+	user_id
+	some grant in grants[user_id]
+	svc := grant.serviceName
+	service_available_or_no_catalog(svc)
+}
+
+# --- Structured decision for OPA envoy plugin ---
+# The envoy plugin only processes headers when the result is an object.
+# Boolean results (allow = true/false) bypass header injection.
+
+result := {"allowed": allow, "headers": headers, "response_headers_to_add": response_headers}
+
+response_headers["x-authz-reason"] := reason if {
+	reason
+}
+
+# --- Upstream request headers ---
+
+# Pass user identity to upstream (for aggregator filtering and traceability)
+headers["x-user-id"] := user_id if {
+	user_id
+}
+
+# Pass granted services for tools/list filtering — aggregator only fans out to these
+headers["x-granted-services"] := concat(",", sort(granted_service_names)) if {
+	jsonrpc_method == "tools/list"
+	user_id
+}
+
+# Pass resolved service name as upstream header (useful for aggregator debugging)
+headers["x-mcp-service"] := resolved_service_name if {
+	resolved_service_name
+}
+
+# Pass bundle revision for decision traceability
+headers["x-bundle-revision"] := data._bundle_metadata.revision if {
+	data._bundle_metadata.revision
+}

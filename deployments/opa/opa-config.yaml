@@ -13,7 +13,10 @@ bundles:
 plugins:
   envoy_ext_authz_grpc:
     addr: ":9191"
-    path: envoy/authz/allow
+    path: envoy/authz/result
 
 decision_logs:
+  console: true
+
+status:
   console: true

@@ -1,11 +1,6 @@
-# MCP Service Configuration (Bootstrap / TUI Cache)
-#
-# This file defines upstream services, their tools, and user access grants.
-# It is used by the TUI for service management and as a persistent cache of NPL state.
-#
-# NOT read at runtime — OPA fetches all policy data directly from NPL Engine
-# via http.send() with 5-second cache TTL. Changes made here are NOT reflected
-# in policy decisions until synced to NPL via the TUI.
+# Dynamic MCP Service Configuration
+# This file is an import/export format for bulk configuration.
+# PolicyStore is the runtime source of truth.
 
 services:
   - name: "duckduckgo"
@@ -13,35 +8,16 @@ services:
     type: "MCP_STDIO"
     enabled: true
     command: "docker run -i --rm mcp/duckduckgo"
-    args: []
     requiresCredentials: false
     description: "A Model Context Protocol (MCP) server that provides web search capabilities through DuckDuckGo, w..."
     tools:
       - name: "search"
-        description: "Search DuckDuckGo and return formatted results.      Args:         query: The search query string         max_results: Maximum number of results to return (default: 10)         ctx: MCP context for logging"
+        description: ""
         inputSchema:
           type: "object"
-          properties:
-            query:
-              type: "string"
-              description: ""
-            max_results:
-              type: "integer"
-              description: ""
-          required:
-            - "query"
-        enabled: false
-      - name: "fetch_content"
-        description: "Fetch and parse content from a webpage URL.      Args:         url: The webpage URL to fetch content from         ctx: MCP context for logging"
-        inputSchema:
-          type: "object"
-          properties:
-            url:
-              type: "string"
-              description: ""
-          required:
-            - "url"
-        enabled: false
+          properties: {}
+          required: []
+        enabled: true
   - name: "mock-calendar"
     displayName: "Mock Calendar"
     type: "MCP_HTTP"
@@ -50,66 +26,24 @@ services:
     description: "Mock calendar MCP server for bilateral streaming tests. Supports SSE notifications."
     tools:
       - name: "list_events"
-        description: "List calendar events for a given date or date range"
+        description: ""
         inputSchema:
           type: "object"
-          properties:
-            date:
-              type: "string"
-              description: "Date in YYYY-MM-DD format"
-          required:
-            - "date"
+          properties: {}
+          required: []
         enabled: true
       - name: "create_event"
-        description: "Create a new calendar event"
+        description: ""
         inputSchema:
           type: "object"
-          properties:
-            title:
-              type: "string"
-              description: "Event title"
-            start:
-              type: "string"
-              description: "Start time in ISO 8601 format"
-            end:
-              type: "string"
-              description: "End time in ISO 8601 format"
-            attendees:
-              type: "array"
-              items:
-                type: "string"
-              description: "List of attendee emails"
-          required:
-            - "title"
-            - "start"
-            - "end"
+          properties: {}
+          required: []
         enabled: true
-
 user_access:
-  default_template:
-    enabled: false
-    description: "Default access template (disabled - grant explicit per-user access)"
-    tools: {}
   users:
     - userId: "jarvis@acme.com"
-      keycloakId: "04c28d5a-7ac3-4ce8-b51e-04b4a36ba4d2"
-      displayName: "Jarvis AI Agent"
-      createdAt: "2026-02-10T11:06:40.700Z"
       tools:
         duckduckgo:
           - "*"
-        mock-calendar:
-          - "*"
-      vaultPaths: {}
-    - userId: "alice@acme.com"
-      keycloakId: "64d75a3e-25b1-4455-ab7c-21aee1259ed3"
-      displayName: "Alice Chen"
-      createdAt: "2026-02-12T13:12:11.434Z"
+    - userId: "testuser@test.com"
       tools: {}
-      vaultPaths: {}
-    - userId: "dave@acme.com"
-      keycloakId: "efbc2e36-0dc4-478a-95f2-0f39a00f651e"
-      displayName: "Dave Beckham"
-      createdAt: "2026-02-12T13:12:47.636Z"
-      tools: {}
-      vaultPaths: {}

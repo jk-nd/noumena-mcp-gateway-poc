@@ -452,3 +452,93 @@ test_contextual_route_no_match_other_service if {
 		with grants as mock_grants
 		with contextual_routing as routes
 }
+
+# ============================================================================
+# Test: x-granted-services header for tools/list filtering
+# ============================================================================
+
+test_granted_services_header_on_tools_list if {
+	# jarvis has grants for duckduckgo and mock-calendar — both available
+	result := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+
+	result["x-granted-services"] == "duckduckgo,mock-calendar"
+}
+
+test_granted_services_header_excludes_suspended if {
+	# duckduckgo is suspended — should not appear in granted services
+	result := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_suspended_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+
+	# mock-calendar has no catalog entry (allowed) but duckduckgo is suspended (excluded)
+	result["x-granted-services"] == "mock-calendar"
+}
+
+test_granted_services_header_empty_for_no_grants if {
+	# alice has empty grants — header should be empty string
+	result := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_alice),
+		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+
+	result["x-granted-services"] == ""
+}
+
+test_granted_services_not_emitted_for_tools_call if {
+	# x-granted-services should only appear for tools/list, not tools/call
+	result := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":83,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+
+	not result["x-granted-services"]
+}
+
+# ============================================================================
+# Test: x-user-id header
+# ============================================================================
+
+test_user_id_header_emitted if {
+	result := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":84,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+
+	result["x-user-id"] == "jarvis@acme.com"
+}
+
+test_user_id_header_not_emitted_without_auth if {
+	result := headers with input as mock_input_no_auth(
+		"POST", "/mcp",
+		"{\"jsonrpc\":\"2.0\",\"id\":85,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+
+	not result["x-user-id"]
+}

@@ -18,6 +18,7 @@ import os
 import tarfile
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
@@ -37,11 +38,20 @@ KEYCLOAK_REALM = os.environ.get("KEYCLOAK_REALM", "mcpgateway")
 GATEWAY_USERNAME = os.environ.get("GATEWAY_USERNAME", "gateway")
 GATEWAY_PASSWORD = os.environ.get("GATEWAY_PASSWORD", "Welcome123")
 PORT = int(os.environ.get("PORT", "8282"))
+RECONCILIATION_INTERVAL = int(os.environ.get("RECONCILIATION_INTERVAL", "30"))
+STALENESS_THRESHOLD = int(os.environ.get("STALENESS_THRESHOLD", "60"))
 
 # --- Shared state ---
 bundle_lock = threading.Lock()
 current_bundle: bytes | None = None
 current_etag: str | None = None
+current_revision: str | None = None
+current_built_at: float | None = None
+current_sse_event_id: str | None = None
+sse_connected: bool = False
+last_sse_event_at: float | None = None
+rebuild_count: int = 0
+rebuild_error_count: int = 0
 data_ready = threading.Event()
 rebuild_signal = threading.Event()
 
@@ -150,16 +160,38 @@ def fetch_npl_data() -> dict:
 
 
 # --- Bundle building ---
-def build_bundle(policy_data: dict) -> tuple[bytes, str]:
-    """Build an OPA bundle tar.gz containing data.json and .manifest."""
+def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
+    """Build an OPA bundle tar.gz containing data.json and .manifest.
+
+    Returns (bundle_bytes, etag, revision).
+    """
+    # Compute revision from policy data before adding metadata
+    data_for_hash = json.dumps(policy_data, separators=(",", ":"), sort_keys=True)
+    revision = hashlib.sha256(data_for_hash.encode("utf-8")).hexdigest()[:16]
+
+    built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Enrich data with bundle metadata (available to OPA as data._bundle_metadata)
+    policy_data["_bundle_metadata"] = {
+        "built_at": built_at,
+        "revision": revision,
+        "sse_event_id": current_sse_event_id,
+    }
+
     data_json = json.dumps(policy_data, separators=(",", ":"), sort_keys=True)
     data_bytes = data_json.encode("utf-8")
-    revision = hashlib.sha256(data_bytes).hexdigest()[:16]
 
     manifest = json.dumps(
         {
             "revision": revision,
-            "roots": ["catalog", "grants", "contextual_routing", "gateway_token"],
+            "roots": [
+                "catalog",
+                "grants",
+                "contextual_routing",
+                "gateway_token",
+                "_bundle_metadata",
+            ],
+            "metadata": {"built_at": built_at},
         },
         separators=(",", ":"),
     )
@@ -179,33 +211,54 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str]:
 
     bundle_bytes = buf.getvalue()
     etag = f'"{revision}"'
-    return bundle_bytes, etag
+    return bundle_bytes, etag, revision
 
 
 def rebuild():
     """Fetch NPL data and rebuild the bundle."""
-    global current_bundle, current_etag
+    global current_bundle, current_etag, current_revision, current_built_at
+    global rebuild_count, rebuild_error_count
     try:
         policy_data = fetch_npl_data()
-        bundle_bytes, etag = build_bundle(policy_data)
+        prev_revision = current_revision
+        bundle_bytes, etag, revision = build_bundle(policy_data)
+        built_at = time.time()
+        built_at_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with bundle_lock:
             current_bundle = bundle_bytes
             current_etag = etag
+            current_revision = revision
+            current_built_at = built_at
+        rebuild_count += 1
         data_ready.set()
         log.info(
-            "Bundle rebuilt: etag=%s catalog=%d grants=%d routes=%d",
-            etag,
-            len(policy_data["catalog"]),
-            len(policy_data["grants"]),
-            len(policy_data["contextual_routing"]),
+            json.dumps({
+                "event": "bundle_rebuilt",
+                "revision": revision,
+                "previous_revision": prev_revision,
+                "built_at": built_at_iso,
+                "sse_event_id": current_sse_event_id,
+                "catalog_count": len(policy_data["catalog"]),
+                "grants_count": len(policy_data["grants"]),
+                "routes_count": len(policy_data["contextual_routing"]),
+                "changed": revision != prev_revision,
+            })
         )
     except Exception as e:
-        log.error("Failed to rebuild bundle: %s", e)
+        rebuild_error_count += 1
+        log.error(
+            json.dumps({
+                "event": "bundle_rebuild_failed",
+                "error": str(e),
+                "sse_event_id": current_sse_event_id,
+            })
+        )
 
 
 # --- SSE listener thread ---
 def sse_listener():
     """Subscribe to NPL SSE /api/streams/states and trigger rebuilds on state events."""
+    global sse_connected, last_sse_event_at, current_sse_event_id
     last_event_id = None
     backoff = 1
 
@@ -230,18 +283,22 @@ def sse_listener():
 
             client = sseclient.SSEClient(resp)
             backoff = 1  # Reset backoff on successful connection
+            sse_connected = True
             log.info("SSE connected")
 
             for event in client.events():
                 if event.event == "state":
+                    last_sse_event_at = time.time()
                     if event.id:
                         last_event_id = event.id
+                        current_sse_event_id = event.id
                     log.info("SSE state event received (id=%s), signalling rebuild", event.id)
                     rebuild_signal.set()
                 elif event.event == "tick":
                     pass  # Heartbeat, ignore
 
         except Exception as e:
+            sse_connected = False
             log.warning("SSE connection lost: %s — reconnecting in %ds", e, backoff)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
@@ -256,6 +313,17 @@ def rebuild_loop():
         time.sleep(0.1)
         # Drain any additional signals accumulated during debounce
         rebuild_signal.clear()
+        rebuild()
+
+
+def reconciliation_loop():
+    """Periodic fallback: re-fetch NPL data even without SSE trigger.
+
+    Catches silent SSE failures, lost events, and drift.
+    """
+    while True:
+        time.sleep(RECONCILIATION_INTERVAL)
+        log.info("Reconciliation poll triggered")
         rebuild()
 
 
@@ -294,12 +362,36 @@ class BundleHandler(BaseHTTPRequestHandler):
         self.wfile.write(bundle)
 
     def serve_health(self):
-        if data_ready.is_set():
-            self.send_response(200)
-            body = json.dumps({"status": "healthy"}).encode()
-        else:
-            self.send_response(503)
-            body = json.dumps({"status": "initializing"}).encode()
+        now = time.time()
+        bundle_age = round(now - current_built_at, 1) if current_built_at else None
+        stale = bundle_age is not None and bundle_age > STALENESS_THRESHOLD
+
+        status = "healthy"
+        if not data_ready.is_set():
+            status = "initializing"
+        elif stale:
+            status = "degraded"
+
+        last_sse_iso = None
+        if last_sse_event_at is not None:
+            last_sse_iso = datetime.fromtimestamp(
+                last_sse_event_at, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        body_obj = {
+            "status": status,
+            "revision": current_revision,
+            "bundle_age_seconds": bundle_age,
+            "sse_connected": sse_connected,
+            "last_sse_event_at": last_sse_iso,
+            "rebuild_count": rebuild_count,
+            "rebuild_error_count": rebuild_error_count,
+            "staleness_threshold_seconds": STALENESS_THRESHOLD,
+        }
+
+        http_status = 200 if status in ("healthy", "degraded") else 503
+        self.send_response(http_status)
+        body = json.dumps(body_obj).encode()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -313,7 +405,10 @@ class BundleHandler(BaseHTTPRequestHandler):
 # --- Main ---
 def main():
     log.info("OPA Bundle Server starting on port %d", PORT)
-    log.info("NPL_URL=%s  KEYCLOAK_URL=%s  REALM=%s", NPL_URL, KEYCLOAK_URL, KEYCLOAK_REALM)
+    log.info(
+        "NPL_URL=%s  KEYCLOAK_URL=%s  REALM=%s  RECONCILIATION_INTERVAL=%ds  STALENESS_THRESHOLD=%ds",
+        NPL_URL, KEYCLOAK_URL, KEYCLOAK_REALM, RECONCILIATION_INTERVAL, STALENESS_THRESHOLD,
+    )
 
     # Initial data fetch
     log.info("Performing initial data fetch...")
@@ -326,6 +421,12 @@ def main():
     # Start rebuild loop thread (debounces SSE signals)
     rebuild_thread = threading.Thread(target=rebuild_loop, daemon=True, name="rebuild-loop")
     rebuild_thread.start()
+
+    # Start reconciliation loop thread (periodic fallback for SSE failures)
+    recon_thread = threading.Thread(
+        target=reconciliation_loop, daemon=True, name="reconciliation-loop"
+    )
+    recon_thread.start()
 
     # Start HTTP server (blocks main thread)
     server = HTTPServer(("0.0.0.0", PORT), BundleHandler)

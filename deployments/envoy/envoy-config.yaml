@@ -185,7 +185,7 @@ static_resources:
                               - name: ":method"
                                 string_match: {exact: "DELETE"}
                           route:
-                            cluster: mock_calendar_mcp
+                            cluster: mcp_aggregator
                             timeout: 5s
 
                         # MCP notification stream (GET /mcp) — long-lived SSE connection
@@ -197,7 +197,7 @@ static_resources:
                               - name: ":method"
                                 string_match: {exact: "GET"}
                           route:
-                            cluster: mock_calendar_mcp
+                            cluster: mcp_aggregator
                             timeout: 0s  # Long-lived notification stream, never timeout
 
                         # MCP requests (POST /mcp) — JSON-RPC tool calls
@@ -208,7 +208,7 @@ static_resources:
                               - name: ":method"
                                 string_match: {exact: "POST"}
                           route:
-                            cluster: mock_calendar_mcp
+                            cluster: mcp_aggregator
                             timeout: 300s
                 http_filters:
                   # Step 0: CORS (allow MCP Inspector browser at localhost:6274)
@@ -349,6 +349,21 @@ static_resources:
                     socket_address:
                       address: opa
                       port_value: 9191
+
+    # MCP Aggregator (multi-backend routing gateway)
+    - name: mcp_aggregator
+      connect_timeout: 5s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: mcp_aggregator
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: mcp-aggregator
+                      port_value: 8000
 
     # Backend MCP servers (supergateway wrapping STDIO tools)
     - name: duckduckgo_mcp
