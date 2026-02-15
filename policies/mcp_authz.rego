@@ -785,8 +785,31 @@ granted_service_names contains svc if {
 # --- Structured decision for OPA envoy plugin ---
 # The envoy plugin only processes headers when the result is an object.
 # Boolean results (allow = true/false) bypass header injection.
+#
+# gRPC ext_authz behavior:
+#   allowed=true  → "headers" sent upstream, "response_headers_to_add" sent downstream
+#   allowed=false → "headers" included in denial response, "response_headers_to_add" IGNORED
+# So for denied requests, we merge response_headers into headers.
 
-result := {"allowed": allow, "headers": headers, "response_headers_to_add": response_headers}
+result := {"allowed": true, "headers": headers, "response_headers_to_add": response_headers} if {
+	allow
+	response_headers
+}
+
+result := {"allowed": true, "headers": headers} if {
+	allow
+	not response_headers
+}
+
+result := {"allowed": false, "headers": object.union(headers, response_headers)} if {
+	not allow
+	response_headers
+}
+
+result := {"allowed": false, "headers": headers} if {
+	not allow
+	not response_headers
+}
 
 response_headers["x-authz-reason"] := reason if {
 	reason
@@ -847,5 +870,5 @@ response_headers["retry-after"] := "30" if {
 
 # Security policy version for traceability
 response_headers["x-sp-version"] := data._bundle_metadata.security_policy_version if {
-	data._bundle_metadata.security_policy_version
+	data._bundle_metadata.security_policy_version != null
 }

@@ -71,3 +71,11 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V10: ApprovalPolicy party mappings in rules.yml (pAdmin, pGateway, pApprover)
+  - name: mcp-10.0-approval-policy-rules
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

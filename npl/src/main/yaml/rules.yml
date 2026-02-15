@@ -25,3 +25,24 @@ policy.PolicyStore:
       claims:
         role:
           - gateway
+
+# ============================================================================
+# POLICIES PACKAGE - ApprovalPolicy (human-in-the-loop approval)
+# ============================================================================
+
+policies.ApprovalPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+  pApprover:
+    set:
+      claims:
+        role:
+          - admin

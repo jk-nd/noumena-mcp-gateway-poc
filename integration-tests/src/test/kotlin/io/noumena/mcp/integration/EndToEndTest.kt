@@ -38,6 +38,8 @@ class EndToEndTest {
     private lateinit var aliceToken: String    // Denied user (no tool grants)
     private lateinit var client: HttpClient
     private lateinit var storeId: String       // PolicyStore singleton ID (for dynamic tests)
+    private var jarvisSessionId: String? = null  // MCP session for jarvis
+    private var aliceSessionId: String? = null   // MCP session for alice
     private val json = Json {
         ignoreUnknownKeys = true
         prettyPrint = true
@@ -140,6 +142,11 @@ class EndToEndTest {
         val serverInfo = result["serverInfo"]!!.jsonObject
         println("    Server: ${serverInfo["name"]?.jsonPrimitive?.content} v${serverInfo["version"]?.jsonPrimitive?.content}")
 
+        // Capture MCP session ID for subsequent requests
+        jarvisSessionId = response.headers["mcp-session-id"]
+        assertNotNull(jarvisSessionId, "Should receive Mcp-Session-Id header")
+        println("    Session: $jarvisSessionId")
+
         println("    ✓ MCP initialize handshake successful via Streamable HTTP")
     }
 
@@ -152,6 +159,7 @@ class EndToEndTest {
 
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $jarvisToken")
+            jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
             setBody(buildJsonRpc(2, "tools/list"))
         }
@@ -173,8 +181,9 @@ class EndToEndTest {
         val toolNames = tools!!.map { it.jsonObject["name"]?.jsonPrimitive?.content ?: "" }
         println("    Available tools: $toolNames")
 
-        assertTrue(toolNames.contains("list_events"), "Should contain list_events tool")
-        assertTrue(toolNames.contains("create_event"), "Should contain create_event tool")
+        // Tool names are namespaced as <service>.<tool> by the aggregator
+        assertTrue(toolNames.contains("mock-calendar.list_events"), "Should contain mock-calendar.list_events tool")
+        assertTrue(toolNames.contains("mock-calendar.create_event"), "Should contain mock-calendar.create_event tool")
 
         println("    ✓ Tools list retrieved via Streamable HTTP")
     }
@@ -188,8 +197,9 @@ class EndToEndTest {
 
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $jarvisToken")
+            jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(3, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(3, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
         }
 
         println("    Status: ${response.status}")
@@ -218,10 +228,11 @@ class EndToEndTest {
         println("│ TEST: tool call create_event succeeds (jarvis)            │")
         println("└─────────────────────────────────────────────────────────────┘")
 
-        val params = """{"name":"create_event","arguments":{"title":"Integration Test Meeting","date":"2026-02-14","time":"14:00","duration":30}}"""
+        val params = """{"name":"mock-calendar.create_event","arguments":{"title":"Integration Test Meeting","date":"2026-02-14","time":"14:00","duration":30}}"""
 
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $jarvisToken")
+            jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
             setBody(buildJsonRpc(4, "tools/call", params))
         }
@@ -255,7 +266,7 @@ class EndToEndTest {
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $aliceToken")
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(5, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(5, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
         }
 
         println("    Status: ${response.status}")
@@ -287,6 +298,10 @@ class EndToEndTest {
 
         assertEquals(HttpStatusCode.OK, response.status,
             "OPA should allow non-tool-call methods (initialize) regardless of tool grants")
+
+        // Capture alice's session ID for later tests
+        aliceSessionId = response.headers["mcp-session-id"]
+        println("    Session: $aliceSessionId")
 
         println("    ✓ OPA correctly allowed initialize for alice")
     }
@@ -398,8 +413,9 @@ class EndToEndTest {
         println("    Phase 2: Alice calls list_events (should succeed)...")
         val allowedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $aliceToken")
+            aliceSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(10, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(10, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         println("    Alice tool call status: ${allowedResp.status}")
         assertEquals(HttpStatusCode.OK, allowedResp.status,
@@ -424,8 +440,9 @@ class EndToEndTest {
         println("    Phase 4: Alice calls list_events (should be denied)...")
         val deniedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $aliceToken")
+            aliceSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(11, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(11, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         println("    Alice tool call status: ${deniedResp.status}")
         assertEquals(HttpStatusCode.Forbidden, deniedResp.status,
@@ -459,8 +476,9 @@ class EndToEndTest {
         println("    Phase 2: Jarvis calls list_events (should be denied)...")
         val deniedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $jarvisToken")
+            jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(12, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(12, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         println("    Jarvis tool call status: ${deniedResp.status}")
         assertEquals(HttpStatusCode.Forbidden, deniedResp.status,
@@ -485,8 +503,9 @@ class EndToEndTest {
         println("    Phase 4: Jarvis calls list_events (should succeed again)...")
         val allowedResp = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $jarvisToken")
+            jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(13, "tools/call", """{"name":"list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(13, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         println("    Jarvis tool call status: ${allowedResp.status}")
         assertEquals(HttpStatusCode.OK, allowedResp.status,
