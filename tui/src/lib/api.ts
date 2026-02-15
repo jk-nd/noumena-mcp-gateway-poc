@@ -65,6 +65,10 @@ export interface PendingApproval {
   status: string;
   reason: string;
   decidedBy: string;
+  requestPayload: string;
+  serviceName: string;
+  executionStatus: string;
+  executionResult: string;
 }
 
 // ============================================================================
@@ -445,6 +449,15 @@ export async function clearResolvedApprovals(): Promise<void> {
     const error = await response.text();
     throw new Error(`clearResolved failed: ${error}`);
   }
+}
+
+export async function getExecutionResult(approvalId: string): Promise<PendingApproval> {
+  const response = await callApprovalPolicy("getExecutionResult", { approvalId });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`getExecutionResult failed: ${error}`);
+  }
+  return await response.json();
 }
 
 // ============================================================================

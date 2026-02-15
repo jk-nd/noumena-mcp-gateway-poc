@@ -63,3 +63,11 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V9: Store-and-forward — requestPayload, execution tracking on PendingApproval
+  - name: mcp-9.0-store-and-forward
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

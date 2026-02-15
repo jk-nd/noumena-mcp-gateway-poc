@@ -59,6 +59,7 @@ import {
   approveRequest,
   denyRequest,
   clearResolvedApprovals,
+  getExecutionResult,
   getAdminUsername,
   setSecurityPolicy,
   clearSecurityPolicy,
@@ -1942,6 +1943,9 @@ async function reviewApprovalFlow(approval: PendingApproval): Promise<void> {
   console.log();
   console.log(noumena.purple(`  Review: ${approval.approvalId}`));
   console.log(noumena.textDim(`  Caller:   ${approval.callerIdentity}`));
+  if (approval.serviceName) {
+    console.log(noumena.textDim(`  Service:  ${approval.serviceName}`));
+  }
   console.log(noumena.textDim(`  Tool:     ${approval.toolName}`));
   console.log(noumena.textDim(`  Verb:     ${approval.verb}`));
   console.log(noumena.textDim(`  Labels:   ${approval.labels || "(none)"}`));
@@ -1949,6 +1953,27 @@ async function reviewApprovalFlow(approval: PendingApproval): Promise<void> {
   console.log(noumena.textDim(`  Approvers: ${approversDisplay}`));
   if (approval.argumentDigest) {
     console.log(noumena.textDim(`  Digest:   ${approval.argumentDigest.substring(0, 16)}...`));
+  }
+
+  // Display request content (tool arguments) if available
+  if (approval.requestPayload) {
+    try {
+      const payload = JSON.parse(approval.requestPayload);
+      const args = payload?.params?.arguments;
+      if (args && typeof args === "object" && Object.keys(args).length > 0) {
+        console.log();
+        console.log(noumena.accent("  Arguments:"));
+        for (const [key, value] of Object.entries(args)) {
+          let display = String(value);
+          if (display.length > 200) {
+            display = display.substring(0, 200) + "...";
+          }
+          console.log(noumena.textDim(`    ${key}: `) + display);
+        }
+      }
+    } catch {
+      // requestPayload not parseable — skip display
+    }
   }
   console.log();
 
@@ -2014,7 +2039,21 @@ async function approvalHistoryFlow(): Promise<void> {
         : apr.status === "denied" ? noumena.error("✗")
         : noumena.warning("?");
       const reason = apr.reason ? noumena.textDim(` (${apr.reason})`) : "";
-      console.log(`  ${statusIcon} ${apr.approvalId}: ${apr.callerIdentity} → ${apr.toolName} [${apr.status}]${reason}`);
+
+      // Execution status indicator
+      let execInfo = "";
+      if (apr.status === "approved" && apr.executionStatus) {
+        if (apr.executionStatus === "queued") {
+          execInfo = noumena.warning(" ⟳ Executing...");
+        } else if (apr.executionStatus === "completed") {
+          execInfo = noumena.success(" ✓ Executed");
+        } else if (apr.executionStatus === "failed") {
+          const snippet = apr.executionResult ? apr.executionResult.substring(0, 60) : "unknown error";
+          execInfo = noumena.error(` ✗ Failed: ${snippet}`);
+        }
+      }
+
+      console.log(`  ${statusIcon} ${apr.approvalId}: ${apr.callerIdentity} → ${apr.toolName} [${apr.status}]${reason}${execInfo}`);
     }
   }
 

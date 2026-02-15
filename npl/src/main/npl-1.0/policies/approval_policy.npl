@@ -14,6 +14,10 @@ package policies
  * @param status       "pending" | "approved" | "denied"
  * @param reason       Denial reason (empty if approved/pending)
  * @param decidedBy    Identity of approver/denier (empty if pending)
+ * @param requestPayload  Full JSON-RPC body (for replay + audit)
+ * @param serviceName     MCP service name (for replay routing, e.g. "gmail")
+ * @param executionStatus "none" | "queued" | "completed" | "failed"
+ * @param executionResult Upstream response JSON (empty until executed)
  */
 struct PendingApproval {
     approvalId: Text,
@@ -26,7 +30,11 @@ struct PendingApproval {
     approvers: List<Text>,
     status: Text,
     reason: Text,
-    decidedBy: Text
+    decidedBy: Text,
+    requestPayload: Text,
+    serviceName: Text,
+    executionStatus: Text,
+    executionResult: Text
 };
 
 /**
@@ -78,6 +86,8 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
      * @param annotations     Comma-separated active hints (destructiveHint,openWorldHint)
      * @param argumentDigest  SHA-256 of tool arguments (for matching retries)
      * @param approvers       Comma-separated required approver roles/identities (empty = anyone)
+     * @param requestPayload  Serialized JSON-RPC body from OPA (for store-and-forward replay)
+     * @param serviceName     Resolved MCP service name (for replay routing)
      */
     @api
     permission[pGateway] evaluate(
@@ -88,7 +98,9 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
         labels: Text,
         annotations: Text,
         argumentDigest: Text,
-        approvers: List<Text>
+        approvers: List<Text>,
+        requestPayload: Text,
+        serviceName: Text
     ) returns Text | active {
         var lookupKey = callerIdentity + ":" + toolName + ":" + argumentDigest;
 
@@ -132,7 +144,11 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             approvers = approvers,
             status = "pending",
             reason = "",
-            decidedBy = ""
+            decidedBy = "",
+            requestPayload = requestPayload,
+            serviceName = serviceName,
+            executionStatus = "none",
+            executionResult = ""
         );
 
         approvals = approvals.with(pending);
@@ -187,7 +203,11 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             approvers = existing.approvers,
             status = "approved",
             reason = "",
-            decidedBy = approverIdentity
+            decidedBy = approverIdentity,
+            requestPayload = existing.requestPayload,
+            serviceName = existing.serviceName,
+            executionStatus = "queued",
+            executionResult = existing.executionResult
         );
 
         approvals = approvals.without(existing).with(updated);
@@ -236,7 +256,11 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             approvers = existing.approvers,
             status = "denied",
             reason = reason,
-            decidedBy = approverIdentity
+            decidedBy = approverIdentity,
+            requestPayload = existing.requestPayload,
+            serviceName = existing.serviceName,
+            executionStatus = "none",
+            executionResult = existing.executionResult
         );
 
         approvals = approvals.without(existing).with(updated);
@@ -277,5 +301,73 @@ protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
             function(a: PendingApproval) -> a.status == "pending"
         );
         info("[ApprovalPolicy] Cleared resolved approvals");
+    };
+
+    // ========================================================================
+    // Store-and-forward execution (replay worker)
+    // ========================================================================
+
+    /**
+     * Get all approvals queued for execution (approved + executionStatus == "queued").
+     * Used by the replay worker to find work.
+     */
+    @api
+    permission[pGateway | pAdmin] getQueuedForExecution() returns List<PendingApproval> | active {
+        return approvals.filter(
+            function(a: PendingApproval) -> a.status == "approved" && a.executionStatus == "queued"
+        );
+    };
+
+    /**
+     * Record the result of executing an approved request.
+     *
+     * @param approvalId   ID of the approval (e.g., "APR-1")
+     * @param execStatus   "completed" or "failed"
+     * @param execResult   Upstream response JSON or error message
+     */
+    @api
+    permission[pGateway | pAdmin] recordExecution(approvalId: Text, execStatus: Text, execResult: Text) | active {
+        var maybeApproval = approvals.findFirstOrNone(
+            function(a: PendingApproval) -> a.approvalId == approvalId
+        );
+        require(maybeApproval.isPresent(), "Approval not found");
+
+        var existing = maybeApproval.getOrFail();
+
+        var updated = PendingApproval(
+            approvalId = existing.approvalId,
+            lookupKey = existing.lookupKey,
+            callerIdentity = existing.callerIdentity,
+            toolName = existing.toolName,
+            verb = existing.verb,
+            labels = existing.labels,
+            argumentDigest = existing.argumentDigest,
+            approvers = existing.approvers,
+            status = existing.status,
+            reason = existing.reason,
+            decidedBy = existing.decidedBy,
+            requestPayload = existing.requestPayload,
+            serviceName = existing.serviceName,
+            executionStatus = execStatus,
+            executionResult = execResult
+        );
+
+        approvals = approvals.without(existing).with(updated);
+
+        info("[ApprovalPolicy] Execution recorded for " + approvalId + ": " + execStatus);
+    };
+
+    /**
+     * Get a single approval record by ID (for status polling / execution result retrieval).
+     *
+     * @param approvalId  ID of the approval (e.g., "APR-1")
+     */
+    @api
+    permission[pGateway | pAdmin | pApprover] getExecutionResult(approvalId: Text) returns PendingApproval | active {
+        var maybeApproval = approvals.findFirstOrNone(
+            function(a: PendingApproval) -> a.approvalId == approvalId
+        );
+        require(maybeApproval.isPresent(), "Approval not found");
+        return maybeApproval.getOrFail();
     };
 }

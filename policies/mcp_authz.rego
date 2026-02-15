@@ -636,6 +636,8 @@ npl_evaluate_response := resp if {
 			"annotations": sp_annotations_text,
 			"argumentDigest": argument_digest,
 			"approvers": sp_approvers,
+			"requestPayload": json.marshal(parsed_body),
+			"serviceName": resolved_service_name,
 		},
 		"timeout": "5s",
 	}).body

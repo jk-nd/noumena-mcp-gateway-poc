@@ -41,6 +41,13 @@ PORT = int(os.environ.get("PORT", "8282"))
 RECONCILIATION_INTERVAL = int(os.environ.get("RECONCILIATION_INTERVAL", "30"))
 STALENESS_THRESHOLD = int(os.environ.get("STALENESS_THRESHOLD", "60"))
 
+# Replay worker configuration
+# REPLAY_ENABLED: opt-in to store-and-forward replay (default: false)
+# BACKENDS: JSON mapping of service name → backend URL, e.g. {"gmail":"http://gmail-mcp:8080/mcp"}
+REPLAY_ENABLED = os.environ.get("REPLAY_ENABLED", "false").lower() in ("true", "1", "yes")
+BACKENDS = json.loads(os.environ.get("BACKENDS", "{}"))
+REPLAY_POLL_INTERVAL = int(os.environ.get("REPLAY_POLL_INTERVAL", "5"))
+
 # --- Shared state ---
 bundle_lock = threading.Lock()
 current_bundle: bytes | None = None
@@ -54,6 +61,7 @@ rebuild_count: int = 0
 rebuild_error_count: int = 0
 data_ready = threading.Event()
 rebuild_signal = threading.Event()
+replay_signal = threading.Event()
 
 
 # --- Keycloak token management ---
@@ -314,6 +322,8 @@ def sse_listener():
                         current_sse_event_id = event.id
                     log.info("SSE state event received (id=%s), signalling rebuild", event.id)
                     rebuild_signal.set()
+                    if REPLAY_ENABLED:
+                        replay_signal.set()
                 elif event.event == "tick":
                     pass  # Heartbeat, ignore
 
@@ -422,6 +432,165 @@ class BundleHandler(BaseHTTPRequestHandler):
         pass
 
 
+# --- Replay worker (store-and-forward) ---
+
+def find_approval_policy_instance() -> str | None:
+    """Find the ApprovalPolicy singleton instance ID."""
+    try:
+        headers = auth_header()
+        resp = requests.get(
+            f"{NPL_URL}/npl/policies/ApprovalPolicy/",
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if items:
+            return items[0]["@id"]
+    except Exception as e:
+        log.warning("Failed to find ApprovalPolicy instance: %s", e)
+    return None
+
+
+def get_queued_approvals(instance_id: str) -> list:
+    """Call getQueuedForExecution on the ApprovalPolicy instance."""
+    headers = {**auth_header(), "Content-Type": "application/json"}
+    resp = requests.post(
+        f"{NPL_URL}/npl/policies/ApprovalPolicy/{instance_id}/getQueuedForExecution",
+        headers=headers,
+        json={},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def record_execution(instance_id: str, approval_id: str, exec_status: str, exec_result: str):
+    """Call recordExecution on the ApprovalPolicy instance."""
+    headers = {**auth_header(), "Content-Type": "application/json"}
+    resp = requests.post(
+        f"{NPL_URL}/npl/policies/ApprovalPolicy/{instance_id}/recordExecution",
+        headers=headers,
+        json={
+            "approvalId": approval_id,
+            "execStatus": exec_status,
+            "execResult": exec_result,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
+def execute_replay(approval: dict) -> tuple[str, str]:
+    """Execute a stored request against the backend MCP server.
+
+    Returns (status, result) — ("completed", response_json) or ("failed", error_msg).
+    """
+    approval_id = approval.get("approvalId", "?")
+    service_name = approval.get("serviceName", "")
+    request_payload = approval.get("requestPayload", "")
+
+    if not service_name:
+        return "failed", "No serviceName on approval record"
+
+    if service_name not in BACKENDS:
+        return "failed", f"No backend configured for service '{service_name}'"
+
+    if not request_payload:
+        return "failed", "No requestPayload on approval record"
+
+    backend_url = BACKENDS[service_name]
+
+    try:
+        payload = json.loads(request_payload)
+    except (json.JSONDecodeError, TypeError) as e:
+        return "failed", f"Malformed requestPayload: {e}"
+
+    # Initialize MCP session with backend
+    try:
+        init_payload = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-gateway-replay", "version": "1.0.0"},
+            },
+        }
+        init_resp = requests.post(
+            backend_url,
+            json=init_payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        init_resp.raise_for_status()
+
+        # Send the actual tools/call request
+        resp = requests.post(
+            backend_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        result_text = resp.text
+        log.info(
+            json.dumps({
+                "event": "replay_executed",
+                "approval_id": approval_id,
+                "service": service_name,
+                "status": "completed",
+            })
+        )
+        return "completed", result_text
+
+    except Exception as e:
+        log.error(
+            json.dumps({
+                "event": "replay_failed",
+                "approval_id": approval_id,
+                "service": service_name,
+                "error": str(e),
+            })
+        )
+        return "failed", str(e)
+
+
+def replay_worker():
+    """Process queued approvals: replay stored requests to backend MCP servers."""
+    log.info("Replay worker started (REPLAY_ENABLED=true, backends=%s)", list(BACKENDS.keys()))
+
+    while True:
+        # Wait for SSE state change signal or periodic poll
+        replay_signal.wait(timeout=REPLAY_POLL_INTERVAL)
+        replay_signal.clear()
+
+        instance_id = find_approval_policy_instance()
+        if not instance_id:
+            continue
+
+        try:
+            queued = get_queued_approvals(instance_id)
+        except Exception as e:
+            log.warning("Failed to fetch queued approvals: %s", e)
+            continue
+
+        if not queued:
+            continue
+
+        log.info("Replay worker found %d queued approval(s)", len(queued))
+
+        for approval in queued:
+            approval_id = approval.get("approvalId", "?")
+            exec_status, exec_result = execute_replay(approval)
+
+            try:
+                record_execution(instance_id, approval_id, exec_status, exec_result)
+            except Exception as e:
+                log.error("Failed to record execution for %s: %s", approval_id, e)
+
+
 # --- Main ---
 def main():
     log.info("OPA Bundle Server starting on port %d", PORT)
@@ -447,6 +616,13 @@ def main():
         target=reconciliation_loop, daemon=True, name="reconciliation-loop"
     )
     recon_thread.start()
+
+    # Start replay worker thread (store-and-forward, opt-in)
+    if REPLAY_ENABLED:
+        replay_thread = threading.Thread(target=replay_worker, daemon=True, name="replay-worker")
+        replay_thread.start()
+    else:
+        log.info("Replay worker disabled (set REPLAY_ENABLED=true to enable)")
 
     # Start HTTP server (blocks main thread)
     server = HTTPServer(("0.0.0.0", PORT), BundleHandler)
