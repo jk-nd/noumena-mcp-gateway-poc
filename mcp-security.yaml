@@ -97,8 +97,8 @@ policies:
 
   # --- Fallback ---
 
-  - name: Default deny
-    description: Any tool call not explicitly allowed is denied.
+  - name: Default allow
+    description: Unclassified tools are allowed by default.
     when: {}
-    action: deny
+    action: allow
     priority: 999

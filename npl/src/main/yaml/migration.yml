@@ -55,3 +55,11 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V8: Scoped approvals — approvers List<Text> on PendingApproval, approverIdentity on approve/deny
+  - name: mcp-8.0-scoped-approvals
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
