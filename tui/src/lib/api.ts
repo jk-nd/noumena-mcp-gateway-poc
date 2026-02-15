@@ -25,6 +25,9 @@ let adminPassword: string | null = null;
 // Cached PolicyStore singleton ID
 let policyStoreId: string | null = null;
 
+// Cached ApprovalPolicy instance ID
+let approvalPolicyId: string | null = null;
+
 // ============================================================================
 // PolicyStore types (mirrors NPL structs)
 // ============================================================================
@@ -47,6 +50,20 @@ export interface PolicyData {
   grants: Record<string, GrantEntry[]>;
   revokedSubjects: string[];
   contextualRoutes: Record<string, Record<string, unknown>>;
+  securityPolicy: string;
+}
+
+export interface PendingApproval {
+  approvalId: string;
+  lookupKey: string;
+  callerIdentity: string;
+  toolName: string;
+  verb: string;
+  labels: string;
+  argumentDigest: string;
+  status: string;
+  reason: string;
+  decidedBy: string;
 }
 
 // ============================================================================
@@ -139,6 +156,7 @@ export function setAdminCredentials(username: string, password: string): void {
   cachedToken = null;
   tokenExpiry = 0;
   policyStoreId = null; // Reset PolicyStore cache on re-login
+  approvalPolicyId = null;
 }
 
 export function hasAdminCredentials(): boolean {
@@ -279,6 +297,148 @@ export async function getPolicyData(): Promise<PolicyData> {
     throw new Error(`getPolicyData failed: ${error}`);
   }
   return await response.json();
+}
+
+// ============================================================================
+// PolicyStore Security Policy Actions
+// ============================================================================
+
+/**
+ * Set the security policy (JSON-serialized merged policy).
+ * Called by the apply-security-policy flow after YAML → merge → validate.
+ */
+export async function setSecurityPolicy(policyJson: string): Promise<void> {
+  const response = await callPolicyStore("setSecurityPolicy", { policyJson });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`setSecurityPolicy failed: ${error}`);
+  }
+}
+
+/**
+ * Clear the security policy (revert to no security policy).
+ */
+export async function clearSecurityPolicy(): Promise<void> {
+  const response = await callPolicyStore("clearSecurityPolicy", {});
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`clearSecurityPolicy failed: ${error}`);
+  }
+}
+
+// ============================================================================
+// ApprovalPolicy Core
+// ============================================================================
+
+/**
+ * Find or create the ApprovalPolicy singleton. Caches the ID.
+ */
+export async function ensureApprovalPolicy(): Promise<string> {
+  if (approvalPolicyId) return approvalPolicyId;
+
+  const token = await getKeycloakToken();
+
+  // List existing instances
+  const listResponse = await fetch(`${NPL_URL}/npl/policies/ApprovalPolicy/`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+
+  if (listResponse.ok) {
+    const text = await listResponse.text();
+    const clean = text.replace(/[\x00-\x1f]/g, "");
+    const data = JSON.parse(clean);
+    if (data.items && data.items.length > 0) {
+      approvalPolicyId = data.items[0]["@id"];
+      if (approvalPolicyId) return approvalPolicyId;
+    }
+  }
+
+  // Create singleton
+  const createResponse = await fetch(`${NPL_URL}/npl/policies/ApprovalPolicy/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ "@parties": {} }),
+  });
+
+  if (!createResponse.ok) {
+    const error = await createResponse.text();
+    throw new Error(`Failed to create ApprovalPolicy: ${error}`);
+  }
+
+  const createData = await createResponse.json();
+  approvalPolicyId = createData["@id"];
+  if (!approvalPolicyId) throw new Error("ApprovalPolicy created but no ID returned");
+  return approvalPolicyId;
+}
+
+/**
+ * Call an ApprovalPolicy action.
+ */
+async function callApprovalPolicy(
+  action: string,
+  body: Record<string, unknown> = {}
+): Promise<Response> {
+  const instanceId = await ensureApprovalPolicy();
+  const token = await getKeycloakToken();
+  return fetch(`${NPL_URL}/npl/policies/ApprovalPolicy/${instanceId}/${action}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+// ============================================================================
+// ApprovalPolicy Actions
+// ============================================================================
+
+export async function getPendingApprovals(): Promise<PendingApproval[]> {
+  const response = await callApprovalPolicy("getPendingApprovals");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`getPendingApprovals failed: ${error}`);
+  }
+  return await response.json();
+}
+
+export async function getAllApprovals(): Promise<PendingApproval[]> {
+  const response = await callApprovalPolicy("getAllApprovals");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`getAllApprovals failed: ${error}`);
+  }
+  return await response.json();
+}
+
+export async function approveRequest(approvalId: string): Promise<string> {
+  const response = await callApprovalPolicy("approve", { approvalId });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`approve failed: ${error}`);
+  }
+  return await response.json();
+}
+
+export async function denyRequest(approvalId: string, reason: string): Promise<string> {
+  const response = await callApprovalPolicy("deny", { approvalId, reason });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`deny failed: ${error}`);
+  }
+  return await response.json();
+}
+
+export async function clearResolvedApprovals(): Promise<void> {
+  const response = await callApprovalPolicy("clearResolved");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`clearResolved failed: ${error}`);
+  }
 }
 
 // ============================================================================
@@ -450,7 +610,7 @@ export async function importFromYaml(): Promise<{
   try {
     existingData = await getPolicyData();
   } catch {
-    existingData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {} };
+    existingData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {}, securityPolicy: "" };
   }
 
   // Import services

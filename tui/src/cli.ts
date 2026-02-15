@@ -54,12 +54,23 @@ import {
   listKeycloakUsers,
   createKeycloakUser,
   deleteKeycloakUser,
+  getPendingApprovals,
+  getAllApprovals,
+  approveRequest,
+  denyRequest,
+  clearResolvedApprovals,
+  setSecurityPolicy,
+  clearSecurityPolicy,
   type KeycloakUser,
   type PolicyData,
   type ServiceEntry,
   type GrantEntry,
   type DiscoveredTool,
+  type PendingApproval,
 } from "./lib/api.js";
+import {
+  processSecurityPolicy,
+} from "./lib/security-policy.js";
 
 // Noumena color palette - optimized for dark terminal backgrounds
 const noumena = {
@@ -243,7 +254,7 @@ async function mainMenu(): Promise<boolean> {
     policyData = await getPolicyData();
   } catch (err) {
     policyError = `${err}`;
-    policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {} };
+    policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {}, securityPolicy: "" };
   }
 
   const services = Object.values(policyData.services);
@@ -252,7 +263,15 @@ async function mainMenu(): Promise<boolean> {
   // Count grants (unique subjects)
   const grantCount = Object.keys(policyData.grants).length;
 
+  // Count pending approvals (best-effort — ApprovalPolicy may not exist yet)
+  let pendingCount = 0;
+  try {
+    const pending = await getPendingApprovals();
+    pendingCount = pending.length;
+  } catch { /* ok — ApprovalPolicy may not exist yet */ }
+
   const enabledCount = services.filter((s) => s.enabled).length;
+  const hasSecurityPolicy = policyData.securityPolicy && policyData.securityPolicy.length > 0;
 
   console.clear();
   showHeader();
@@ -262,10 +281,19 @@ async function mainMenu(): Promise<boolean> {
     ? noumena.success("● Connected")
     : noumena.grayDim("○ Disconnected");
 
+  const approvalStatus = pendingCount > 0
+    ? noumena.warning(`${pendingCount} pending`)
+    : noumena.text("0");
+  const policyStatus = hasSecurityPolicy
+    ? noumena.success("active")
+    : noumena.grayDim("none");
+
   console.log(
     noumena.textDim("  Gateway: ") + gatewayStatus +
     noumena.textDim("  |  Services: ") + noumena.text(`${enabledCount}/${services.length}`) +
-    noumena.textDim("  |  Grants: ") + noumena.text(`${grantCount}`)
+    noumena.textDim("  |  Grants: ") + noumena.text(`${grantCount}`) +
+    noumena.textDim("  |  Approvals: ") + approvalStatus +
+    noumena.textDim("  |  Policy: ") + policyStatus
   );
   console.log(
     noumena.textDim("  ") +
@@ -332,6 +360,10 @@ async function mainMenu(): Promise<boolean> {
     { value: "---hdr-users", label: noumena.purple("── User Management ──"), hint: "" },
     { value: "users", label: "  Manage users & tool access", hint: `${grantCount} subject(s) with grants` },
 
+    { value: "---hdr-sec", label: noumena.purple("── Security ──"), hint: "" },
+    { value: "approvals", label: "  Pending Approvals", hint: pendingCount > 0 ? `${pendingCount} waiting` : "None" },
+    { value: "security", label: "  Security Policy", hint: hasSecurityPolicy ? "Active" : "Not configured" },
+
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
     { value: "config", label: "  Import / Export", hint: "YAML import, export, backups" },
     { value: "quit", label: "  Quit", hint: "" },
@@ -352,6 +384,10 @@ async function mainMenu(): Promise<boolean> {
     await addCustomImageFlow();
   } else if (action === "users") {
     await userManagementFlow();
+  } else if (action === "approvals") {
+    await pendingApprovalsFlow();
+  } else if (action === "security") {
+    await securityPolicyFlow();
   } else if (action === "config") {
     await configurationManagerFlow();
   }
@@ -1322,7 +1358,7 @@ async function userManagementFlow(): Promise<void> {
     try {
       policyData = await getPolicyData();
     } catch {
-      policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {} };
+      policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {}, securityPolicy: "" };
     }
 
     console.clear();
@@ -1818,6 +1854,380 @@ async function deleteUserFromKeycloakFlow(kcUser: KeycloakUser): Promise<void> {
   }
 
   p.log.success(`User deleted: ${email}`);
+}
+
+// ============================================================================
+// Pending Approvals — Human-in-the-loop approval workflow
+// ============================================================================
+
+async function pendingApprovalsFlow(): Promise<void> {
+  while (true) {
+    let approvals: PendingApproval[] = [];
+    let error = "";
+    try {
+      approvals = await getPendingApprovals();
+    } catch (err) {
+      error = `${err}`;
+    }
+
+    console.log();
+    console.log(noumena.purple("  Pending Approvals"));
+    console.log(noumena.textDim("  Review and approve/deny tool call requests"));
+    console.log();
+
+    if (error) {
+      p.log.warn(`ApprovalPolicy not available: ${error.substring(0, 60)}`);
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+      return;
+    }
+
+    if (approvals.length === 0) {
+      const action = await p.select({
+        message: "No pending approvals:",
+        options: [
+          { value: "back", label: noumena.textDim("← Back") },
+          { value: "refresh", label: "  Refresh", hint: "Check for new approvals" },
+          { value: "history", label: "  View all approvals (history)", hint: "Including resolved" },
+          { value: "clear", label: "  Clear resolved approvals", hint: "Remove approved/denied records" },
+        ],
+      });
+      if (p.isCancel(action) || action === "back") return;
+      if (action === "refresh") continue;
+      if (action === "history") { await approvalHistoryFlow(); continue; }
+      if (action === "clear") {
+        const s = p.spinner();
+        s.start("Clearing resolved approvals...");
+        try {
+          await clearResolvedApprovals();
+          s.stop(noumena.success("Cleared"));
+        } catch (err) {
+          s.stop(noumena.error("Failed"));
+          p.log.error(`${err}`);
+        }
+        continue;
+      }
+      continue;
+    }
+
+    // Build approval options
+    const options: { value: string; label: string; hint?: string }[] = [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...approvals.map((apr) => ({
+        value: `review:${apr.approvalId}`,
+        label: `  ${noumena.warning("?")} ${apr.approvalId}: ${apr.callerIdentity} → ${apr.toolName}`,
+        hint: `${apr.verb}${apr.labels ? " | " + apr.labels : ""}`,
+      })),
+      { value: "---sep", label: noumena.grayDim("  ──────────"), hint: "" },
+      { value: "refresh", label: "  Refresh" },
+      { value: "history", label: "  View all approvals (history)" },
+    ];
+
+    const action = await p.select({ message: `${approvals.length} pending approval(s):`, options });
+    if (p.isCancel(action) || action === "back") return;
+    if (typeof action === "string" && action.startsWith("---")) continue;
+    if (action === "refresh") continue;
+    if (action === "history") { await approvalHistoryFlow(); continue; }
+
+    if (typeof action === "string" && action.startsWith("review:")) {
+      const approvalId = action.replace("review:", "");
+      const approval = approvals.find((a) => a.approvalId === approvalId);
+      if (approval) await reviewApprovalFlow(approval);
+    }
+  }
+}
+
+async function reviewApprovalFlow(approval: PendingApproval): Promise<void> {
+  console.log();
+  console.log(noumena.purple(`  Review: ${approval.approvalId}`));
+  console.log(noumena.textDim(`  Caller:   ${approval.callerIdentity}`));
+  console.log(noumena.textDim(`  Tool:     ${approval.toolName}`));
+  console.log(noumena.textDim(`  Verb:     ${approval.verb}`));
+  console.log(noumena.textDim(`  Labels:   ${approval.labels || "(none)"}`));
+  if (approval.argumentDigest) {
+    console.log(noumena.textDim(`  Digest:   ${approval.argumentDigest.substring(0, 16)}...`));
+  }
+  console.log();
+
+  const action = await p.select({
+    message: "Decision:",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      { value: "approve", label: noumena.success("  Approve"), hint: "Allow this tool call" },
+      { value: "deny", label: noumena.error("  Deny"), hint: "Block this tool call" },
+    ],
+  });
+
+  if (p.isCancel(action) || action === "back") return;
+
+  if (action === "approve") {
+    const s = p.spinner();
+    s.start(`Approving ${approval.approvalId}...`);
+    try {
+      await approveRequest(approval.approvalId);
+      s.stop(noumena.success(`Approved: ${approval.approvalId}`));
+    } catch (err) {
+      s.stop(noumena.error("Failed"));
+      p.log.error(`${err}`);
+    }
+  } else if (action === "deny") {
+    const reason = await p.text({
+      message: "Denial reason:",
+      placeholder: "e.g., Not authorized for external communication",
+      validate: (v) => (!v || v.trim().length === 0 ? "Reason is required" : undefined),
+    });
+    if (p.isCancel(reason)) return;
+
+    const s = p.spinner();
+    s.start(`Denying ${approval.approvalId}...`);
+    try {
+      await denyRequest(approval.approvalId, String(reason).trim());
+      s.stop(noumena.success(`Denied: ${approval.approvalId}`));
+    } catch (err) {
+      s.stop(noumena.error("Failed"));
+      p.log.error(`${err}`);
+    }
+  }
+}
+
+async function approvalHistoryFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Approval History"));
+  console.log();
+
+  let allApprovals: PendingApproval[] = [];
+  try {
+    allApprovals = await getAllApprovals();
+  } catch (err) {
+    p.log.error(`Failed to fetch approvals: ${err}`);
+    return;
+  }
+
+  if (allApprovals.length === 0) {
+    p.log.info("No approval records");
+  } else {
+    for (const apr of allApprovals) {
+      const statusIcon = apr.status === "approved" ? noumena.success("✓")
+        : apr.status === "denied" ? noumena.error("✗")
+        : noumena.warning("?");
+      const reason = apr.reason ? noumena.textDim(` (${apr.reason})`) : "";
+      console.log(`  ${statusIcon} ${apr.approvalId}: ${apr.callerIdentity} → ${apr.toolName} [${apr.status}]${reason}`);
+    }
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+// ============================================================================
+// Security Policy — View, import, and manage mcp-security.yaml
+// ============================================================================
+
+async function securityPolicyFlow(): Promise<void> {
+  while (true) {
+    let currentPolicy = "";
+    try {
+      const data = await getPolicyData();
+      currentPolicy = data.securityPolicy || "";
+    } catch { /* ok */ }
+
+    const hasCurrent = currentPolicy.length > 0;
+    let policyStats = "";
+    if (hasCurrent) {
+      try {
+        const parsed = JSON.parse(currentPolicy);
+        const tools = Object.values(parsed.tool_annotations || {}).reduce(
+          (sum: number, svc: unknown) => sum + Object.keys(svc as Record<string, unknown>).length, 0
+        );
+        const rules = (parsed.policies || []).length;
+        policyStats = `${tools} tool annotations, ${rules} policy rules`;
+      } catch { policyStats = `${currentPolicy.length} bytes`; }
+    }
+
+    console.log();
+    console.log(noumena.purple("  Security Policy"));
+    console.log(noumena.textDim("  Manage mcp-security.yaml rules (deny/allow/require_approval)"));
+    console.log();
+    console.log(
+      noumena.textDim("  Active: ") +
+      (hasCurrent ? noumena.success(`Yes (${policyStats})`) : noumena.grayDim("None"))
+    );
+    console.log();
+
+    const options: { value: string; label: string; hint?: string }[] = [
+      { value: "back", label: noumena.textDim("← Back") },
+    ];
+    if (hasCurrent) {
+      options.push({ value: "view", label: "  View active policy", hint: "Show rules and annotations" });
+    }
+    options.push({ value: "import", label: "  Import mcp-security.yaml", hint: "Parse, validate, merge, apply" });
+    if (hasCurrent) {
+      options.push({ value: "clear", label: noumena.warning("  Clear security policy"), hint: "Remove all security rules" });
+    }
+
+    const action = await p.select({ message: "Select:", options });
+    if (p.isCancel(action) || action === "back") return;
+
+    if (action === "view") {
+      await viewSecurityPolicyFlow(currentPolicy);
+    } else if (action === "import") {
+      await importSecurityPolicyFlow();
+    } else if (action === "clear") {
+      await clearSecurityPolicyFlow();
+    }
+  }
+}
+
+async function viewSecurityPolicyFlow(policyJson: string): Promise<void> {
+  console.clear();
+  console.log();
+  console.log(noumena.purple("  Active Security Policy"));
+  console.log();
+
+  try {
+    const parsed = JSON.parse(policyJson);
+
+    // Show tool annotations
+    const annotations = parsed.tool_annotations || {};
+    for (const [svcName, tools] of Object.entries(annotations)) {
+      console.log(noumena.accent(`  ${svcName}:`));
+      for (const [toolName, entry] of Object.entries(tools as Record<string, any>)) {
+        const verb = entry.verb || "?";
+        const hints: string[] = [];
+        if (entry.annotations?.readOnlyHint) hints.push("readOnly");
+        if (entry.annotations?.destructiveHint) hints.push("destructive");
+        if (entry.annotations?.openWorldHint) hints.push("openWorld");
+        if (entry.annotations?.idempotentHint) hints.push("idempotent");
+        const labels = (entry.labels || []).join(", ");
+        console.log(noumena.textDim(`    ${toolName}: ${verb}${hints.length ? " [" + hints.join(", ") + "]" : ""}${labels ? " {" + labels + "}" : ""}`));
+      }
+    }
+
+    // Show policies
+    const policies = parsed.policies || [];
+    if (policies.length > 0) {
+      console.log();
+      console.log(noumena.accent("  Policy rules:"));
+      for (const policy of policies) {
+        const actionColor = policy.action === "allow" ? noumena.success
+          : policy.action === "deny" ? noumena.error
+          : noumena.warning;
+        console.log(`    ${actionColor(policy.action.padEnd(17))} p${policy.priority}  ${policy.name}`);
+      }
+    }
+
+    // Show classifiers
+    const classifiers = parsed.classifiers || {};
+    const classifierCount = Object.values(classifiers).reduce(
+      (sum: number, svc: unknown) => sum + Object.keys(svc as Record<string, unknown>).length, 0
+    );
+    if (classifierCount > 0) {
+      console.log();
+      console.log(noumena.textDim(`  ${classifierCount} classifier rule(s) configured`));
+    }
+  } catch {
+    console.log(noumena.textDim(policyJson.substring(0, 2000)));
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to return...", defaultValue: "", placeholder: "" });
+}
+
+async function importSecurityPolicyFlow(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Import Security Policy"));
+  console.log(noumena.textDim("  Parse YAML, resolve profiles, validate, merge, push to PolicyStore"));
+  console.log();
+
+  const filePath = await p.text({
+    message: "Path to mcp-security.yaml:",
+    placeholder: "security-profiles/examples/acme-corp.yaml",
+    validate: (v) => {
+      if (!v || v.trim().length === 0) return "Path is required";
+      return undefined;
+    },
+  });
+  if (p.isCancel(filePath)) return;
+
+  const resolvedPath = path.resolve(String(filePath).trim());
+
+  const s = p.spinner();
+  s.start("Processing security policy...");
+
+  let result: ReturnType<typeof processSecurityPolicy>;
+  try {
+    result = processSecurityPolicy(resolvedPath);
+    s.stop(noumena.success("Policy processed successfully"));
+  } catch (err) {
+    s.stop(noumena.error("Processing failed"));
+    p.log.error(`${err}`);
+    return;
+  }
+
+  // Preview
+  console.log();
+  console.log(noumena.purple("  Policy Summary:"));
+  console.log(noumena.textDim(`  Version:          ${result.merged.version}`));
+  console.log(noumena.textDim(`  Tool annotations: ${result.stats.toolAnnotations}`));
+  console.log(noumena.textDim(`  Classifier tools: ${result.stats.classifierTools}`));
+  console.log(noumena.textDim(`  Policy rules:     ${result.stats.policyRules}`));
+  console.log(noumena.textDim(`  JSON size:        ${result.stats.bytes} bytes`));
+  console.log();
+
+  // Show policy rules
+  for (const policy of result.merged.policies) {
+    const actionColor = policy.action === "allow" ? noumena.success
+      : policy.action === "deny" ? noumena.error
+      : noumena.warning;
+    console.log(`  ${actionColor(policy.action.padEnd(17))} p${policy.priority}  ${policy.name}`);
+  }
+  console.log();
+
+  const confirmed = await p.confirm({
+    message: "Apply this security policy to the gateway?",
+    initialValue: false,
+  });
+  if (p.isCancel(confirmed) || !confirmed) return;
+
+  s.start("Pushing to PolicyStore...");
+  try {
+    await setSecurityPolicy(result.json);
+    s.stop(noumena.success("Security policy applied"));
+  } catch (err) {
+    s.stop(noumena.error("Failed to apply"));
+    p.log.error(`${err}`);
+    return;
+  }
+
+  // Remind about require_approval routes
+  const hasApprovalRules = result.merged.policies.some((pol) => pol.action === "require_approval");
+  if (hasApprovalRules) {
+    console.log();
+    p.log.info("This policy includes require_approval rules.");
+    p.log.info("Ensure contextual routes are registered for the ApprovalPolicy instance.");
+  }
+
+  console.log();
+  await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+}
+
+async function clearSecurityPolicyFlow(): Promise<void> {
+  console.log();
+  const confirmed = await p.confirm({
+    message: "Clear the active security policy? All rules will be removed.",
+    initialValue: false,
+  });
+  if (p.isCancel(confirmed) || !confirmed) return;
+
+  const s = p.spinner();
+  s.start("Clearing security policy...");
+  try {
+    await clearSecurityPolicy();
+    s.stop(noumena.success("Security policy cleared"));
+  } catch (err) {
+    s.stop(noumena.error("Failed"));
+    p.log.error(`${err}`);
+  }
 }
 
 // ============================================================================

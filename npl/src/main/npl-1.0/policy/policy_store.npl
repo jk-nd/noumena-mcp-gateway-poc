@@ -38,7 +38,8 @@ struct PolicyData {
     services: Map<Text, ServiceEntry>,
     grants: Map<Text, List<GrantEntry>>,
     revokedSubjects: Set<Text>,
-    contextualRoutes: Map<Text, Map<Text, ContextualRoute>>
+    contextualRoutes: Map<Text, Map<Text, ContextualRoute>>,
+    securityPolicy: Text
 };
 
 /**
@@ -70,6 +71,9 @@ protocol[pAdmin, pGateway] PolicyStore() {
 
     // --- Contextual routing table (Phase 3) ---
     private var contextualRoutes: Map<Text, Map<Text, ContextualRoute>> = mapOf<Text, Map<Text, ContextualRoute>>();
+
+    // --- Security policy (JSON-serialized mcp-security.yaml) ---
+    private var securityPolicy: Text = "";
 
     // ========================================================================
     // Catalog management
@@ -402,6 +406,29 @@ protocol[pAdmin, pGateway] PolicyStore() {
     };
 
     // ========================================================================
+    // Security policy management
+    // ========================================================================
+
+    /**
+     * Set the security policy (JSON-serialized mcp-security.yaml).
+     * Applied via CLI: parse YAML → validate → merge profiles → serialize → set.
+     */
+    @api
+    permission[pAdmin] setSecurityPolicy(policyJson: Text) | active {
+        securityPolicy = policyJson;
+        info("[PolicyStore] Security policy updated (" + policyJson.length().toText() + " bytes)");
+    };
+
+    /**
+     * Clear the security policy (revert to no security policy).
+     */
+    @api
+    permission[pAdmin] clearSecurityPolicy() | active {
+        securityPolicy = "";
+        info("[PolicyStore] Security policy cleared");
+    };
+
+    // ========================================================================
     // Bundle server reads everything in ONE call
     // ========================================================================
 
@@ -415,7 +442,8 @@ protocol[pAdmin, pGateway] PolicyStore() {
             services = services,
             grants = grants,
             revokedSubjects = revokedSubjects,
-            contextualRoutes = contextualRoutes
+            contextualRoutes = contextualRoutes,
+            securityPolicy = securityPolicy
         );
     };
 }

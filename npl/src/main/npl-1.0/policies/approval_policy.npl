@@ -1,0 +1,245 @@
+package policies
+
+/**
+ * A pending approval record.
+ *
+ * @param approvalId   Unique ID (e.g., "APR-1")
+ * @param lookupKey    Composite key: callerIdentity:toolName:argumentDigest
+ * @param callerIdentity  User who triggered the tool call
+ * @param toolName     Tool being called (e.g., "send_email")
+ * @param verb         Classified verb (e.g., "create", "delete")
+ * @param labels       Comma-separated resolved labels (e.g., "scope:external,category:communication")
+ * @param argumentDigest  SHA-256 of tool arguments (for matching retries)
+ * @param status       "pending" | "approved" | "denied"
+ * @param reason       Denial reason (empty if approved/pending)
+ * @param decidedBy    Identity of approver/denier (empty if pending)
+ */
+struct PendingApproval {
+    approvalId: Text,
+    lookupKey: Text,
+    callerIdentity: Text,
+    toolName: Text,
+    verb: Text,
+    labels: Text,
+    argumentDigest: Text,
+    status: Text,
+    reason: Text,
+    decidedBy: Text
+};
+
+/**
+ * ApprovalPolicy — stateful human-in-the-loop approval for tool calls.
+ *
+ * Flow:
+ *   1. OPA classifies tool call → security policy says "require_approval"
+ *   2. OPA calls evaluate() via contextual route (Layer 2)
+ *   3. First call: creates pending approval, returns "pending:<id>"
+ *   4. Human approves/denies via approve()/deny()
+ *   5. Agent retries → evaluate() finds approved record → returns "allow"
+ *
+ * Approvals are one-time: consumed after returning "allow" or "deny" to
+ * prevent replay. The same (user, tool, arguments) combination always
+ * maps to the same pending approval until it's consumed.
+ *
+ * @party pAdmin    Organization administrator (manages policy, views all approvals)
+ * @party pGateway  MCP Gateway (calls evaluate at request time)
+ * @party pApprover Human approver (approves/denies pending requests)
+ */
+@api
+protocol[pAdmin, pGateway, pApprover] ApprovalPolicy() {
+    initial state active;
+
+    private var approvals: List<PendingApproval> = listOf<PendingApproval>();
+    private var approvalCounter: Number = 0;
+
+    // ========================================================================
+    // Gateway evaluation (called by OPA Layer 2)
+    // ========================================================================
+
+    /**
+     * Evaluate a tool call for approval.
+     *
+     * Returns:
+     *   "allow"         — previously approved (consumes the approval)
+     *   "deny"          — previously denied (consumes the denial)
+     *   "pending:<id>"  — awaiting human decision
+     *
+     * @param toolName        Tool being called
+     * @param callerIdentity  Authenticated user identity
+     * @param sessionId       MCP session ID (reserved for future use)
+     * @param verb            Classified verb (get, create, update, delete)
+     * @param labels          Comma-separated labels (scope:external,data:pii)
+     * @param annotations     Comma-separated active hints (destructiveHint,openWorldHint)
+     * @param argumentDigest  SHA-256 of tool arguments (for matching retries)
+     */
+    @api
+    permission[pGateway] evaluate(
+        toolName: Text,
+        callerIdentity: Text,
+        sessionId: Text,
+        verb: Text,
+        labels: Text,
+        annotations: Text,
+        argumentDigest: Text
+    ) returns Text | active {
+        var lookupKey = callerIdentity + ":" + toolName + ":" + argumentDigest;
+
+        var maybeExisting = approvals.findFirstOrNone(
+            function(a: PendingApproval) -> a.lookupKey == lookupKey
+        );
+
+        if (maybeExisting.isPresent()) {
+            var existing = maybeExisting.getOrFail();
+
+            if (existing.status == "approved") {
+                // One-time: consume approval and allow
+                approvals = approvals.without(existing);
+                info("[ApprovalPolicy] Consumed approval " + existing.approvalId + " for " + callerIdentity + " -> " + toolName);
+                return "allow";
+            };
+
+            if (existing.status == "denied") {
+                // One-time: consume denial and deny
+                approvals = approvals.without(existing);
+                info("[ApprovalPolicy] Consumed denial " + existing.approvalId + " for " + callerIdentity + " -> " + toolName);
+                return "deny";
+            };
+
+            // Still pending — return same ID
+            return "pending:" + existing.approvalId;
+        };
+
+        // No existing decision — create new pending approval
+        approvalCounter = approvalCounter + 1;
+        var approvalId = "APR-" + approvalCounter.toText();
+
+        var pending = PendingApproval(
+            approvalId = approvalId,
+            lookupKey = lookupKey,
+            callerIdentity = callerIdentity,
+            toolName = toolName,
+            verb = verb,
+            labels = labels,
+            argumentDigest = argumentDigest,
+            status = "pending",
+            reason = "",
+            decidedBy = ""
+        );
+
+        approvals = approvals.with(pending);
+
+        info("[ApprovalPolicy] Pending approval " + approvalId + " for " + callerIdentity + " -> " + toolName + " [" + verb + "] labels=[" + labels + "]");
+
+        return "pending:" + approvalId;
+    };
+
+    // ========================================================================
+    // Approver actions
+    // ========================================================================
+
+    /**
+     * Approve a pending tool call request.
+     *
+     * @param approvalId  ID of the pending approval (e.g., "APR-1")
+     * @return "approved"
+     */
+    @api
+    permission[pApprover | pAdmin] approve(approvalId: Text) returns Text | active {
+        var maybeApproval = approvals.findFirstOrNone(
+            function(a: PendingApproval) -> a.approvalId == approvalId
+        );
+        require(maybeApproval.isPresent(), "Approval not found");
+
+        var existing = maybeApproval.getOrFail();
+        require(existing.status == "pending", "Approval is not pending");
+
+        var updated = PendingApproval(
+            approvalId = existing.approvalId,
+            lookupKey = existing.lookupKey,
+            callerIdentity = existing.callerIdentity,
+            toolName = existing.toolName,
+            verb = existing.verb,
+            labels = existing.labels,
+            argumentDigest = existing.argumentDigest,
+            status = "approved",
+            reason = "",
+            decidedBy = ""
+        );
+
+        approvals = approvals.without(existing).with(updated);
+
+        info("[ApprovalPolicy] Approved " + approvalId + " for " + existing.callerIdentity + " -> " + existing.toolName);
+
+        return "approved";
+    };
+
+    /**
+     * Deny a pending tool call request.
+     *
+     * @param approvalId  ID of the pending approval
+     * @param reason      Human-readable reason for denial
+     * @return "denied"
+     */
+    @api
+    permission[pApprover | pAdmin] deny(approvalId: Text, reason: Text) returns Text | active {
+        var maybeApproval = approvals.findFirstOrNone(
+            function(a: PendingApproval) -> a.approvalId == approvalId
+        );
+        require(maybeApproval.isPresent(), "Approval not found");
+
+        var existing = maybeApproval.getOrFail();
+        require(existing.status == "pending", "Approval is not pending");
+
+        var updated = PendingApproval(
+            approvalId = existing.approvalId,
+            lookupKey = existing.lookupKey,
+            callerIdentity = existing.callerIdentity,
+            toolName = existing.toolName,
+            verb = existing.verb,
+            labels = existing.labels,
+            argumentDigest = existing.argumentDigest,
+            status = "denied",
+            reason = reason,
+            decidedBy = ""
+        );
+
+        approvals = approvals.without(existing).with(updated);
+
+        info("[ApprovalPolicy] Denied " + approvalId + " for " + existing.callerIdentity + " -> " + existing.toolName);
+
+        return "denied";
+    };
+
+    // ========================================================================
+    // Admin queries
+    // ========================================================================
+
+    /**
+     * Get all pending approval requests.
+     */
+    @api
+    permission[pAdmin | pApprover] getPendingApprovals() returns List<PendingApproval> | active {
+        return approvals.filter(
+            function(a: PendingApproval) -> a.status == "pending"
+        );
+    };
+
+    /**
+     * Get all approval records (including resolved).
+     */
+    @api
+    permission[pAdmin] getAllApprovals() returns List<PendingApproval> | active {
+        return approvals;
+    };
+
+    /**
+     * Remove all resolved (approved/denied) records, keeping only pending.
+     */
+    @api
+    permission[pAdmin] clearResolved() | active {
+        approvals = approvals.filter(
+            function(a: PendingApproval) -> a.status == "pending"
+        );
+        info("[ApprovalPolicy] Cleared resolved approvals");
+    };
+}

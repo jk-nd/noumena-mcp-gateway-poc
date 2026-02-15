@@ -151,10 +151,20 @@ def fetch_npl_data() -> dict:
 
     contextual_routing = policy_data.get("contextualRoutes", {})
 
+    # Parse security policy JSON (stored as Text in NPL)
+    security_policy = {}
+    raw_security_policy = policy_data.get("securityPolicy", "")
+    if raw_security_policy:
+        try:
+            security_policy = json.loads(raw_security_policy)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("Failed to parse securityPolicy JSON — using empty policy")
+
     return {
         "catalog": catalog,
         "grants": grants,
         "contextual_routing": contextual_routing,
+        "security_policy": security_policy,
         "gateway_token": token_manager.get_token(),
     }
 
@@ -171,11 +181,20 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
 
     built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Compute security policy version hash
+    sp_data = policy_data.get("security_policy", {})
+    if sp_data:
+        sp_json = json.dumps(sp_data, separators=(",", ":"), sort_keys=True)
+        security_policy_version = hashlib.sha256(sp_json.encode("utf-8")).hexdigest()[:16]
+    else:
+        security_policy_version = None
+
     # Enrich data with bundle metadata (available to OPA as data._bundle_metadata)
     policy_data["_bundle_metadata"] = {
         "built_at": built_at,
         "revision": revision,
         "sse_event_id": current_sse_event_id,
+        "security_policy_version": security_policy_version,
     }
 
     data_json = json.dumps(policy_data, separators=(",", ":"), sort_keys=True)
@@ -188,6 +207,7 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
                 "catalog",
                 "grants",
                 "contextual_routing",
+                "security_policy",
                 "gateway_token",
                 "_bundle_metadata",
             ],

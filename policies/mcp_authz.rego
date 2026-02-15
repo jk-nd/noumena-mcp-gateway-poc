@@ -29,11 +29,15 @@ default grants := {}
 
 default contextual_routing := {}
 
+default security_policy := {}
+
 catalog := data.catalog
 
 grants := data.grants
 
 contextual_routing := data.contextual_routing
+
+security_policy := data.security_policy
 
 # --- NPL URL for Layer 2 contextual calls ---
 
@@ -202,6 +206,299 @@ contextual_route := contextual_routing[resolved_service_name]["*"] if {
 	not contextual_routing[resolved_service_name][parsed_tool_name]
 }
 
+# --- Security Policy Evaluation ---
+# Classifies tools/call requests into MCP annotations + verb + labels
+# and evaluates security policy rules to determine allow/deny/require_approval.
+
+# Check if security policies are configured
+has_security_policies if {
+	security_policy.policies
+	count(security_policy.policies) > 0
+}
+
+# Lookup tool annotation from security policy bundle
+sp_tool_entry := security_policy.tool_annotations[resolved_service_name][parsed_tool_name] if {
+	security_policy.tool_annotations
+	security_policy.tool_annotations[resolved_service_name]
+	security_policy.tool_annotations[resolved_service_name][parsed_tool_name]
+}
+
+# --- Tool-name pattern fallback (when no explicit annotation exists) ---
+
+verb_prefix_map := {
+	"read_": "get",
+	"get_": "get",
+	"list_": "list",
+	"search_": "get",
+	"fetch_": "get",
+	"create_": "create",
+	"send_": "create",
+	"add_": "create",
+	"update_": "update",
+	"edit_": "update",
+	"modify_": "update",
+	"delete_": "delete",
+	"remove_": "delete",
+	"revoke_": "delete",
+}
+
+fallback_verb := v if {
+	some prefix, v in verb_prefix_map
+	startswith(parsed_tool_name, prefix)
+}
+
+# --- Resolved annotations ---
+
+# readOnlyHint: from security policy or fallback (get/list tools are read-only)
+resolved_read_only_hint if {
+	sp_tool_entry
+	sp_tool_entry.annotations.readOnlyHint == true
+}
+
+resolved_read_only_hint if {
+	not sp_tool_entry
+	fallback_verb in {"get", "list"}
+}
+
+default resolved_read_only_hint := false
+
+# destructiveHint: from security policy or fallback (delete tools are destructive)
+resolved_destructive_hint if {
+	sp_tool_entry
+	sp_tool_entry.annotations.destructiveHint == true
+}
+
+resolved_destructive_hint if {
+	not sp_tool_entry
+	fallback_verb == "delete"
+}
+
+default resolved_destructive_hint := false
+
+# idempotentHint: from security policy or fallback (get/list are idempotent)
+resolved_idempotent_hint if {
+	sp_tool_entry
+	sp_tool_entry.annotations.idempotentHint == true
+}
+
+resolved_idempotent_hint if {
+	not sp_tool_entry
+	fallback_verb in {"get", "list"}
+}
+
+default resolved_idempotent_hint := false
+
+# openWorldHint: from security policy only (no fallback)
+resolved_open_world_hint if {
+	sp_tool_entry
+	sp_tool_entry.annotations.openWorldHint == true
+}
+
+default resolved_open_world_hint := false
+
+# --- Resolved verb ---
+
+resolved_verb := sp_tool_entry.verb if {
+	sp_tool_entry
+	sp_tool_entry.verb
+}
+
+resolved_verb := fallback_verb if {
+	not sp_tool_entry
+	fallback_verb
+}
+
+# --- Argument classifiers ---
+
+# Classifier with "contains" condition
+classifier_rule_matches(rule) if {
+	rule.contains
+	arguments := parsed_body.params.arguments
+	field_value := arguments[rule.field]
+	contains(field_value, rule.contains)
+}
+
+# Classifier with "not_contains" condition
+classifier_rule_matches(rule) if {
+	rule.not_contains
+	arguments := parsed_body.params.arguments
+	field_value := arguments[rule.field]
+	not contains(field_value, rule.not_contains)
+}
+
+# Classifier with "present: true" condition
+classifier_rule_matches(rule) if {
+	rule.present == true
+	arguments := parsed_body.params.arguments
+	arguments[rule.field]
+}
+
+# Classifier with "present: false" condition
+classifier_rule_matches(rule) if {
+	rule.present == false
+	arguments := parsed_body.params.arguments
+	not arguments[rule.field]
+}
+
+# --- Resolved labels ---
+
+# Static labels from security policy tool entry
+resolved_labels contains label if {
+	sp_tool_entry
+	some label in sp_tool_entry.labels
+}
+
+# Dynamic labels from argument classifiers
+resolved_labels contains label if {
+	security_policy.classifiers
+	security_policy.classifiers[resolved_service_name]
+	some rule in security_policy.classifiers[resolved_service_name][parsed_tool_name]
+	classifier_rule_matches(rule)
+	some label in rule.set_labels
+}
+
+# --- Policy condition matching ---
+
+condition_met("readOnlyHint", val) if {
+	val == resolved_read_only_hint
+}
+
+condition_met("destructiveHint", val) if {
+	val == resolved_destructive_hint
+}
+
+condition_met("idempotentHint", val) if {
+	val == resolved_idempotent_hint
+}
+
+condition_met("openWorldHint", val) if {
+	val == resolved_open_world_hint
+}
+
+condition_met("verb", val) if {
+	val == resolved_verb
+}
+
+condition_met("labels", required_labels) if {
+	every label in required_labels {
+		label in resolved_labels
+	}
+}
+
+# --- Policy rule matching ---
+
+# Default match semantics: "all" (every condition must be met)
+policy_matches(policy) if {
+	not policy.match
+	every key, val in policy.when {
+		condition_met(key, val)
+	}
+}
+
+policy_matches(policy) if {
+	policy.match == "all"
+	every key, val in policy.when {
+		condition_met(key, val)
+	}
+}
+
+# Alternative match semantics: "any" (at least one condition must be met)
+policy_matches(policy) if {
+	policy.match == "any"
+	count(policy.when) > 0
+	some key, val in policy.when
+	condition_met(key, val)
+}
+
+# Collect all matching policies
+matching_policies contains policy if {
+	some policy in security_policy.policies
+	policy_matches(policy)
+}
+
+# Winning priority: lowest number among matching policies
+sp_winning_priority := min({p.priority | some p in matching_policies})
+
+# Action from the highest-priority matching policy
+sp_action := p.action if {
+	some p in matching_policies
+	p.priority == sp_winning_priority
+}
+
+# Fallback: no matching policy → default allow
+sp_action := "allow" if {
+	has_security_policies
+	count(matching_policies) == 0
+}
+
+# Name of the matched rule (for debugging/tracing)
+sp_matched_rule := p.name if {
+	some p in matching_policies
+	p.priority == sp_winning_priority
+}
+
+sp_matched_rule := "no matching policy (default allow)" if {
+	has_security_policies
+	count(matching_policies) == 0
+}
+
+# --- NPL body enrichment ---
+# Serialize resolved classification for contextual policy calls
+
+sp_verb_for_npl := resolved_verb if {
+	resolved_verb
+}
+
+default sp_verb_for_npl := ""
+
+active_annotation_hints contains "readOnlyHint" if {
+	resolved_read_only_hint
+}
+
+active_annotation_hints contains "destructiveHint" if {
+	resolved_destructive_hint
+}
+
+active_annotation_hints contains "idempotentHint" if {
+	resolved_idempotent_hint
+}
+
+active_annotation_hints contains "openWorldHint" if {
+	resolved_open_world_hint
+}
+
+sp_annotations_text := concat(",", sort(active_annotation_hints))
+
+sp_labels_text := concat(",", sort(resolved_labels))
+
+argument_digest := crypto.sha256(json.marshal(parsed_body.params.arguments)) if {
+	parsed_body.params
+	parsed_body.params.arguments
+}
+
+default argument_digest := ""
+
+# --- Security policy decision ---
+
+# Allow if no security policies are configured (backward compatible)
+security_policy_allows if {
+	not has_security_policies
+}
+
+# Allow if the winning policy action is "allow"
+security_policy_allows if {
+	has_security_policies
+	sp_action == "allow"
+}
+
+# Allow require_approval to proceed to Layer 2 if a contextual route exists
+# (ApprovalPolicy will manage the approval state)
+security_policy_allows if {
+	has_security_policies
+	sp_action == "require_approval"
+	contextual_route
+}
+
 # --- Allow rules ---
 
 # Rule 1: Stream setup (GET /mcp — empty body, SSE notification stream)
@@ -252,6 +549,31 @@ allow if {
 
 	# No contextual route — fast path
 	not contextual_route
+
+	# Security policy check
+	security_policy_allows
+}
+
+# Rule 3a-sp: tools/call — security policy explicitly allows, skip contextual route
+# When the security policy says "allow", the decision is final — no need for Layer 2.
+# Contextual routes are only used for "require_approval" (ApprovalPolicy workflow).
+allow if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
+
+	# Catalog checks
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+
+	# Grant check
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+
+	# Security policy explicitly allows — overrides contextual route
+	has_security_policies
+	sp_action == "allow"
 }
 
 # Rule 3b: tools/call — contextual route (Layer 2: call NPL evaluate())
@@ -269,9 +591,27 @@ allow if {
 	# Grant check
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 
-	# Contextual route exists — call NPL evaluate()
+	# Security policy check (before NPL call to avoid unnecessary network I/O)
+	security_policy_allows
+
+	# Contextual route exists — check NPL evaluate response
 	contextual_route
-	npl_eval := http.send({
+	npl_evaluate_response == "allow"
+}
+
+# Capture NPL evaluate() response (OPA caches http.send with identical params — single HTTP call)
+npl_evaluate_response := resp if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+	security_policy_allows
+	contextual_route
+	resp := http.send({
 		"method": "POST",
 		"url": sprintf("%s%s", [npl_url, contextual_route.endpoint]),
 		"headers": {
@@ -282,12 +622,19 @@ allow if {
 			"toolName": parsed_tool_name,
 			"callerIdentity": user_id,
 			"sessionId": "",
-			"arguments": "",
+			"verb": sp_verb_for_npl,
+			"labels": sp_labels_text,
+			"annotations": sp_annotations_text,
+			"argumentDigest": argument_digest,
 		},
 		"timeout": "5s",
 	}).body
+}
 
-	npl_eval == "allow"
+# Extract approval ID from "pending:<id>" response
+pending_approval_id := substring(npl_evaluate_response, 8, -1) if {
+	npl_evaluate_response
+	startswith(npl_evaluate_response, "pending:")
 }
 
 # --- Response headers for debugging ---
@@ -348,6 +695,66 @@ reason := sprintf("tools/call: user '%s' has no access to %s.%s", [user_id, reso
 	not user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 }
 
+reason := sprintf("tools/call: denied by security policy '%s'", [sp_matched_rule]) if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+	has_security_policies
+	not security_policy_allows
+	sp_action != "require_approval"
+}
+
+reason := sprintf("tools/call: require_approval by '%s' but no approval route configured", [sp_matched_rule]) if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+	has_security_policies
+	sp_action == "require_approval"
+	not contextual_route
+}
+
+reason := sprintf("tools/call: approval pending %s (policy '%s')", [pending_approval_id, sp_matched_rule]) if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+	has_security_policies
+	sp_action == "require_approval"
+	contextual_route
+	pending_approval_id
+}
+
+reason := sprintf("tools/call: denied by approval policy (policy '%s')", [sp_matched_rule]) if {
+	not is_stream_setup
+	jsonrpc_method == "tools/call"
+	jsonrpc_tool_name
+	user_id
+	resolved_service_name
+	service_available_or_no_catalog(resolved_service_name)
+	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
+	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+	has_security_policies
+	sp_action == "require_approval"
+	contextual_route
+	npl_evaluate_response
+	npl_evaluate_response != "allow"
+	not startswith(npl_evaluate_response, "pending:")
+}
+
 reason := "Authorized" if {
 	allow
 }
@@ -394,4 +801,39 @@ headers["x-mcp-service"] := resolved_service_name if {
 # Pass bundle revision for decision traceability
 headers["x-bundle-revision"] := data._bundle_metadata.revision if {
 	data._bundle_metadata.revision
+}
+
+# Security policy evaluation headers (for debugging/tracing)
+response_headers["x-sp-action"] := sp_action if {
+	has_security_policies
+	sp_action
+}
+
+response_headers["x-sp-rule"] := sp_matched_rule if {
+	has_security_policies
+	sp_matched_rule
+}
+
+response_headers["x-sp-verb"] := resolved_verb if {
+	has_security_policies
+	resolved_verb
+}
+
+response_headers["x-sp-labels"] := concat(",", sort(resolved_labels)) if {
+	has_security_policies
+	count(resolved_labels) > 0
+}
+
+# Approval pending: return approval ID and retry hint
+response_headers["x-approval-id"] := pending_approval_id if {
+	pending_approval_id
+}
+
+response_headers["retry-after"] := "30" if {
+	pending_approval_id
+}
+
+# Security policy version for traceability
+response_headers["x-sp-version"] := data._bundle_metadata.security_policy_version if {
+	data._bundle_metadata.security_policy_version
 }
