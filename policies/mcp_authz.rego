@@ -197,13 +197,53 @@ tool_matches(allowed_tool, requested_tool) if {
 	allowed_tool == requested_tool
 }
 
+# --- MCP Session ID extraction ---
+
+mcp_session_id := http_request.headers["mcp-session-id"] if {
+	http_request.headers["mcp-session-id"]
+}
+
+default mcp_session_id := ""
+
 # --- Contextual routing (Layer 2) ---
-# Find route: specific tool > wildcard
+# Find route group: specific tool > wildcard
+# Supports both legacy single-route shape and new RouteGroup shape.
 
-contextual_route := contextual_routing[resolved_service_name][parsed_tool_name]
+contextual_route_group := contextual_routing[resolved_service_name][parsed_tool_name]
 
-contextual_route := contextual_routing[resolved_service_name]["*"] if {
+contextual_route_group := contextual_routing[resolved_service_name]["*"] if {
 	not contextual_routing[resolved_service_name][parsed_tool_name]
+}
+
+# Legacy compatibility: detect if contextual_route_group is a single ContextualRoute (no "mode" field)
+is_legacy_route if {
+	contextual_route_group
+	contextual_route_group.policyProtocol
+	not contextual_route_group.mode
+}
+
+# Normalize to a list of routes for evaluation
+route_group_mode := "single" if {
+	is_legacy_route
+}
+
+route_group_mode := contextual_route_group.mode if {
+	not is_legacy_route
+	contextual_route_group.mode
+}
+
+route_group_routes := [contextual_route_group] if {
+	is_legacy_route
+}
+
+route_group_routes := contextual_route_group.routes if {
+	not is_legacy_route
+	contextual_route_group.routes
+}
+
+# For backward compat: contextual_route still used in guards to detect "has a route"
+contextual_route := contextual_route_group if {
+	contextual_route_group
 }
 
 # --- Security Policy Evaluation ---
@@ -340,6 +380,43 @@ classifier_rule_matches(rule) if {
 	not arguments[rule.field]
 }
 
+# Classifier with "greater_than" condition (numeric comparison)
+classifier_rule_matches(rule) if {
+	rule.greater_than
+	arguments := parsed_body.params.arguments
+	field_value := arguments[rule.field]
+	to_number(field_value) > rule.greater_than
+}
+
+# Classifier with "less_than" condition (numeric comparison)
+classifier_rule_matches(rule) if {
+	rule.less_than
+	arguments := parsed_body.params.arguments
+	field_value := arguments[rule.field]
+	to_number(field_value) < rule.less_than
+}
+
+# Classifier with "equals_value" condition (string or numeric equality)
+classifier_rule_matches(rule) if {
+	rule.equals_value
+	arguments := parsed_body.params.arguments
+	field_value := arguments[rule.field]
+	sprintf("%v", [field_value]) == sprintf("%v", [rule.equals_value])
+}
+
+# --- Value extractors ---
+# Extract argument values into labels for Layer 2 NPL evaluation.
+# Format: arg:<field>:<value>
+
+extracted_value_labels contains label if {
+	security_policy.value_extractors
+	security_policy.value_extractors[resolved_service_name]
+	some extractor in security_policy.value_extractors[resolved_service_name][parsed_tool_name]
+	arguments := parsed_body.params.arguments
+	field_value := arguments[extractor.field]
+	label := sprintf("%s:%v", [extractor.label_prefix, field_value])
+}
+
 # --- Resolved labels ---
 
 # Static labels from security policy tool entry
@@ -355,6 +432,11 @@ resolved_labels contains label if {
 	some rule in security_policy.classifiers[resolved_service_name][parsed_tool_name]
 	classifier_rule_matches(rule)
 	some label in rule.set_labels
+}
+
+# Labels from value extractors (for Layer 2 NPL protocols)
+resolved_labels contains label if {
+	some label in extracted_value_labels
 }
 
 # --- Policy condition matching ---
@@ -608,7 +690,78 @@ allow if {
 	npl_evaluate_response == "allow"
 }
 
-# Capture NPL evaluate() response (OPA caches http.send with identical params — single HTTP call)
+# --- NPL evaluate() helpers ---
+
+# Call a single NPL route and return its response body
+call_npl_evaluate(route) := http.send({
+	"method": "POST",
+	"url": sprintf("%s%s", [npl_url, route.endpoint]),
+	"headers": {
+		"Authorization": sprintf("Bearer %s", [data.gateway_token]),
+		"Content-Type": "application/json",
+	},
+	"body": {
+		"toolName": parsed_tool_name,
+		"callerIdentity": user_id,
+		"sessionId": mcp_session_id,
+		"verb": sp_verb_for_npl,
+		"labels": sp_labels_text,
+		"annotations": sp_annotations_text,
+		"argumentDigest": argument_digest,
+		"approvers": sp_approvers,
+		"requestPayload": json.marshal(parsed_body),
+		"serviceName": resolved_service_name,
+	},
+	"timeout": "5s",
+}).body
+
+# Collect all route evaluation results
+route_results := [call_npl_evaluate(route) | some route in route_group_routes]
+
+# Evaluate route group by mode
+# "single" mode: single route result
+npl_evaluate_response := route_results[0] if {
+	contextual_route
+	route_group_mode == "single"
+	count(route_results) > 0
+}
+
+# "and" mode: all must return "allow". Short-circuit: any non-allow returns that result.
+npl_evaluate_response := "allow" if {
+	contextual_route
+	route_group_mode == "and"
+	count(route_results) > 0
+	every r in route_results {
+		r == "allow"
+	}
+}
+
+npl_evaluate_response := first_non_allow if {
+	contextual_route
+	route_group_mode == "and"
+	count(route_results) > 0
+	some r in route_results
+	r != "allow"
+	first_non_allow := r
+}
+
+# "or" mode: first "allow" wins. If none allow, return last result.
+npl_evaluate_response := "allow" if {
+	contextual_route
+	route_group_mode == "or"
+	count(route_results) > 0
+	some r in route_results
+	r == "allow"
+}
+
+npl_evaluate_response := route_results[minus(count(route_results), 1)] if {
+	contextual_route
+	route_group_mode == "or"
+	count(route_results) > 0
+	not "allow" in {r | some r in route_results}
+}
+
+# Fallback: direct http.send for backward compat when routes come through unrecognized shapes
 npl_evaluate_response := resp if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
@@ -620,27 +773,8 @@ npl_evaluate_response := resp if {
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 	security_policy_allows
 	contextual_route
-	resp := http.send({
-		"method": "POST",
-		"url": sprintf("%s%s", [npl_url, contextual_route.endpoint]),
-		"headers": {
-			"Authorization": sprintf("Bearer %s", [data.gateway_token]),
-			"Content-Type": "application/json",
-		},
-		"body": {
-			"toolName": parsed_tool_name,
-			"callerIdentity": user_id,
-			"sessionId": "",
-			"verb": sp_verb_for_npl,
-			"labels": sp_labels_text,
-			"annotations": sp_annotations_text,
-			"argumentDigest": argument_digest,
-			"approvers": sp_approvers,
-			"requestPayload": json.marshal(parsed_body),
-			"serviceName": resolved_service_name,
-		},
-		"timeout": "5s",
-	}).body
+	is_legacy_route
+	resp := call_npl_evaluate(contextual_route)
 }
 
 # Extract approval ID from "pending:<id>" response

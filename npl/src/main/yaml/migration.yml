@@ -87,3 +87,12 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V12: Layer 2 protocols — RouteGroup composition, ConstraintPolicy,
+  #      PreconditionPolicy, FlowPolicy, IdentityPolicy, package rename
+  - name: mcp-12.0-layer2-protocols
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

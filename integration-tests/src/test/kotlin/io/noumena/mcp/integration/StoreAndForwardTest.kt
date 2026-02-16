@@ -432,7 +432,7 @@ class StoreAndForwardTest {
         if (::client.isInitialized && ::storeId.isInitialized && ::adminToken.isInitialized) {
             try {
                 // Clear security policy
-                client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/clearSecurityPolicy") {
+                client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/clearSecurityPolicy") {
                     header("Authorization", "Bearer $adminToken")
                     contentType(ContentType.Application.Json)
                     setBody("{}")
@@ -440,7 +440,7 @@ class StoreAndForwardTest {
                 println("║ ✓ Security policy cleared                                    ║")
 
                 // Remove contextual route
-                client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/removeRoute") {
+                client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRoute") {
                     header("Authorization", "Bearer $adminToken")
                     contentType(ContentType.Application.Json)
                     setBody("""{"serviceName": "mock-calendar", "toolName": "*"}""")
@@ -537,7 +537,7 @@ class StoreAndForwardTest {
         val escapedPolicy = json.encodeToString(JsonElement.serializer(), JsonPrimitive(securityPolicyJson))
 
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/setSecurityPolicy"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/setSecurityPolicy"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -549,7 +549,7 @@ class StoreAndForwardTest {
     /** Register contextual route: mock-calendar.* -> ApprovalPolicy/evaluate. */
     private suspend fun registerApprovalRoute() {
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/registerRoute"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerRoute"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)

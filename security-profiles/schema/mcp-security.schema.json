@@ -41,6 +41,13 @@
         "$ref": "#/$defs/serviceClassifiers"
       }
     },
+    "value_extractors": {
+      "type": "object",
+      "description": "Per-service, per-tool value extractors. Extract argument values into labels for Layer 2 evaluation.",
+      "additionalProperties": {
+        "$ref": "#/$defs/serviceValueExtractors"
+      }
+    },
     "policies": {
       "type": "array",
       "description": "Policy rules evaluated in priority order (lowest number = highest priority). First match wins.",
@@ -107,6 +114,21 @@
           "type": "boolean",
           "description": "Match if the field is present (true) or absent (false)."
         },
+        "greater_than": {
+          "type": "number",
+          "description": "Match if the numeric field value is greater than this threshold."
+        },
+        "less_than": {
+          "type": "number",
+          "description": "Match if the numeric field value is less than this threshold."
+        },
+        "equals_value": {
+          "description": "Match if the field value equals this value (string or numeric).",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "number" }
+          ]
+        },
         "set_labels": {
           "$ref": "#/$defs/labels",
           "description": "Labels to add when this classifier matches."
@@ -137,6 +159,32 @@
         "type": "array",
         "items": {
           "$ref": "#/$defs/classifierRule"
+        }
+      }
+    },
+    "valueExtractor": {
+      "type": "object",
+      "description": "Extracts an argument field value into a label for Layer 2 evaluation.",
+      "required": ["field", "label_prefix"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "The argument field name to extract."
+        },
+        "label_prefix": {
+          "type": "string",
+          "description": "Label prefix. The extracted value is appended after a colon (e.g., \"arg:amount\" → \"arg:amount:500\")."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceValueExtractors": {
+      "type": "object",
+      "description": "Per-tool value extractors for a service. Keys are tool names.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/valueExtractor"
         }
       }
     },

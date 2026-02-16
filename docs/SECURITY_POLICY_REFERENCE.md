@@ -14,10 +14,11 @@ Complete reference for the `mcp-security.yaml` file format, tool annotations, cl
 4. [Tool Overrides](#tool-overrides)
 5. [Tool Annotations](#tool-annotations)
 6. [Argument Classifiers](#argument-classifiers)
-7. [Policy Rules](#policy-rules)
-8. [Verb Inference](#verb-inference)
-9. [Evaluation Flow](#evaluation-flow)
-10. [Community Profile Format](#community-profile-format)
+7. [Value Extractors](#value-extractors)
+8. [Policy Rules](#policy-rules)
+9. [Verb Inference](#verb-inference)
+10. [Evaluation Flow](#evaluation-flow)
+11. [Community Profile Format](#community-profile-format)
 
 ---
 
@@ -155,6 +156,8 @@ send_email:
   idempotentHint: false
   verb: create
   labels: [category:communication]
+  value_extractors:
+    - field: to
   classify:
     - field: to
       contains: "@{company_domain}"
@@ -166,6 +169,8 @@ send_email:
       present: true
       set_labels: [data:bcc-used]
 ```
+
+The `value_extractors` section generates labels like `arg:to:user@example.com` from the actual argument values. See [Value Extractors](#value-extractors) for details.
 
 ---
 
@@ -190,8 +195,13 @@ classify:
 | `not_contains` | string | The field value does NOT contain the specified string |
 | `present: true` | boolean | The field exists in the tool arguments |
 | `present: false` | boolean | The field does NOT exist in the tool arguments |
+| `greater_than` | number | The field's numeric value is greater than the specified threshold |
+| `less_than` | number | The field's numeric value is less than the specified threshold |
+| `equals_value` | number | The field's numeric value equals the specified value exactly |
 
 Only one condition type per classifier entry. Each classifier produces zero or more labels.
+
+Numeric conditions (`greater_than`, `less_than`, `equals_value`) attempt to parse the argument value as a number. If the value cannot be parsed, the condition does not match (silently skipped).
 
 ### Template Variables
 
@@ -241,6 +251,95 @@ classify:
     present: false
     set_labels: [missing:approval-code]
 ```
+
+**Flag high-value transactions (numeric):**
+
+```yaml
+classify:
+  - field: amount
+    greater_than: 10000
+    set_labels: [risk:high-value]
+  - field: amount
+    less_than: 100
+    set_labels: [risk:low-value]
+```
+
+**Critical priority match (numeric):**
+
+```yaml
+classify:
+  - field: priority
+    equals_value: 1
+    set_labels: [priority:critical]
+```
+
+---
+
+## Value Extractors
+
+Value extractors read argument field values and generate labels in `arg:<field>:<value>` format. Unlike classifiers (which test conditions and emit fixed labels), extractors pass through the actual argument value as a label, making it available for policy rule matching.
+
+### Extractor Structure
+
+```yaml
+value_extractors:
+  - field: "argument_name"    # Required. Name of the argument field to read.
+```
+
+### Schema
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `field` | string | Yes | Name of the tool argument field to extract. |
+
+### How It Works
+
+For each extractor, OPA reads the named field from the tool call arguments and generates a label `arg:<field>:<value>`. If the field is missing, no label is generated (silently skipped). The value is converted to a string.
+
+### Example
+
+**Profile definition:**
+
+```yaml
+tools:
+  transfer_funds:
+    verb: create
+    labels: [category:finance]
+    value_extractors:
+      - field: currency
+      - field: recipient_country
+    classify:
+      - field: amount
+        greater_than: 10000
+        set_labels: [risk:high-value]
+```
+
+**Tool call arguments:** `{"currency": "USD", "recipient_country": "CH", "amount": 50000}`
+
+**Generated labels:** `category:finance`, `arg:currency:USD`, `arg:recipient_country:CH`, `risk:high-value`
+
+**Policy rule using extracted values:**
+
+```yaml
+policies:
+  - name: Block transfers to sanctioned countries
+    when:
+      labels: [arg:recipient_country:NK]
+    action: deny
+    priority: 0
+
+  - name: Require approval for large CHF transfers
+    when:
+      labels: [arg:currency:CHF, risk:high-value]
+    match: all
+    action: npl_evaluate
+    approvers: [treasury]
+    priority: 10
+```
+
+### Evaluation Order
+
+Value extractors run after static labels are applied and in parallel with argument classifiers. All generated labels (static, classifier, extractor) are accumulated into a single set available for policy rule matching.
 
 ---
 

@@ -1,0 +1,291 @@
+package policies
+
+/**
+ * An identity governance rule for a specific service+tool.
+ *
+ * Rule types:
+ *   - "segregation_of_duties": Actor who performed primaryVerb cannot perform
+ *     secondaryVerb on the same entity (identified by argumentDigest).
+ *   - "four_eyes": At least 2 distinct actors must have acted on the entity
+ *     before the secondary action is allowed.
+ *   - "exclusive_actor": Only the original actor can continue acting on the entity.
+ *
+ * @param serviceName    MCP service name
+ * @param toolName       Tool name
+ * @param ruleType       "segregation_of_duties" | "four_eyes" | "exclusive_actor"
+ * @param primaryVerb    Verb for the primary/initial action (e.g., "create")
+ * @param secondaryVerb  Verb for the secondary action (e.g., "update", "delete")
+ */
+struct IdentityRule {
+    serviceName: Text,
+    toolName: Text,
+    ruleType: Text,
+    primaryVerb: Text,
+    secondaryVerb: Text
+};
+
+/**
+ * A record of an actor's action on an entity.
+ *
+ * @param entityKey       Entity identifier (argumentDigest — same args = same entity)
+ * @param serviceName     MCP service name
+ * @param toolName        Tool name
+ * @param verb            Action verb performed
+ * @param actorIdentity   Authenticated user identity
+ */
+struct ActorRecord {
+    entityKey: Text,
+    serviceName: Text,
+    toolName: Text,
+    verb: Text,
+    actorIdentity: Text
+};
+
+/**
+ * IdentityPolicy — identity governance for tool calls.
+ *
+ * A contextual routing protocol (Layer 2) that enforces identity-based
+ * constraints on who can perform actions. Tracks actor history per entity
+ * and enforces rules like segregation of duties and four-eyes principle.
+ *
+ * Entity identification: uses argumentDigest as the entity key. Same
+ * tool arguments = same entity. Different arguments = different entity.
+ *
+ * Use cases:
+ *   - Segregation of duties: submitter ≠ approver
+ *   - Four-eyes principle: 2 distinct people must review
+ *   - Exclusive actor: only the creator can modify their entity
+ *
+ * Flow:
+ *   1. OPA classifies tool call → security policy says "npl_evaluate"
+ *   2. OPA calls evaluate() via contextual route (Layer 2)
+ *   3. IdentityPolicy checks caller against actor history for the entity
+ *   4. Records the action, returns "allow" or "deny"
+ *
+ * No matching rules = no identity constraints (always "allow").
+ *
+ * @party pAdmin    Organization administrator (manages rules, views history)
+ * @party pGateway  MCP Gateway (calls evaluate at request time)
+ */
+@api
+protocol[pAdmin, pGateway] IdentityPolicy() {
+    initial state active;
+
+    private var identityRules: List<IdentityRule> = listOf<IdentityRule>();
+    private var actorHistory: List<ActorRecord> = listOf<ActorRecord>();
+    private var totalEvaluations: Number = 0;
+    private var totalDenied: Number = 0;
+
+    // ========================================================================
+    // Gateway evaluation (called by OPA Layer 2)
+    // ========================================================================
+
+    /**
+     * Evaluate a tool call against identity governance rules.
+     *
+     * Returns:
+     *   "allow" — identity constraints satisfied (or no rules match)
+     *   "deny"  — identity constraint violated
+     *
+     * @param toolName        Tool being called
+     * @param callerIdentity  Authenticated user identity
+     * @param sessionId       MCP session ID (reserved)
+     * @param verb            Classified verb (used for rule matching)
+     * @param labels          Comma-separated labels (stored for audit)
+     * @param annotations     Comma-separated hints (reserved)
+     * @param argumentDigest  SHA-256 of tool arguments (used as entity key)
+     * @param approvers       Required approver roles (reserved)
+     * @param requestPayload  Serialized JSON-RPC body (reserved)
+     * @param serviceName     Resolved MCP service name
+     */
+    @api
+    permission[pGateway] evaluate(
+        toolName: Text,
+        callerIdentity: Text,
+        sessionId: Text,
+        verb: Text,
+        labels: Text,
+        annotations: Text,
+        argumentDigest: Text,
+        approvers: List<Text>,
+        requestPayload: Text,
+        serviceName: Text
+    ) returns Text | active {
+        totalEvaluations = totalEvaluations + 1;
+
+        // Find rules matching this service+tool where current verb is the secondaryVerb
+        var matchingRules = identityRules.filter(
+            function(r: IdentityRule) -> r.serviceName == serviceName && r.toolName == toolName && r.secondaryVerb == verb
+        );
+
+        // No matching rules = no identity constraints
+        if (matchingRules.size() == 0) {
+            // Record action and allow
+            var record = ActorRecord(
+                entityKey = argumentDigest,
+                serviceName = serviceName,
+                toolName = toolName,
+                verb = verb,
+                actorIdentity = callerIdentity
+            );
+            actorHistory = actorHistory.with(record);
+            return "allow";
+        };
+
+        // Get prior actions on this entity (same argumentDigest + service + tool)
+        var entityHistory = actorHistory.filter(
+            function(rec: ActorRecord) -> rec.entityKey == argumentDigest && rec.serviceName == serviceName && rec.toolName == toolName
+        );
+
+        // Check each rule type separately (NPL lambdas are single expressions)
+        //
+        // segregation_of_duties: caller who did primaryVerb cannot do secondaryVerb
+        var sodViolation = matchingRules.findFirstOrNone(function(rule: IdentityRule) ->
+            rule.ruleType == "segregation_of_duties"
+            && entityHistory.filter(function(rec: ActorRecord) ->
+                rec.verb == rule.primaryVerb && rec.actorIdentity == callerIdentity
+            ).size() > 0
+        );
+
+        // four_eyes: need at least one actor OTHER than caller who did primaryVerb
+        // Violation if: no primary actors at all, OR all primary actors are the caller
+        var feViolation = matchingRules.findFirstOrNone(function(rule: IdentityRule) ->
+            rule.ruleType == "four_eyes"
+            && (entityHistory.filter(function(rec: ActorRecord) -> rec.verb == rule.primaryVerb).size() == 0
+                || entityHistory.filter(function(rec: ActorRecord) -> rec.verb == rule.primaryVerb && rec.actorIdentity != callerIdentity).size() == 0)
+        );
+
+        // exclusive_actor: only original actor can continue acting on entity
+        // Violation if: primary actors exist AND any are different from caller
+        var eaViolation = matchingRules.findFirstOrNone(function(rule: IdentityRule) ->
+            rule.ruleType == "exclusive_actor"
+            && entityHistory.filter(function(rec: ActorRecord) -> rec.verb == rule.primaryVerb).size() > 0
+            && entityHistory.filter(function(rec: ActorRecord) -> rec.verb == rule.primaryVerb && rec.actorIdentity != callerIdentity).size() > 0
+        );
+
+        // Record current action regardless of outcome
+        var record = ActorRecord(
+            entityKey = argumentDigest,
+            serviceName = serviceName,
+            toolName = toolName,
+            verb = verb,
+            actorIdentity = callerIdentity
+        );
+        actorHistory = actorHistory.with(record);
+
+        if (sodViolation.isPresent()) {
+            totalDenied = totalDenied + 1;
+            var violatedRule = sodViolation.getOrFail();
+            info("[IdentityPolicy] Deny " + callerIdentity + " -> " + serviceName + "." + toolName + " (" + violatedRule.ruleType + " violation on entity " + argumentDigest + ")");
+            return "deny";
+        };
+
+        if (feViolation.isPresent()) {
+            totalDenied = totalDenied + 1;
+            var violatedRule = feViolation.getOrFail();
+            info("[IdentityPolicy] Deny " + callerIdentity + " -> " + serviceName + "." + toolName + " (" + violatedRule.ruleType + " violation on entity " + argumentDigest + ")");
+            return "deny";
+        };
+
+        if (eaViolation.isPresent()) {
+            totalDenied = totalDenied + 1;
+            var violatedRule = eaViolation.getOrFail();
+            info("[IdentityPolicy] Deny " + callerIdentity + " -> " + serviceName + "." + toolName + " (" + violatedRule.ruleType + " violation on entity " + argumentDigest + ")");
+            return "deny";
+        };
+
+        info("[IdentityPolicy] Allow " + callerIdentity + " -> " + serviceName + "." + toolName);
+        return "allow";
+    };
+
+    // ========================================================================
+    // Admin: rule management
+    // ========================================================================
+
+    /**
+     * Add an identity governance rule.
+     */
+    @api
+    permission[pAdmin] addIdentityRule(serviceName: Text, toolName: Text, ruleType: Text, primaryVerb: Text, secondaryVerb: Text) | active {
+        var newRule = IdentityRule(
+            serviceName = serviceName,
+            toolName = toolName,
+            ruleType = ruleType,
+            primaryVerb = primaryVerb,
+            secondaryVerb = secondaryVerb
+        );
+        identityRules = identityRules.with(newRule);
+        info("[IdentityPolicy] Added rule: " + serviceName + "." + toolName + " " + ruleType + " (" + primaryVerb + " -> " + secondaryVerb + ")");
+    };
+
+    /**
+     * Remove an identity governance rule.
+     */
+    @api
+    permission[pAdmin] removeIdentityRule(serviceName: Text, toolName: Text, ruleType: Text) | active {
+        var maybeExisting = identityRules.findFirstOrNone(
+            function(r: IdentityRule) -> r.serviceName == serviceName && r.toolName == toolName && r.ruleType == ruleType
+        );
+        if (maybeExisting.isPresent()) {
+            identityRules = identityRules.without(maybeExisting.getOrFail());
+        };
+        info("[IdentityPolicy] Removed rule: " + serviceName + "." + toolName + " " + ruleType);
+    };
+
+    /**
+     * Get all identity governance rules.
+     */
+    @api
+    permission[pAdmin] getIdentityRules() returns List<IdentityRule> | active {
+        return identityRules;
+    };
+
+    // ========================================================================
+    // Admin: actor history
+    // ========================================================================
+
+    /**
+     * Get actor history for a specific entity.
+     */
+    @api
+    permission[pAdmin] getActorHistory(entityKey: Text) returns List<ActorRecord> | active {
+        return actorHistory.filter(
+            function(rec: ActorRecord) -> rec.entityKey == entityKey
+        );
+    };
+
+    /**
+     * Clear actor history for a specific entity.
+     */
+    @api
+    permission[pAdmin] clearActorHistory(entityKey: Text) | active {
+        actorHistory = actorHistory.filter(
+            function(rec: ActorRecord) -> rec.entityKey != entityKey
+        );
+        info("[IdentityPolicy] Cleared actor history for entity: " + entityKey);
+    };
+
+    /**
+     * Clear all actor history.
+     */
+    @api
+    permission[pAdmin] clearAllHistory() | active {
+        actorHistory = listOf<ActorRecord>();
+        info("[IdentityPolicy] Cleared all actor history");
+    };
+
+    // ========================================================================
+    // Admin: statistics
+    // ========================================================================
+
+    /**
+     * Get summary statistics.
+     */
+    @api
+    permission[pAdmin] getStatistics() returns Text | active {
+        return "evaluations=" + totalEvaluations.toText()
+            + ",denied=" + totalDenied.toText()
+            + ",identityRules=" + identityRules.size().toText()
+            + ",actorRecords=" + actorHistory.size().toText();
+    };
+}

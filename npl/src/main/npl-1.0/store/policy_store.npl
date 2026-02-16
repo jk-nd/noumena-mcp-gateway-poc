@@ -1,4 +1,4 @@
-package policy
+package store
 
 /**
  * Entry for a registered MCP service in the catalog.
@@ -31,6 +31,15 @@ struct ContextualRoute {
 };
 
 /**
+ * A group of contextual routes evaluated together for a service+tool.
+ * mode: "single" (legacy), "and" (all must allow), "or" (first allow wins)
+ */
+struct RouteGroup {
+    mode: Text,
+    routes: List<ContextualRoute>
+};
+
+/**
  * Complete policy data returned by getPolicyData().
  * Bundle server reads everything in one call.
  */
@@ -38,7 +47,7 @@ struct PolicyData {
     services: Map<Text, ServiceEntry>,
     grants: Map<Text, List<GrantEntry>>,
     revokedSubjects: Set<Text>,
-    contextualRoutes: Map<Text, Map<Text, ContextualRoute>>,
+    contextualRoutes: Map<Text, Map<Text, RouteGroup>>,
     securityPolicy: Text
 };
 
@@ -69,8 +78,8 @@ protocol[pAdmin, pGateway] PolicyStore() {
     // --- Emergency revocation ---
     private var revokedSubjects: Set<Text> = setOf<Text>();
 
-    // --- Contextual routing table (Phase 3) ---
-    private var contextualRoutes: Map<Text, Map<Text, ContextualRoute>> = mapOf<Text, Map<Text, ContextualRoute>>();
+    // --- Contextual routing table (Layer 2) ---
+    private var contextualRoutes: Map<Text, Map<Text, RouteGroup>> = mapOf<Text, Map<Text, RouteGroup>>();
 
     // --- Security policy (JSON-serialized mcp-security.yaml) ---
     private var securityPolicy: Text = "";
@@ -221,9 +230,9 @@ protocol[pAdmin, pGateway] PolicyStore() {
     permission[pAdmin] grantTool(subjectId: Text, serviceName: Text, toolName: Text) | active {
         var maybeGrants = grants.getOrNone(subjectId);
         var userGrants = if (maybeGrants.isPresent()) {
-            maybeGrants.getOrFail()
+            maybeGrants.getOrFail();
         } else {
-            listOf<GrantEntry>()
+            listOf<GrantEntry>();
         };
         var existing = userGrants.findFirstOrNone(function(g: GrantEntry) -> g.serviceName == serviceName);
 
@@ -246,9 +255,9 @@ protocol[pAdmin, pGateway] PolicyStore() {
     permission[pAdmin] grantAllToolsForService(subjectId: Text, serviceName: Text) | active {
         var maybeGrants = grants.getOrNone(subjectId);
         var userGrants = if (maybeGrants.isPresent()) {
-            maybeGrants.getOrFail()
+            maybeGrants.getOrFail();
         } else {
-            listOf<GrantEntry>()
+            listOf<GrantEntry>();
         };
         var existing = userGrants.findFirstOrNone(function(g: GrantEntry) -> g.serviceName == serviceName);
 
@@ -272,9 +281,9 @@ protocol[pAdmin, pGateway] PolicyStore() {
     permission[pAdmin] revokeTool(subjectId: Text, serviceName: Text, toolName: Text) | active {
         var maybeGrants = grants.getOrNone(subjectId);
         var userGrants = if (maybeGrants.isPresent()) {
-            maybeGrants.getOrFail()
+            maybeGrants.getOrFail();
         } else {
-            listOf<GrantEntry>()
+            listOf<GrantEntry>();
         };
         var existing = userGrants.findFirstOrNone(function(g: GrantEntry) -> g.serviceName == serviceName);
 
@@ -299,9 +308,9 @@ protocol[pAdmin, pGateway] PolicyStore() {
     permission[pAdmin] revokeServiceAccess(subjectId: Text, serviceName: Text) | active {
         var maybeGrants = grants.getOrNone(subjectId);
         var userGrants = if (maybeGrants.isPresent()) {
-            maybeGrants.getOrFail()
+            maybeGrants.getOrFail();
         } else {
-            listOf<GrantEntry>()
+            listOf<GrantEntry>();
         };
         var existing = userGrants.findFirstOrNone(function(g: GrantEntry) -> g.serviceName == serviceName);
 
@@ -332,12 +341,13 @@ protocol[pAdmin, pGateway] PolicyStore() {
     };
 
     // ========================================================================
-    // Contextual routing (Phase 3)
+    // Contextual routing (Layer 2)
     // ========================================================================
 
     /**
      * Register a contextual policy route for a service+tool combination.
-     * Use toolName="*" for service-wide routes.
+     * Creates a single-route RouteGroup. Use toolName="*" for service-wide routes.
+     * If a group already exists for this service+tool, it is replaced.
      */
     @api
     permission[pAdmin] registerRoute(
@@ -349,18 +359,19 @@ protocol[pAdmin, pGateway] PolicyStore() {
     ) | active {
         var maybeRoutes = contextualRoutes.getOrNone(serviceName);
         var serviceRoutes = if (maybeRoutes.isPresent()) {
-            maybeRoutes.getOrFail()
+            maybeRoutes.getOrFail();
         } else {
-            mapOf<Text, ContextualRoute>()
+            mapOf<Text, RouteGroup>();
         };
         var route = ContextualRoute(policyProtocol = routeProtocol, instanceId = instanceId, endpoint = endpoint);
-        serviceRoutes = serviceRoutes.with(toolName, route);
+        var group = RouteGroup(mode = "single", routes = listOf(route));
+        serviceRoutes = serviceRoutes.with(toolName, group);
         contextualRoutes = contextualRoutes.with(serviceName, serviceRoutes);
         info("[PolicyStore] Registered route: " + serviceName + "." + toolName);
     };
 
     /**
-     * Remove a contextual policy route.
+     * Remove all contextual policy routes for a service+tool.
      */
     @api
     permission[pAdmin] removeRoute(serviceName: Text, toolName: Text) | active {
@@ -375,6 +386,94 @@ protocol[pAdmin, pGateway] PolicyStore() {
             };
         };
         info("[PolicyStore] Removed route: " + serviceName + "." + toolName);
+    };
+
+    /**
+     * Add a route to an existing RouteGroup for a service+tool.
+     * If no group exists, creates a new "and" group with this route.
+     */
+    @api
+    permission[pAdmin] addRouteToGroup(
+        serviceName: Text,
+        toolName: Text,
+        routeProtocol: Text,
+        instanceId: Text,
+        endpoint: Text
+    ) | active {
+        var maybeRoutes = contextualRoutes.getOrNone(serviceName);
+        var serviceRoutes = if (maybeRoutes.isPresent()) {
+            maybeRoutes.getOrFail()
+        } else {
+            mapOf<Text, RouteGroup>()
+        };
+        var route = ContextualRoute(policyProtocol = routeProtocol, instanceId = instanceId, endpoint = endpoint);
+
+        var maybeGroup = serviceRoutes.getOrNone(toolName);
+        var group = if (maybeGroup.isPresent()) {
+            var existing = maybeGroup.getOrFail();
+            var newMode = if (existing.mode == "single") { "and" } else { existing.mode };
+            RouteGroup(mode = newMode, routes = existing.routes.with(route));
+        } else {
+            RouteGroup(mode = "and", routes = listOf(route));
+        };
+
+        serviceRoutes = serviceRoutes.with(toolName, group);
+        contextualRoutes = contextualRoutes.with(serviceName, serviceRoutes);
+        info("[PolicyStore] Added route to group: " + serviceName + "." + toolName + " (" + routeProtocol + ")");
+    };
+
+    /**
+     * Remove a route from a RouteGroup by protocol name.
+     * If the group becomes empty, removes the entire group.
+     */
+    @api
+    permission[pAdmin] removeRouteFromGroup(
+        serviceName: Text,
+        toolName: Text,
+        routeProtocol: Text
+    ) | active {
+        var maybeRoutes = contextualRoutes.getOrNone(serviceName);
+        if (maybeRoutes.isPresent()) {
+            var serviceRoutes = maybeRoutes.getOrFail();
+            var maybeGroup = serviceRoutes.getOrNone(toolName);
+            if (maybeGroup.isPresent()) {
+                var existing = maybeGroup.getOrFail();
+                var filtered = existing.routes.filter(
+                    function(r: ContextualRoute) -> r.policyProtocol != routeProtocol
+                );
+                if (filtered.size() == 0) {
+                    serviceRoutes = serviceRoutes.without(toolName);
+                    if (serviceRoutes.size() == 0) {
+                        contextualRoutes = contextualRoutes.without(serviceName);
+                    } else {
+                        contextualRoutes = contextualRoutes.with(serviceName, serviceRoutes);
+                    };
+                } else {
+                    var updatedGroup = RouteGroup(mode = existing.mode, routes = filtered);
+                    serviceRoutes = serviceRoutes.with(toolName, updatedGroup);
+                    contextualRoutes = contextualRoutes.with(serviceName, serviceRoutes);
+                };
+            };
+        };
+        info("[PolicyStore] Removed route from group: " + serviceName + "." + toolName + " (" + routeProtocol + ")");
+    };
+
+    /**
+     * Set the evaluation mode for a RouteGroup: "and" or "or".
+     */
+    @api
+    permission[pAdmin] setRouteGroupMode(serviceName: Text, toolName: Text, mode: Text) | active {
+        require(mode == "and" || mode == "or", "Mode must be 'and' or 'or'");
+        var maybeRoutes = contextualRoutes.getOrNone(serviceName);
+        require(maybeRoutes.isPresent(), "No routes for service");
+        var serviceRoutes = maybeRoutes.getOrFail();
+        var maybeGroup = serviceRoutes.getOrNone(toolName);
+        require(maybeGroup.isPresent(), "No route group for tool");
+        var existing = maybeGroup.getOrFail();
+        var updated = RouteGroup(mode = mode, routes = existing.routes);
+        serviceRoutes = serviceRoutes.with(toolName, updated);
+        contextualRoutes = contextualRoutes.with(serviceName, serviceRoutes);
+        info("[PolicyStore] Set route group mode: " + serviceName + "." + toolName + " -> " + mode);
     };
 
     /**

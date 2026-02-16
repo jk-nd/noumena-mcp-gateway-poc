@@ -398,7 +398,7 @@ class EndToEndTest {
         // Phase 1: Grant alice list_events
         println("    Phase 1: Granting alice list_events on mock-calendar...")
         val grantResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -425,7 +425,7 @@ class EndToEndTest {
         // Phase 3: Revoke alice
         println("    Phase 3: Revoking alice's access...")
         val revokeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -461,7 +461,7 @@ class EndToEndTest {
         // Phase 1: Suspend mock-calendar
         println("    Phase 1: Suspending mock-calendar...")
         val suspendResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/suspendService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/suspendService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -488,7 +488,7 @@ class EndToEndTest {
         // Phase 3: Resume mock-calendar (cleanup)
         println("    Phase 3: Resuming mock-calendar...")
         val resumeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/resumeService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/resumeService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)

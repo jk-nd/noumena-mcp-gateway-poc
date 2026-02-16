@@ -127,7 +127,7 @@ object NplBootstrap {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            val listResp = client.get("${TestConfig.nplUrl}/npl/policy/PolicyStore/") {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/store/PolicyStore/") {
                 header("Authorization", "Bearer $adminToken")
             }
             if (listResp.status.isSuccess()) {
@@ -136,7 +136,7 @@ object NplBootstrap {
                     return items[0].jsonObject["@id"]!!.jsonPrimitive.content
                 }
             }
-            val createResp = client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/") {
+            val createResp = client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"@parties": {}}""")
@@ -154,13 +154,13 @@ object NplBootstrap {
         }
         try {
             // Register (ignore if already exists)
-            client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/registerService") {
+            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerService") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"serviceName": "$serviceName"}""")
             }
             // Enable
-            client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/enableService") {
+            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/enableService") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"serviceName": "$serviceName"}""")
@@ -176,7 +176,7 @@ object NplBootstrap {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/enableTool") {
+            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/enableTool") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"serviceName": "$serviceName", "toolName": "$toolName"}""")
@@ -192,7 +192,7 @@ object NplBootstrap {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantAllToolsForService") {
+            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantAllToolsForService") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"subjectId": "$subjectId", "serviceName": "$serviceName"}""")

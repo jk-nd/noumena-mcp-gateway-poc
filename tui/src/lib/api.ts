@@ -31,6 +31,12 @@ let approvalPolicyId: string | null = null;
 // Cached RateLimitPolicy instance ID
 let rateLimitPolicyId: string | null = null;
 
+// Cached Layer 2 protocol instance IDs
+let constraintPolicyId: string | null = null;
+let preconditionPolicyId: string | null = null;
+let flowPolicyId: string | null = null;
+let identityPolicyId: string | null = null;
+
 // ============================================================================
 // PolicyStore types (mirrors NPL structs)
 // ============================================================================
@@ -84,6 +90,60 @@ export interface UsageRecord {
   callerIdentity: string;
   serviceName: string;
   callCount: number;
+}
+
+export interface ConstraintRule {
+  serviceName: string;
+  toolName: string;
+  maxOccurrences: number;
+  description: string;
+}
+
+export interface ConstraintCounter {
+  callerIdentity: string;
+  serviceName: string;
+  toolName: string;
+  callCount: number;
+}
+
+export interface PreconditionRule {
+  conditionName: string;
+  requiredValue: string;
+  serviceName: string;
+  toolName: string;
+}
+
+export interface FlowRule {
+  sourceService: string;
+  sourceTool: string;
+  targetService: string;
+  targetTool: string;
+  description: string;
+}
+
+export interface CallRecord {
+  sessionId: string;
+  serviceName: string;
+  toolName: string;
+  verb: string;
+  labels: string;
+  callerIdentity: string;
+}
+
+export interface IdentityRule {
+  serviceName: string;
+  toolName: string;
+  ruleType: string;
+  primaryVerb: string;
+  secondaryVerb: string;
+}
+
+export interface ActorRecord {
+  entityKey: string;
+  serviceName: string;
+  toolName: string;
+  verb: string;
+  actorIdentity: string;
 }
 
 // ============================================================================
@@ -178,6 +238,10 @@ export function setAdminCredentials(username: string, password: string): void {
   policyStoreId = null; // Reset PolicyStore cache on re-login
   approvalPolicyId = null;
   rateLimitPolicyId = null;
+  constraintPolicyId = null;
+  preconditionPolicyId = null;
+  flowPolicyId = null;
+  identityPolicyId = null;
 }
 
 export function hasAdminCredentials(): boolean {
@@ -255,7 +319,7 @@ export async function ensurePolicyStore(): Promise<string> {
   const token = await getKeycloakToken();
 
   // List existing instances
-  const listResponse = await fetch(`${NPL_URL}/npl/policy/PolicyStore/`, {
+  const listResponse = await fetch(`${NPL_URL}/npl/store/PolicyStore/`, {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
   });
 
@@ -270,7 +334,7 @@ export async function ensurePolicyStore(): Promise<string> {
   }
 
   // Create singleton
-  const createResponse = await fetch(`${NPL_URL}/npl/policy/PolicyStore/`, {
+  const createResponse = await fetch(`${NPL_URL}/npl/store/PolicyStore/`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -299,7 +363,7 @@ async function callPolicyStore(
 ): Promise<Response> {
   const storeId = await ensurePolicyStore();
   const token = await getKeycloakToken();
-  return fetch(`${NPL_URL}/npl/policy/PolicyStore/${storeId}/${action}`, {
+  return fetch(`${NPL_URL}/npl/store/PolicyStore/${storeId}/${action}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -614,6 +678,273 @@ export async function getRateLimitStatistics(): Promise<string> {
 }
 
 // ============================================================================
+// ConstraintPolicy Core
+// ============================================================================
+
+async function ensureProtocolSingleton(
+  protocolName: string,
+  cachedId: string | null,
+): Promise<string> {
+  if (cachedId) return cachedId;
+
+  const token = await getKeycloakToken();
+
+  const listResponse = await fetch(`${NPL_URL}/npl/policies/${protocolName}/`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+
+  if (listResponse.ok) {
+    const text = await listResponse.text();
+    const clean = text.replace(/[\x00-\x1f]/g, "");
+    const data = JSON.parse(clean);
+    if (data.items && data.items.length > 0) {
+      const id = data.items[0]["@id"];
+      if (id) return id;
+    }
+  }
+
+  const createResponse = await fetch(`${NPL_URL}/npl/policies/${protocolName}/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ "@parties": {} }),
+  });
+
+  if (!createResponse.ok) {
+    const error = await createResponse.text();
+    throw new Error(`Failed to create ${protocolName}: ${error}`);
+  }
+
+  const createData = await createResponse.json();
+  const id = createData["@id"];
+  if (!id) throw new Error(`${protocolName} created but no ID returned`);
+  return id;
+}
+
+async function callProtocol(
+  protocolName: string,
+  instanceId: string,
+  action: string,
+  body: Record<string, unknown> = {},
+): Promise<Response> {
+  const token = await getKeycloakToken();
+  return fetch(`${NPL_URL}/npl/policies/${protocolName}/${instanceId}/${action}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function ensureConstraintPolicy(): Promise<string> {
+  constraintPolicyId = await ensureProtocolSingleton("ConstraintPolicy", constraintPolicyId);
+  return constraintPolicyId;
+}
+
+async function callConstraintPolicy(action: string, body: Record<string, unknown> = {}): Promise<Response> {
+  const id = await ensureConstraintPolicy();
+  return callProtocol("ConstraintPolicy", id, action, body);
+}
+
+export async function setConstraint(serviceName: string, toolName: string, maxOccurrences: number, description: string): Promise<void> {
+  const response = await callConstraintPolicy("setConstraint", { serviceName, toolName, maxOccurrences, description });
+  if (!response.ok) { const e = await response.text(); throw new Error(`setConstraint failed: ${e}`); }
+}
+
+export async function removeConstraint(serviceName: string, toolName: string): Promise<void> {
+  const response = await callConstraintPolicy("removeConstraint", { serviceName, toolName });
+  if (!response.ok) { const e = await response.text(); throw new Error(`removeConstraint failed: ${e}`); }
+}
+
+export async function getConstraints(): Promise<ConstraintRule[]> {
+  const response = await callConstraintPolicy("getConstraints");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getConstraints failed: ${e}`); }
+  return await response.json();
+}
+
+export async function getAllConstraintCounters(): Promise<ConstraintCounter[]> {
+  const response = await callConstraintPolicy("getAllCounters");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getAllCounters failed: ${e}`); }
+  return await response.json();
+}
+
+export async function resetConstraintCounter(callerIdentity: string, serviceName: string, toolName: string): Promise<void> {
+  const response = await callConstraintPolicy("resetCounter", { callerIdentity, serviceName, toolName });
+  if (!response.ok) { const e = await response.text(); throw new Error(`resetCounter failed: ${e}`); }
+}
+
+export async function resetAllConstraintCounters(): Promise<void> {
+  const response = await callConstraintPolicy("resetAllCounters");
+  if (!response.ok) { const e = await response.text(); throw new Error(`resetAllCounters failed: ${e}`); }
+}
+
+export async function getConstraintStatistics(): Promise<string> {
+  const response = await callConstraintPolicy("getStatistics");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getStatistics failed: ${e}`); }
+  return await response.json();
+}
+
+// ============================================================================
+// PreconditionPolicy Core
+// ============================================================================
+
+export async function ensurePreconditionPolicy(): Promise<string> {
+  preconditionPolicyId = await ensureProtocolSingleton("PreconditionPolicy", preconditionPolicyId);
+  return preconditionPolicyId;
+}
+
+async function callPreconditionPolicy(action: string, body: Record<string, unknown> = {}): Promise<Response> {
+  const id = await ensurePreconditionPolicy();
+  return callProtocol("PreconditionPolicy", id, action, body);
+}
+
+export async function setPrecondition(conditionName: string, value: string): Promise<void> {
+  const response = await callPreconditionPolicy("setCondition", { conditionName, value });
+  if (!response.ok) { const e = await response.text(); throw new Error(`setCondition failed: ${e}`); }
+}
+
+export async function removePrecondition(conditionName: string): Promise<void> {
+  const response = await callPreconditionPolicy("removeCondition", { conditionName });
+  if (!response.ok) { const e = await response.text(); throw new Error(`removeCondition failed: ${e}`); }
+}
+
+export async function getPreconditions(): Promise<Record<string, string>> {
+  const response = await callPreconditionPolicy("getConditions");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getConditions failed: ${e}`); }
+  return await response.json();
+}
+
+export async function addPreconditionRule(conditionName: string, requiredValue: string, serviceName: string, toolName: string): Promise<void> {
+  const response = await callPreconditionPolicy("addRule", { conditionName, requiredValue, serviceName, toolName });
+  if (!response.ok) { const e = await response.text(); throw new Error(`addRule failed: ${e}`); }
+}
+
+export async function removePreconditionRule(conditionName: string, serviceName: string, toolName: string): Promise<void> {
+  const response = await callPreconditionPolicy("removeRule", { conditionName, serviceName, toolName });
+  if (!response.ok) { const e = await response.text(); throw new Error(`removeRule failed: ${e}`); }
+}
+
+export async function getPreconditionRules(): Promise<PreconditionRule[]> {
+  const response = await callPreconditionPolicy("getRules");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getRules failed: ${e}`); }
+  return await response.json();
+}
+
+export async function getPreconditionStatistics(): Promise<string> {
+  const response = await callPreconditionPolicy("getStatistics");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getStatistics failed: ${e}`); }
+  return await response.json();
+}
+
+// ============================================================================
+// FlowPolicy Core
+// ============================================================================
+
+export async function ensureFlowPolicy(): Promise<string> {
+  flowPolicyId = await ensureProtocolSingleton("FlowPolicy", flowPolicyId);
+  return flowPolicyId;
+}
+
+async function callFlowPolicy(action: string, body: Record<string, unknown> = {}): Promise<Response> {
+  const id = await ensureFlowPolicy();
+  return callProtocol("FlowPolicy", id, action, body);
+}
+
+export async function setFlowRule(sourceService: string, sourceTool: string, targetService: string, targetTool: string, description: string): Promise<void> {
+  const response = await callFlowPolicy("setFlowRule", { sourceService, sourceTool, targetService, targetTool, description });
+  if (!response.ok) { const e = await response.text(); throw new Error(`setFlowRule failed: ${e}`); }
+}
+
+export async function removeFlowRule(sourceService: string, sourceTool: string, targetService: string, targetTool: string): Promise<void> {
+  const response = await callFlowPolicy("removeFlowRule", { sourceService, sourceTool, targetService, targetTool });
+  if (!response.ok) { const e = await response.text(); throw new Error(`removeFlowRule failed: ${e}`); }
+}
+
+export async function getFlowRules(): Promise<FlowRule[]> {
+  const response = await callFlowPolicy("getFlowRules");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getFlowRules failed: ${e}`); }
+  return await response.json();
+}
+
+export async function getSessionHistory(sessionId: string): Promise<CallRecord[]> {
+  const response = await callFlowPolicy("getSessionHistory", { sessionId });
+  if (!response.ok) { const e = await response.text(); throw new Error(`getSessionHistory failed: ${e}`); }
+  return await response.json();
+}
+
+export async function clearSessionHistory(sessionId: string): Promise<void> {
+  const response = await callFlowPolicy("clearSessionHistory", { sessionId });
+  if (!response.ok) { const e = await response.text(); throw new Error(`clearSessionHistory failed: ${e}`); }
+}
+
+export async function clearAllFlowHistory(): Promise<void> {
+  const response = await callFlowPolicy("clearAllHistory");
+  if (!response.ok) { const e = await response.text(); throw new Error(`clearAllHistory failed: ${e}`); }
+}
+
+export async function getFlowStatistics(): Promise<string> {
+  const response = await callFlowPolicy("getStatistics");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getStatistics failed: ${e}`); }
+  return await response.json();
+}
+
+// ============================================================================
+// IdentityPolicy Core
+// ============================================================================
+
+export async function ensureIdentityPolicy(): Promise<string> {
+  identityPolicyId = await ensureProtocolSingleton("IdentityPolicy", identityPolicyId);
+  return identityPolicyId;
+}
+
+async function callIdentityPolicy(action: string, body: Record<string, unknown> = {}): Promise<Response> {
+  const id = await ensureIdentityPolicy();
+  return callProtocol("IdentityPolicy", id, action, body);
+}
+
+export async function addIdentityRule(serviceName: string, toolName: string, ruleType: string, primaryVerb: string, secondaryVerb: string): Promise<void> {
+  const response = await callIdentityPolicy("addIdentityRule", { serviceName, toolName, ruleType, primaryVerb, secondaryVerb });
+  if (!response.ok) { const e = await response.text(); throw new Error(`addIdentityRule failed: ${e}`); }
+}
+
+export async function removeIdentityRule(serviceName: string, toolName: string, ruleType: string): Promise<void> {
+  const response = await callIdentityPolicy("removeIdentityRule", { serviceName, toolName, ruleType });
+  if (!response.ok) { const e = await response.text(); throw new Error(`removeIdentityRule failed: ${e}`); }
+}
+
+export async function getIdentityRules(): Promise<IdentityRule[]> {
+  const response = await callIdentityPolicy("getIdentityRules");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getIdentityRules failed: ${e}`); }
+  return await response.json();
+}
+
+export async function getActorHistory(entityKey: string): Promise<ActorRecord[]> {
+  const response = await callIdentityPolicy("getActorHistory", { entityKey });
+  if (!response.ok) { const e = await response.text(); throw new Error(`getActorHistory failed: ${e}`); }
+  return await response.json();
+}
+
+export async function clearActorHistory(entityKey: string): Promise<void> {
+  const response = await callIdentityPolicy("clearActorHistory", { entityKey });
+  if (!response.ok) { const e = await response.text(); throw new Error(`clearActorHistory failed: ${e}`); }
+}
+
+export async function clearAllActorHistory(): Promise<void> {
+  const response = await callIdentityPolicy("clearAllHistory");
+  if (!response.ok) { const e = await response.text(); throw new Error(`clearAllHistory failed: ${e}`); }
+}
+
+export async function getIdentityStatistics(): Promise<string> {
+  const response = await callIdentityPolicy("getStatistics");
+  if (!response.ok) { const e = await response.text(); throw new Error(`getStatistics failed: ${e}`); }
+  return await response.json();
+}
+
+// ============================================================================
 // Contextual Route Management (via PolicyStore)
 // ============================================================================
 
@@ -645,6 +976,50 @@ export async function removeContextualRoute(
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`removeRoute failed: ${error}`);
+  }
+}
+
+export async function addRouteToGroup(
+  serviceName: string,
+  toolName: string,
+  routeProtocol: string,
+  instanceId: string,
+  endpoint: string
+): Promise<void> {
+  const response = await callPolicyStore("addRouteToGroup", {
+    serviceName, toolName, routeProtocol, instanceId, endpoint,
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`addRouteToGroup failed: ${error}`);
+  }
+}
+
+export async function removeRouteFromGroup(
+  serviceName: string,
+  toolName: string,
+  routeProtocol: string
+): Promise<void> {
+  const response = await callPolicyStore("removeRouteFromGroup", {
+    serviceName, toolName, routeProtocol,
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`removeRouteFromGroup failed: ${error}`);
+  }
+}
+
+export async function setRouteGroupMode(
+  serviceName: string,
+  toolName: string,
+  mode: string
+): Promise<void> {
+  const response = await callPolicyStore("setRouteGroupMode", {
+    serviceName, toolName, mode,
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`setRouteGroupMode failed: ${error}`);
   }
 }
 

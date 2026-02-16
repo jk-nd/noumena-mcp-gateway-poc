@@ -23,6 +23,7 @@ export interface SecurityPolicyConfig {
   profiles?: string[];
   tool_overrides?: Record<string, Record<string, ToolOverride>>;
   classifiers?: Record<string, Record<string, ClassifierRule[]>>;
+  value_extractors?: Record<string, Record<string, ValueExtractor[]>>;
   policies?: PolicyRule[];
 }
 
@@ -40,7 +41,15 @@ export interface ClassifierRule {
   contains?: string;
   not_contains?: string;
   present?: boolean;
+  greater_than?: number;
+  less_than?: number;
+  equals_value?: string | number;
   set_labels: string[];
+}
+
+export interface ValueExtractor {
+  field: string;
+  label_prefix: string;
 }
 
 export interface PolicyRule {
@@ -89,6 +98,7 @@ export interface MergedSecurityPolicy {
   version: string;
   tool_annotations: Record<string, Record<string, MergedToolAnnotation>>;
   classifiers: Record<string, Record<string, ClassifierRule[]>>;
+  value_extractors: Record<string, Record<string, ValueExtractor[]>>;
   policies: PolicyRule[];
 }
 
@@ -143,6 +153,21 @@ export function validateConfig(config: SecurityPolicyConfig): string[] {
           if (!LABEL_PATTERN.test(label)) {
             errors.push(`classifiers.${service}.${toolName}[${i}].set_labels: invalid label "${label}"`);
           }
+        }
+      }
+    }
+  }
+
+  // Validate value_extractors
+  for (const [service, tools] of Object.entries(config.value_extractors ?? {})) {
+    for (const [toolName, extractors] of Object.entries(tools)) {
+      for (let i = 0; i < extractors.length; i++) {
+        const ext = extractors[i];
+        if (!ext.field) {
+          errors.push(`value_extractors.${service}.${toolName}[${i}]: missing "field"`);
+        }
+        if (!ext.label_prefix) {
+          errors.push(`value_extractors.${service}.${toolName}[${i}]: missing "label_prefix"`);
         }
       }
     }
@@ -260,9 +285,11 @@ export function mergeProfiles(config: SecurityPolicyConfig): MergedSecurityPolic
   const tenantVars = config.tenant ?? {};
   const toolOverrides = config.tool_overrides ?? {};
   const configClassifiers = config.classifiers ?? {};
+  const configExtractors = config.value_extractors ?? {};
 
   const mergedTools: Record<string, Record<string, MergedToolAnnotation>> = {};
   const mergedClassifiers: Record<string, Record<string, ClassifierRule[]>> = {};
+  const mergedExtractors: Record<string, Record<string, ValueExtractor[]>> = {};
 
   // Step 1: Load profiles
   for (const profileName of config.profiles ?? []) {
@@ -318,13 +345,22 @@ export function mergeProfiles(config: SecurityPolicyConfig): MergedSecurityPolic
     }
   }
 
-  // Step 4: Interpolate tenant variables into classifiers
+  // Step 4: Apply operator value_extractors (override per service.tool)
+  for (const [service, tools] of Object.entries(configExtractors)) {
+    if (!mergedExtractors[service]) mergedExtractors[service] = {};
+    for (const [toolName, extractors] of Object.entries(tools)) {
+      mergedExtractors[service][toolName] = extractors;
+    }
+  }
+
+  // Step 5: Interpolate tenant variables into classifiers
   const interpolated = interpolateTenantVars(mergedClassifiers, tenantVars) as typeof mergedClassifiers;
 
   return {
     version: config.version,
     tool_annotations: mergedTools,
     classifiers: interpolated,
+    value_extractors: mergedExtractors,
     policies: config.policies ?? [],
   };
 }

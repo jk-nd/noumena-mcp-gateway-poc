@@ -72,7 +72,7 @@ This document describes the MCP Gateway's service topology, network isolation de
 | Keycloak | Java | 11000 (HTTP), 9000 (health) | public | OIDC identity provider (user auth, JWT issuance) |
 | OPA Sidecar | Go | 9191 (gRPC), 8181 (HTTP) | policy | Rego policy evaluation, Envoy ext_authz |
 | Bundle Server | Python | 8282 | policy, public | SSE-driven OPA bundle builder and server |
-| NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (PolicyStore, ApprovalPolicy, RateLimitPolicy) |
+| NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (PolicyStore, ApprovalPolicy, RateLimitPolicy, ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy) |
 | Engine DB | PostgreSQL | 5432 | policy | NPL Engine persistence |
 | MCP Aggregator | Node.js | 8000 | backend | Multi-backend MCP request routing |
 | DuckDuckGo MCP | Node.js | 8000 | backend | Supergateway sidecar for DuckDuckGo search |
@@ -262,7 +262,7 @@ JWT claims are mapped to NPL protocol parties via `npl/src/main/yaml/rules.yml`:
 | `pGateway` | `gateway` | Gateway service account — runtime policy enforcement |
 | `pApprover` | `admin` | Human approver — approves/denies pending requests (ApprovalPolicy only) |
 
-> **Note:** `pAdmin` and `pGateway` are shared across all contextual routing protocols (ApprovalPolicy, RateLimitPolicy, etc.). `pApprover` is specific to ApprovalPolicy.
+> **Note:** `pAdmin` and `pGateway` are shared across all contextual routing protocols (ApprovalPolicy, RateLimitPolicy, ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy). `pApprover` is specific to ApprovalPolicy.
 
 > Tool users (humans and AI agents) are NOT NPL parties. They are governed by grants inside the PolicyStore, identified by `subjectId`.
 

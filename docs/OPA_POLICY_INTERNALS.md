@@ -16,9 +16,13 @@ Technical reference for the OPA authorization policy (`policies/mcp_authz.rego`)
 6. [JSON-RPC Parsing](#json-rpc-parsing)
 7. [Allow Rules](#allow-rules)
 8. [Security Policy Evaluation in Rego](#security-policy-evaluation-in-rego)
-9. [Envoy ext_authz gRPC Behavior](#envoy-ext_authz-grpc-behavior)
-10. [Response Headers Reference](#response-headers-reference)
-11. [Running and Writing Rego Tests](#running-and-writing-rego-tests)
+9. [Multi-Route AND/OR Evaluation (Route Groups)](#multi-route-andor-evaluation-route-groups)
+10. [Session ID Extraction](#session-id-extraction)
+11. [Value Extractors](#value-extractors)
+12. [Numeric Classifier Conditions](#numeric-classifier-conditions)
+13. [Envoy ext_authz gRPC Behavior](#envoy-ext_authz-grpc-behavior)
+14. [Response Headers Reference](#response-headers-reference)
+15. [Running and Writing Rego Tests](#running-and-writing-rego-tests)
 
 ---
 
@@ -37,7 +41,7 @@ OPA uses a two-layer design to balance speed and flexibility:
 
 - Triggered only when a contextual route exists for the service/tool combination
 - Calls the NPL Engine's `evaluate()` endpoint via `http.send()`
-- Used for stateful decisions (e.g., approvals, rate limiting) that can't be pre-computed
+- Used for stateful decisions (e.g., approvals, rate limiting, constraints, preconditions, flow governance, identity governance) that can't be pre-computed
 - Any protocol implementing `evaluate()` can be plugged in via contextual routing
 - Handles ~1% of requests
 
@@ -152,8 +156,8 @@ The bundle server (`bundle-server/server.py`) builds bundles through this proces
 1. **SSE trigger**: Receives a state change event from NPL Engine's SSE stream (`/api/streams/states`)
 2. **Debounce**: Waits 100ms after the last SSE signal to batch rapid changes
 3. **Fetch data**: Makes 2 HTTP calls to NPL Engine:
-   - `GET /npl/policy/PolicyStore/` — find the singleton instance ID
-   - `POST /npl/policy/PolicyStore/{id}/getPolicyData` — fetch all policy data
+   - `GET /npl/store/PolicyStore/` — find the singleton instance ID
+   - `POST /npl/store/PolicyStore/{id}/getPolicyData` — fetch all policy data
 4. **Transform**: Converts NPL response into the bundle data structure
 5. **Hash**: Computes `revision` as SHA256 of the policy data (first 16 chars)
 6. **Package**: Creates `tar.gz` with `data.json` + `.manifest`
@@ -275,12 +279,12 @@ Checks: same as 3a + NPL evaluate() via http.send
 Network call to NPL Engine
 ```
 
-OPA looks up the contextual route for the service/tool (or service/*), constructs the HTTP request, and calls the NPL endpoint. The NPL response determines the final decision:
+OPA looks up the contextual route for the service/tool (or service/*), constructs the HTTP request, and calls the NPL endpoint. If the route is a route group (multiple protocols), OPA evaluates all routes according to the group's AND/OR mode (see [Multi-Route AND/OR Evaluation](#multi-route-andor-evaluation-route-groups)). The NPL response determines the final decision:
 
 | NPL Response | OPA Decision | Typical Source |
 |-------------|-------------|----------------|
-| `"allow"` | Allow | ApprovalPolicy (consumed approval), RateLimitPolicy (under limit) |
-| `"deny"` | Deny | ApprovalPolicy (consumed denial), RateLimitPolicy (over limit) |
+| `"allow"` | Allow | ApprovalPolicy (consumed approval), RateLimitPolicy (under limit), ConstraintPolicy (within budget), PreconditionPolicy (conditions met), FlowPolicy (no flow violation), IdentityPolicy (identity rules satisfied) |
+| `"deny"` | Deny | ApprovalPolicy (consumed denial), RateLimitPolicy (over limit), ConstraintPolicy (budget exceeded), PreconditionPolicy (condition not met), FlowPolicy (flow violation), IdentityPolicy (identity rule violation) |
 | `"pending:APR-N"` | Deny with `x-approval-id: APR-N` header | ApprovalPolicy (awaiting human decision) |
 
 ---
@@ -352,6 +356,152 @@ The matched rule's `action` field determines the response:
 - `allow`: Sets headers and allows the request
 - `deny`: Returns deny with reason headers
 - `npl_evaluate`: Checks for contextual route, may trigger Layer 2
+
+---
+
+## Multi-Route AND/OR Evaluation (Route Groups)
+
+By default, each service/tool combination maps to a single contextual route. Route Groups extend this to support multiple protocols per tool, composed with AND or OR semantics.
+
+### Bundle representation
+
+When a tool has a route group, the `contextual_routing` entry contains an array of routes plus a `mode` field instead of a single route object:
+
+```json
+{
+  "contextual_routing": {
+    "banking": {
+      "transfer_funds": {
+        "mode": "and",
+        "routes": [
+          {
+            "policyProtocol": "RateLimitPolicy",
+            "instanceId": "rl-123",
+            "endpoint": "/npl/policies/RateLimitPolicy/rl-123/evaluate"
+          },
+          {
+            "policyProtocol": "ConstraintPolicy",
+            "instanceId": "cp-456",
+            "endpoint": "/npl/policies/ConstraintPolicy/cp-456/evaluate"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Rego evaluation logic
+
+OPA detects whether a contextual route is a single route or a route group by checking for the `routes` array field. For route groups:
+
+- **AND mode** (`"mode": "and"`): OPA calls each protocol's `evaluate()` endpoint sequentially. All must return `"allow"` for the request to be allowed. If any returns `"deny"` or `"pending:..."`, evaluation short-circuits with that result.
+- **OR mode** (`"mode": "or"`): OPA calls each protocol's `evaluate()` endpoint. If any returns `"allow"`, the request is allowed. The request is denied only if all protocols deny it. The last non-allow response is used as the denial reason.
+
+Single routes (no `routes` array) continue to work as before — backward compatible.
+
+---
+
+## Session ID Extraction
+
+Layer 2 protocols that track per-session state (FlowPolicy, RateLimitPolicy) need a session identifier. OPA extracts the session ID from the `mcp-session-id` HTTP header:
+
+```rego
+session_id := sid if {
+    sid := input.attributes.request.http.headers["mcp-session-id"]
+}
+```
+
+The `mcp-session-id` header is set by MCP clients during the session initialization handshake (the `initialize` JSON-RPC method response includes the session ID, and subsequent requests include it as a header). If the header is absent, OPA passes an empty string to the protocol's `evaluate()` call.
+
+This session ID is forwarded to all Layer 2 protocol calls as the `sessionId` parameter, enabling protocols like FlowPolicy to track cross-call history within a single agent session.
+
+---
+
+## Value Extractors
+
+Value extractors generate labels from tool call arguments at evaluation time, making argument values available to policy rules and contextual protocols as labels. Unlike classifiers (which test conditions and emit fixed labels), extractors read a field value and produce a label in `arg:<field>:<value>` format.
+
+### How extractors work
+
+When a tool annotation includes a `value_extractors` section, OPA reads the specified argument fields and generates labels:
+
+```yaml
+# In a security profile or tool_overrides
+tools:
+  transfer_funds:
+    value_extractors:
+      - field: currency
+      - field: recipient_country
+```
+
+If a tool call includes `{"currency": "USD", "recipient_country": "CH"}`, OPA generates the labels:
+
+- `arg:currency:USD`
+- `arg:recipient_country:CH`
+
+These labels are added to the tool's accumulated label set alongside static labels and classifier-generated labels. They can be referenced in policy rules:
+
+```yaml
+policies:
+  - name: Block transfers to sanctioned countries
+    when:
+      labels: [arg:recipient_country:NK]
+    action: deny
+    priority: 0
+```
+
+### Extractor schema
+
+```yaml
+value_extractors:
+  - field: "argument_name"    # Required. Name of the argument field to read.
+```
+
+If the field is missing from the tool call arguments, no label is generated for that extractor (it silently skips). Field values are converted to strings for label generation.
+
+---
+
+## Numeric Classifier Conditions
+
+In addition to the string-based classifier conditions (`contains`, `not_contains`, `present`), classifiers support numeric comparison conditions for arguments that represent quantities, thresholds, or scores.
+
+### Numeric condition types
+
+| Condition | Type | Matches When |
+|-----------|------|-------------|
+| `greater_than` | number | The field's numeric value is greater than the specified threshold |
+| `less_than` | number | The field's numeric value is less than the specified threshold |
+| `equals_value` | number | The field's numeric value equals the specified value exactly |
+
+### Examples
+
+**Flag high-value transactions:**
+
+```yaml
+classify:
+  - field: amount
+    greater_than: 10000
+    set_labels: [risk:high-value]
+  - field: amount
+    less_than: 100
+    set_labels: [risk:low-value]
+```
+
+**Exact threshold match:**
+
+```yaml
+classify:
+  - field: priority
+    equals_value: 1
+    set_labels: [priority:critical]
+```
+
+### Evaluation details
+
+OPA attempts to parse the argument value as a number. If the value cannot be parsed as a number, the numeric condition does not match (it silently fails). This prevents errors when a field contains non-numeric data.
+
+Numeric conditions can be combined with string conditions in the same classifier list. Each classifier entry uses exactly one condition type.
 
 ---
 

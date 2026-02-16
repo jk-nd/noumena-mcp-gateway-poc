@@ -74,6 +74,36 @@ import {
   getRateLimitStatistics,
   registerContextualRoute,
   removeContextualRoute,
+  addRouteToGroup,
+  removeRouteFromGroup,
+  setRouteGroupMode,
+  ensureConstraintPolicy,
+  setConstraint,
+  removeConstraint,
+  getConstraints,
+  getAllConstraintCounters,
+  resetAllConstraintCounters,
+  getConstraintStatistics,
+  ensurePreconditionPolicy,
+  setPrecondition,
+  removePrecondition,
+  getPreconditions,
+  addPreconditionRule,
+  removePreconditionRule,
+  getPreconditionRules,
+  getPreconditionStatistics,
+  ensureFlowPolicy,
+  setFlowRule,
+  removeFlowRule,
+  getFlowRules,
+  clearAllFlowHistory,
+  getFlowStatistics,
+  ensureIdentityPolicy,
+  addIdentityRule,
+  removeIdentityRule,
+  getIdentityRules,
+  clearAllActorHistory,
+  getIdentityStatistics,
   type KeycloakUser,
   type PolicyData,
   type ServiceEntry,
@@ -82,6 +112,11 @@ import {
   type PendingApproval,
   type RateLimitConfig,
   type UsageRecord,
+  type ConstraintRule,
+  type ConstraintCounter,
+  type PreconditionRule,
+  type FlowRule,
+  type IdentityRule,
 } from "./lib/api.js";
 import {
   processSecurityPolicy,
@@ -1880,6 +1915,24 @@ async function deleteUserFromKeycloakFlow(kcUser: KeycloakUser): Promise<void> {
 // Contextual Policies — Generic entry point for all Layer 2 protocols
 // ============================================================================
 
+function buildStatsHint(routeCount: number, stats: string): string {
+  let hint = routeCount > 0 ? `${routeCount} route(s)` : "No routes";
+  if (stats) {
+    const statsMap: Record<string, string> = {};
+    for (const part of stats.split(",")) {
+      const [k, v] = part.split("=");
+      if (k && v) statsMap[k] = v;
+    }
+    if (statsMap.evaluations && statsMap.evaluations !== "0") {
+      hint += `, ${statsMap.evaluations} evals`;
+    }
+    if (statsMap.denied && statsMap.denied !== "0") {
+      hint += `, ${statsMap.denied} denied`;
+    }
+  }
+  return hint;
+}
+
 async function contextualPoliciesFlow(): Promise<void> {
   while (true) {
     let policyData: PolicyData;
@@ -1913,6 +1966,18 @@ async function contextualPoliciesFlow(): Promise<void> {
     try {
       rateLimitStats = await getRateLimitStatistics();
     } catch { /* RateLimitPolicy may not exist */ }
+
+    let constraintStats = "";
+    try { constraintStats = await getConstraintStatistics(); } catch { /* may not exist */ }
+
+    let preconditionStats = "";
+    try { preconditionStats = await getPreconditionStatistics(); } catch { /* may not exist */ }
+
+    let flowStats = "";
+    try { flowStats = await getFlowStatistics(); } catch { /* may not exist */ }
+
+    let identityStats = "";
+    try { identityStats = await getIdentityStatistics(); } catch { /* may not exist */ }
 
     console.log();
     console.log(noumena.purple("  Contextual Policies"));
@@ -1964,9 +2029,42 @@ async function contextualPoliciesFlow(): Promise<void> {
       hint: rlHint,
     });
 
+    // ConstraintPolicy entry
+    const cpRouteCount = (protocolRoutes["ConstraintPolicy"] || []).length;
+    options.push({
+      value: "protocol:ConstraintPolicy",
+      label: `  ConstraintPolicy`,
+      hint: buildStatsHint(cpRouteCount, constraintStats),
+    });
+
+    // PreconditionPolicy entry
+    const ppRouteCount = (protocolRoutes["PreconditionPolicy"] || []).length;
+    options.push({
+      value: "protocol:PreconditionPolicy",
+      label: `  PreconditionPolicy`,
+      hint: buildStatsHint(ppRouteCount, preconditionStats),
+    });
+
+    // FlowPolicy entry
+    const fpRouteCount = (protocolRoutes["FlowPolicy"] || []).length;
+    options.push({
+      value: "protocol:FlowPolicy",
+      label: `  FlowPolicy`,
+      hint: buildStatsHint(fpRouteCount, flowStats),
+    });
+
+    // IdentityPolicy entry
+    const ipRouteCount = (protocolRoutes["IdentityPolicy"] || []).length;
+    options.push({
+      value: "protocol:IdentityPolicy",
+      label: `  IdentityPolicy`,
+      hint: buildStatsHint(ipRouteCount, identityStats),
+    });
+
     // Other protocols (future-proofing)
+    const knownProtocols = new Set(["ApprovalPolicy", "RateLimitPolicy", "ConstraintPolicy", "PreconditionPolicy", "FlowPolicy", "IdentityPolicy"]);
     for (const protocol of Object.keys(protocolRoutes)) {
-      if (protocol === "ApprovalPolicy" || protocol === "RateLimitPolicy") continue;
+      if (knownProtocols.has(protocol)) continue;
       const count = protocolRoutes[protocol].length;
       options.push({
         value: `protocol:${protocol}`,
@@ -1986,6 +2084,14 @@ async function contextualPoliciesFlow(): Promise<void> {
       await pendingApprovalsFlow();
     } else if (action === "protocol:RateLimitPolicy") {
       await rateLimitPolicyFlow();
+    } else if (action === "protocol:ConstraintPolicy") {
+      await constraintPolicyFlow();
+    } else if (action === "protocol:PreconditionPolicy") {
+      await preconditionPolicyFlow();
+    } else if (action === "protocol:FlowPolicy") {
+      await flowPolicyFlow();
+    } else if (action === "protocol:IdentityPolicy") {
+      await identityPolicyFlow();
     } else if (action === "routes") {
       await manageRoutesFlow(policyData);
     } else if (typeof action === "string" && action.startsWith("protocol:")) {
@@ -2201,6 +2307,458 @@ async function rateLimitPolicyFlow(): Promise<void> {
         s.stop(noumena.error("Failed"));
         p.log.error(`${err}`);
       }
+    }
+  }
+}
+
+// ============================================================================
+// Constraint Policy Management
+// ============================================================================
+
+async function constraintPolicyFlow(): Promise<void> {
+  while (true) {
+    let constraints: ConstraintRule[] = [];
+    let counters: ConstraintCounter[] = [];
+    let stats = "";
+    let error = "";
+
+    try {
+      constraints = await getConstraints();
+      counters = await getAllConstraintCounters();
+      stats = await getConstraintStatistics();
+    } catch (err) {
+      error = `${err}`;
+    }
+
+    console.log();
+    console.log(noumena.purple("  ConstraintPolicy"));
+    console.log(noumena.textDim("  Tool-level budget constraints per caller"));
+    console.log();
+
+    if (error) {
+      p.log.warn(`ConstraintPolicy not available: ${error.substring(0, 60)}`);
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+      return;
+    }
+
+    if (stats) {
+      const statsMap: Record<string, string> = {};
+      for (const part of stats.split(",")) { const [k, v] = part.split("="); if (k && v) statsMap[k] = v; }
+      console.log(
+        noumena.textDim("  Evaluations: ") + noumena.text(statsMap.evaluations || "0") +
+        noumena.textDim("  |  Denied: ") + (parseInt(statsMap.denied || "0") > 0 ? noumena.warning(statsMap.denied!) : noumena.text("0")) +
+        noumena.textDim("  |  Constraints: ") + noumena.text(statsMap.constraints || "0")
+      );
+      console.log();
+    }
+
+    if (constraints.length > 0) {
+      console.log(noumena.accent("  Configured constraints:"));
+      for (const c of constraints) {
+        const usage = counters.filter((ct) => ct.serviceName === c.serviceName && ct.toolName === c.toolName);
+        const totalUsed = usage.reduce((s, u) => s + u.callCount, 0);
+        const maxLabel = c.maxOccurrences === 0 ? "BLOCKED" : `max ${c.maxOccurrences}`;
+        console.log(
+          `  ${noumena.success("●")} ${c.serviceName}.${c.toolName}: ` +
+          noumena.text(maxLabel) +
+          noumena.textDim(` (${totalUsed} calls, ${usage.length} user(s)) ${c.description}`)
+        );
+      }
+      console.log();
+    }
+
+    const action = await p.select({
+      message: "Action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "add", label: noumena.success("  Set constraint"), hint: "Add or update a constraint" },
+        { value: "remove", label: noumena.warning("  Remove constraint"), hint: "Remove a configured constraint" },
+        { value: "reset_all", label: "  Reset all counters", hint: "Clear all usage counters" },
+        { value: "refresh", label: "  Refresh" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") return;
+    if (action === "refresh") continue;
+
+    if (action === "add") {
+      const serviceName = await p.text({ message: "Service name:", placeholder: "e.g., banking", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(serviceName)) continue;
+      const toolName = await p.text({ message: "Tool name:", placeholder: "e.g., transfer", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(toolName)) continue;
+      const maxStr = await p.text({ message: "Max occurrences (0 = block):", placeholder: "e.g., 5", validate: (v) => { const n = parseInt(v || ""); return isNaN(n) || n < 0 ? "Must be >= 0" : undefined; } });
+      if (p.isCancel(maxStr)) continue;
+      const description = await p.text({ message: "Description:", placeholder: "e.g., Limit high-value transfers", initialValue: "" });
+      if (p.isCancel(description)) continue;
+
+      const s = p.spinner();
+      s.start("Setting constraint...");
+      try {
+        await setConstraint(String(serviceName).trim(), String(toolName).trim(), parseInt(String(maxStr)), String(description).trim());
+        s.stop(noumena.success(`Constraint set: ${serviceName}.${toolName} → max ${maxStr}`));
+      } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "remove") {
+      if (constraints.length === 0) { p.log.info("No constraints configured"); continue; }
+      const selected = await p.select({
+        message: "Remove constraint for:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...constraints.map((c) => ({ value: `${c.serviceName}:${c.toolName}`, label: `  ${c.serviceName}.${c.toolName}`, hint: c.description })),
+        ],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+      const [svc, tool] = String(selected).split(":");
+      const s = p.spinner();
+      s.start("Removing constraint...");
+      try { await removeConstraint(svc, tool); s.stop(noumena.success(`Removed: ${svc}.${tool}`)); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "reset_all") {
+      const confirmed = await p.confirm({ message: "Reset ALL constraint counters?", initialValue: false });
+      if (p.isCancel(confirmed) || !confirmed) continue;
+      const s = p.spinner();
+      s.start("Resetting all counters...");
+      try { await resetAllConstraintCounters(); s.stop(noumena.success("All counters reset")); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    }
+  }
+}
+
+// ============================================================================
+// Precondition Policy Management
+// ============================================================================
+
+async function preconditionPolicyFlow(): Promise<void> {
+  while (true) {
+    let conditions: Record<string, string> = {};
+    let rules: PreconditionRule[] = [];
+    let stats = "";
+    let error = "";
+
+    try {
+      conditions = await getPreconditions();
+      rules = await getPreconditionRules();
+      stats = await getPreconditionStatistics();
+    } catch (err) {
+      error = `${err}`;
+    }
+
+    console.log();
+    console.log(noumena.purple("  PreconditionPolicy"));
+    console.log(noumena.textDim("  System state flags that gate tool calls"));
+    console.log();
+
+    if (error) {
+      p.log.warn(`PreconditionPolicy not available: ${error.substring(0, 60)}`);
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+      return;
+    }
+
+    if (stats) {
+      const statsMap: Record<string, string> = {};
+      for (const part of stats.split(",")) { const [k, v] = part.split("="); if (k && v) statsMap[k] = v; }
+      console.log(
+        noumena.textDim("  Evaluations: ") + noumena.text(statsMap.evaluations || "0") +
+        noumena.textDim("  |  Denied: ") + (parseInt(statsMap.denied || "0") > 0 ? noumena.warning(statsMap.denied!) : noumena.text("0")) +
+        noumena.textDim("  |  Conditions: ") + noumena.text(statsMap.conditions || "0") +
+        noumena.textDim("  |  Rules: ") + noumena.text(statsMap.rules || "0")
+      );
+      console.log();
+    }
+
+    const condEntries = Object.entries(conditions);
+    if (condEntries.length > 0) {
+      console.log(noumena.accent("  Conditions:"));
+      for (const [name, value] of condEntries) {
+        console.log(`  ${noumena.success("●")} ${name} = ${noumena.text(value)}`);
+      }
+      console.log();
+    }
+
+    if (rules.length > 0) {
+      console.log(noumena.accent("  Rules:"));
+      for (const r of rules) {
+        const condValue = conditions[r.conditionName] ?? "(unset)";
+        const met = condValue === r.requiredValue;
+        const icon = met ? noumena.success("✓") : noumena.warning("✗");
+        console.log(`  ${icon} ${r.serviceName}.${r.toolName}: requires ${r.conditionName} == ${r.requiredValue} (current: ${condValue})`);
+      }
+      console.log();
+    }
+
+    const action = await p.select({
+      message: "Action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "set_cond", label: noumena.success("  Set condition"), hint: "Set a system flag" },
+        { value: "rm_cond", label: noumena.warning("  Remove condition") },
+        { value: "add_rule", label: noumena.success("  Add rule"), hint: "Require a condition for a tool" },
+        { value: "rm_rule", label: noumena.warning("  Remove rule") },
+        { value: "refresh", label: "  Refresh" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") return;
+    if (action === "refresh") continue;
+
+    if (action === "set_cond") {
+      const name = await p.text({ message: "Condition name:", placeholder: "e.g., maintenance_mode", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(name)) continue;
+      const value = await p.text({ message: "Value:", placeholder: "e.g., false", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(value)) continue;
+      const s = p.spinner();
+      s.start("Setting condition...");
+      try { await setPrecondition(String(name).trim(), String(value).trim()); s.stop(noumena.success(`Set: ${name} = ${value}`)); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "rm_cond") {
+      if (condEntries.length === 0) { p.log.info("No conditions set"); continue; }
+      const selected = await p.select({
+        message: "Remove condition:",
+        options: [{ value: "---cancel", label: noumena.textDim("← Cancel") }, ...condEntries.map(([n, v]) => ({ value: n, label: `  ${n}`, hint: v }))],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+      const s = p.spinner();
+      s.start("Removing condition...");
+      try { await removePrecondition(String(selected)); s.stop(noumena.success(`Removed: ${selected}`)); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "add_rule") {
+      const condName = await p.text({ message: "Condition name:", placeholder: "e.g., maintenance_mode", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(condName)) continue;
+      const reqValue = await p.text({ message: "Required value:", placeholder: "e.g., false", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(reqValue)) continue;
+      const svcName = await p.text({ message: "Service name:", placeholder: "e.g., banking", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(svcName)) continue;
+      const toolName = await p.text({ message: "Tool name:", placeholder: "e.g., transfer", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(toolName)) continue;
+      const s = p.spinner();
+      s.start("Adding rule...");
+      try { await addPreconditionRule(String(condName).trim(), String(reqValue).trim(), String(svcName).trim(), String(toolName).trim()); s.stop(noumena.success(`Rule added: ${svcName}.${toolName} requires ${condName} == ${reqValue}`)); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "rm_rule") {
+      if (rules.length === 0) { p.log.info("No rules configured"); continue; }
+      const selected = await p.select({
+        message: "Remove rule:",
+        options: [{ value: "---cancel", label: noumena.textDim("← Cancel") }, ...rules.map((r, i) => ({ value: `${i}`, label: `  ${r.serviceName}.${r.toolName}`, hint: `${r.conditionName} == ${r.requiredValue}` }))],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+      const rule = rules[parseInt(String(selected))];
+      const s = p.spinner();
+      s.start("Removing rule...");
+      try { await removePreconditionRule(rule.conditionName, rule.serviceName, rule.toolName); s.stop(noumena.success(`Removed rule: ${rule.serviceName}.${rule.toolName}`)); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    }
+  }
+}
+
+// ============================================================================
+// Flow Policy Management
+// ============================================================================
+
+async function flowPolicyFlow(): Promise<void> {
+  while (true) {
+    let rules: FlowRule[] = [];
+    let stats = "";
+    let error = "";
+
+    try {
+      rules = await getFlowRules();
+      stats = await getFlowStatistics();
+    } catch (err) {
+      error = `${err}`;
+    }
+
+    console.log();
+    console.log(noumena.purple("  FlowPolicy"));
+    console.log(noumena.textDim("  Cross-call data flow governance within sessions"));
+    console.log();
+
+    if (error) {
+      p.log.warn(`FlowPolicy not available: ${error.substring(0, 60)}`);
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+      return;
+    }
+
+    if (stats) {
+      const statsMap: Record<string, string> = {};
+      for (const part of stats.split(",")) { const [k, v] = part.split("="); if (k && v) statsMap[k] = v; }
+      console.log(
+        noumena.textDim("  Evaluations: ") + noumena.text(statsMap.evaluations || "0") +
+        noumena.textDim("  |  Denied: ") + (parseInt(statsMap.denied || "0") > 0 ? noumena.warning(statsMap.denied!) : noumena.text("0")) +
+        noumena.textDim("  |  Rules: ") + noumena.text(statsMap.flowRules || "0") +
+        noumena.textDim("  |  Sessions: ") + noumena.text(statsMap.activeSessions || "0")
+      );
+      console.log();
+    }
+
+    if (rules.length > 0) {
+      console.log(noumena.accent("  Flow rules:"));
+      for (const r of rules) {
+        console.log(
+          `  ${noumena.warning("⊘")} ${r.sourceService}.${r.sourceTool} → ${r.targetService}.${r.targetTool}` +
+          noumena.textDim(` (${r.description})`)
+        );
+      }
+      console.log();
+    }
+
+    const action = await p.select({
+      message: "Action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "add", label: noumena.success("  Add flow rule"), hint: "Block a call sequence" },
+        { value: "remove", label: noumena.warning("  Remove flow rule") },
+        { value: "clear", label: "  Clear all history", hint: "Reset session tracking" },
+        { value: "refresh", label: "  Refresh" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") return;
+    if (action === "refresh") continue;
+
+    if (action === "add") {
+      const srcSvc = await p.text({ message: "Source service:", placeholder: "e.g., banking", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(srcSvc)) continue;
+      const srcTool = await p.text({ message: "Source tool:", placeholder: "e.g., get_account", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(srcTool)) continue;
+      const tgtSvc = await p.text({ message: "Target service:", placeholder: "e.g., messaging", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(tgtSvc)) continue;
+      const tgtTool = await p.text({ message: "Target tool:", placeholder: "e.g., send_email", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(tgtTool)) continue;
+      const desc = await p.text({ message: "Description:", placeholder: "e.g., Prevent PII exfiltration", initialValue: "" });
+      if (p.isCancel(desc)) continue;
+
+      const s = p.spinner();
+      s.start("Adding flow rule...");
+      try {
+        await setFlowRule(String(srcSvc).trim(), String(srcTool).trim(), String(tgtSvc).trim(), String(tgtTool).trim(), String(desc).trim());
+        s.stop(noumena.success(`Flow rule added: ${srcSvc}.${srcTool} → ${tgtSvc}.${tgtTool}`));
+      } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "remove") {
+      if (rules.length === 0) { p.log.info("No flow rules configured"); continue; }
+      const selected = await p.select({
+        message: "Remove flow rule:",
+        options: [{ value: "---cancel", label: noumena.textDim("← Cancel") }, ...rules.map((r, i) => ({ value: `${i}`, label: `  ${r.sourceService}.${r.sourceTool} → ${r.targetService}.${r.targetTool}`, hint: r.description }))],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+      const rule = rules[parseInt(String(selected))];
+      const s = p.spinner();
+      s.start("Removing flow rule...");
+      try { await removeFlowRule(rule.sourceService, rule.sourceTool, rule.targetService, rule.targetTool); s.stop(noumena.success("Removed")); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "clear") {
+      const confirmed = await p.confirm({ message: "Clear ALL session history?", initialValue: false });
+      if (p.isCancel(confirmed) || !confirmed) continue;
+      const s = p.spinner();
+      s.start("Clearing history...");
+      try { await clearAllFlowHistory(); s.stop(noumena.success("All session history cleared")); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    }
+  }
+}
+
+// ============================================================================
+// Identity Policy Management
+// ============================================================================
+
+async function identityPolicyFlow(): Promise<void> {
+  while (true) {
+    let rules: IdentityRule[] = [];
+    let stats = "";
+    let error = "";
+
+    try {
+      rules = await getIdentityRules();
+      stats = await getIdentityStatistics();
+    } catch (err) {
+      error = `${err}`;
+    }
+
+    console.log();
+    console.log(noumena.purple("  IdentityPolicy"));
+    console.log(noumena.textDim("  Identity governance — segregation of duties, four-eyes, exclusive actor"));
+    console.log();
+
+    if (error) {
+      p.log.warn(`IdentityPolicy not available: ${error.substring(0, 60)}`);
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+      return;
+    }
+
+    if (stats) {
+      const statsMap: Record<string, string> = {};
+      for (const part of stats.split(",")) { const [k, v] = part.split("="); if (k && v) statsMap[k] = v; }
+      console.log(
+        noumena.textDim("  Evaluations: ") + noumena.text(statsMap.evaluations || "0") +
+        noumena.textDim("  |  Denied: ") + (parseInt(statsMap.denied || "0") > 0 ? noumena.warning(statsMap.denied!) : noumena.text("0")) +
+        noumena.textDim("  |  Rules: ") + noumena.text(statsMap.identityRules || "0") +
+        noumena.textDim("  |  Records: ") + noumena.text(statsMap.actorRecords || "0")
+      );
+      console.log();
+    }
+
+    if (rules.length > 0) {
+      console.log(noumena.accent("  Identity rules:"));
+      for (const r of rules) {
+        console.log(
+          `  ${noumena.success("●")} ${r.serviceName}.${r.toolName}: ` +
+          noumena.text(r.ruleType) +
+          noumena.textDim(` (${r.primaryVerb} → ${r.secondaryVerb})`)
+        );
+      }
+      console.log();
+    }
+
+    const action = await p.select({
+      message: "Action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "add", label: noumena.success("  Add identity rule"), hint: "Enforce identity constraints" },
+        { value: "remove", label: noumena.warning("  Remove identity rule") },
+        { value: "clear", label: "  Clear all history", hint: "Reset actor records" },
+        { value: "refresh", label: "  Refresh" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") return;
+    if (action === "refresh") continue;
+
+    if (action === "add") {
+      const svcName = await p.text({ message: "Service name:", placeholder: "e.g., banking", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(svcName)) continue;
+      const toolName = await p.text({ message: "Tool name:", placeholder: "e.g., transfer", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(toolName)) continue;
+      const ruleType = await p.select({
+        message: "Rule type:",
+        options: [
+          { value: "segregation_of_duties", label: "  Segregation of duties", hint: "Different actors for primary and secondary verbs" },
+          { value: "four_eyes", label: "  Four-eyes principle", hint: "At least 2 distinct actors required" },
+          { value: "exclusive_actor", label: "  Exclusive actor", hint: "Only the original actor can continue" },
+        ],
+      });
+      if (p.isCancel(ruleType)) continue;
+      const primaryVerb = await p.text({ message: "Primary verb:", placeholder: "e.g., create", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(primaryVerb)) continue;
+      const secondaryVerb = await p.text({ message: "Secondary verb:", placeholder: "e.g., update", validate: (v) => (!v?.trim() ? "Required" : undefined) });
+      if (p.isCancel(secondaryVerb)) continue;
+
+      const s = p.spinner();
+      s.start("Adding identity rule...");
+      try {
+        await addIdentityRule(String(svcName).trim(), String(toolName).trim(), String(ruleType), String(primaryVerb).trim(), String(secondaryVerb).trim());
+        s.stop(noumena.success(`Identity rule added: ${svcName}.${toolName} ${ruleType}`));
+      } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "remove") {
+      if (rules.length === 0) { p.log.info("No identity rules configured"); continue; }
+      const selected = await p.select({
+        message: "Remove identity rule:",
+        options: [{ value: "---cancel", label: noumena.textDim("← Cancel") }, ...rules.map((r, i) => ({ value: `${i}`, label: `  ${r.serviceName}.${r.toolName} ${r.ruleType}`, hint: `${r.primaryVerb} → ${r.secondaryVerb}` }))],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+      const rule = rules[parseInt(String(selected))];
+      const s = p.spinner();
+      s.start("Removing identity rule...");
+      try { await removeIdentityRule(rule.serviceName, rule.toolName, rule.ruleType); s.stop(noumena.success("Removed")); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
+    } else if (action === "clear") {
+      const confirmed = await p.confirm({ message: "Clear ALL actor history?", initialValue: false });
+      if (p.isCancel(confirmed) || !confirmed) continue;
+      const s = p.spinner();
+      s.start("Clearing history...");
+      try { await clearAllActorHistory(); s.stop(noumena.success("All actor history cleared")); } catch (err) { s.stop(noumena.error("Failed")); p.log.error(`${err}`); }
     }
   }
 }

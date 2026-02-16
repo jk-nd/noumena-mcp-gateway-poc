@@ -1097,6 +1097,233 @@ test_sp_approvers_extracted if {
 	result == ["compliance", "legal"]
 }
 
+# ============================================================================
+# Test: Multi-route AND/OR composition
+# ============================================================================
+
+# Test: RouteGroup with mode "single" backward compat
+test_route_group_single_mode if {
+	routes := {"duckduckgo": {"search": {
+		"mode": "single",
+		"routes": [{
+			"policyProtocol": "ApprovalPolicy",
+			"instanceId": "apr-001",
+			"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
+		}],
+	}}}
+
+	# Route group exists → blocks fast path (same as legacy)
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":500,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as routes
+}
+
+# Test: AND mode — both allow → allow
+test_route_group_and_both_allow if {
+	result := npl_evaluate_response
+		with route_group_mode as "and"
+		with route_results as ["allow", "allow"]
+		with contextual_route as true
+
+	result == "allow"
+}
+
+# Test: AND mode — one deny → deny
+test_route_group_and_one_deny if {
+	result := npl_evaluate_response
+		with route_group_mode as "and"
+		with route_results as ["allow", "deny"]
+		with contextual_route as true
+
+	result == "deny"
+}
+
+# Test: AND mode — one pending → pending
+test_route_group_and_one_pending if {
+	result := npl_evaluate_response
+		with route_group_mode as "and"
+		with route_results as ["allow", "pending:APR-1"]
+		with contextual_route as true
+
+	result == "pending:APR-1"
+}
+
+# Test: OR mode — one allow → allow
+test_route_group_or_one_allow if {
+	result := npl_evaluate_response
+		with route_group_mode as "or"
+		with route_results as ["deny", "allow"]
+		with contextual_route as true
+
+	result == "allow"
+}
+
+# Test: OR mode — both deny → last deny
+test_route_group_or_both_deny if {
+	result := npl_evaluate_response
+		with route_group_mode as "or"
+		with route_results as ["deny", "deny"]
+		with contextual_route as true
+
+	result == "deny"
+}
+
+# ============================================================================
+# Test: MCP Session ID extraction
+# ============================================================================
+
+test_mcp_session_id_extracted if {
+	result := mcp_session_id with input as {"attributes": {"request": {"http": {
+		"method": "POST",
+		"path": "/mcp",
+		"headers": {
+			"authorization": mock_bearer(mock_jwt_jarvis),
+			"mcp-session-id": "session-abc-123",
+		},
+		"body": "",
+	}}}}
+
+	result == "session-abc-123"
+}
+
+test_mcp_session_id_default_empty if {
+	result := mcp_session_id with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"",
+	)
+
+	result == ""
+}
+
+# ============================================================================
+# Test: Numeric classifier conditions + value extraction
+# ============================================================================
+
+mock_sp_with_numeric := {
+	"version": "1.0",
+	"tool_annotations": {
+		"banking": {
+			"transfer": {
+				"annotations": {},
+				"verb": "create",
+				"labels": ["category:banking"],
+			},
+		},
+	},
+	"classifiers": {
+		"banking": {
+			"transfer": [
+				{"field": "amount", "greater_than": 1000, "set_labels": ["constraint:high-value"]},
+				{"field": "amount", "less_than": 10, "set_labels": ["constraint:micro-payment"]},
+				{"field": "currency", "equals_value": "BTC", "set_labels": ["constraint:crypto"]},
+			],
+		},
+	},
+	"value_extractors": {
+		"banking": {
+			"transfer": [
+				{"field": "amount", "label_prefix": "arg:amount"},
+				{"field": "currency", "label_prefix": "arg:currency"},
+			],
+		},
+	},
+	"policies": [
+		{"name": "Block high value", "when": {"labels": ["constraint:high-value"]}, "action": "deny", "priority": 10},
+		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
+	],
+}
+
+mock_grants_with_banking := {
+	"jarvis@acme.com": [
+		{"serviceName": "banking", "allowedTools": ["*"]},
+	],
+}
+
+# Test: amount > 1000 → constraint:high-value → deny
+test_numeric_greater_than_deny if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":600,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":1500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+}
+
+# Test: amount < 1000 → no constraint:high-value → allow
+test_numeric_under_threshold_allow if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":601,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+}
+
+# Test: value extractor generates arg:amount:500 label
+test_value_extractor_labels if {
+	labels := resolved_labels with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":602,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+
+	"arg:amount:500" in labels
+	"arg:currency:USD" in labels
+	"category:banking" in labels
+}
+
+# Test: equals_value classifier matches
+test_equals_value_classifier if {
+	labels := resolved_labels with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":603,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":100,\"currency\":\"BTC\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+
+	"constraint:crypto" in labels
+}
+
+# Test: Legacy route (no mode field) still works
+test_legacy_route_backward_compat if {
+	routes := {"duckduckgo": {"search": {
+		"policyProtocol": "ApprovalPolicy",
+		"instanceId": "apr-001",
+		"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
+	}}}
+
+	# Legacy route should be detected
+	result := is_legacy_route with contextual_routing as routes
+		with input as mock_input(
+			"POST", "/mcp",
+			mock_bearer(mock_jwt_jarvis),
+			"{\"jsonrpc\":\"2.0\",\"id\":510,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		)
+		with catalog as mock_catalog
+		with grants as mock_grants
+
+	result == true
+}
+
 # Test: sp_approvers defaults to empty when no approvers specified
 test_sp_approvers_empty_when_not_specified if {
 	sp_no_approvers := {

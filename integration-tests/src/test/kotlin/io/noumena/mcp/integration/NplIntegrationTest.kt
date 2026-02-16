@@ -199,7 +199,7 @@ class NplIntegrationTest {
 
         // Grant alice only list_events (not wildcard)
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -236,7 +236,7 @@ class NplIntegrationTest {
         Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
 
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -271,7 +271,7 @@ class NplIntegrationTest {
 
         // Revoke mallory
         val revokeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeSubject"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeSubject"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -300,7 +300,7 @@ class NplIntegrationTest {
         Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
 
         val reinstateResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/reinstateSubject"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/reinstateSubject"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -332,7 +332,7 @@ class NplIntegrationTest {
 
         // Suspend
         val suspendResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/suspendService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/suspendService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -350,7 +350,7 @@ class NplIntegrationTest {
 
         // Resume
         val resumeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/resumeService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/resumeService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -380,7 +380,7 @@ class NplIntegrationTest {
 
         // Disable
         val disableResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/disableService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/disableService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -397,7 +397,7 @@ class NplIntegrationTest {
 
         // Re-enable
         val enableResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/enableService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/enableService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -424,7 +424,7 @@ class NplIntegrationTest {
 
         // Disable list_events
         val disableResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/disableTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/disableTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -465,12 +465,12 @@ class NplIntegrationTest {
         Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
 
         // First grant bob two tools
-        client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool") {
+        client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
             setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
         }
-        client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool") {
+        client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
             setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar", "toolName": "create_event"}""")
@@ -488,7 +488,7 @@ class NplIntegrationTest {
 
         // Revoke all service access at once
         val revokeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeServiceAccess"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeServiceAccess"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -520,7 +520,7 @@ class NplIntegrationTest {
 
         // Register a wildcard route for mock-calendar
         val registerResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/registerRoute"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerRoute"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -540,7 +540,7 @@ class NplIntegrationTest {
 
         // Remove the route
         val removeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/removeRoute"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRoute"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -606,7 +606,7 @@ class NplIntegrationTest {
         println("│ TEST: List PolicyStore Singleton                            │")
         println("└─────────────────────────────────────────────────────────────┘")
 
-        val listResp = client.get("${TestConfig.nplUrl}/npl/policy/PolicyStore/") {
+        val listResp = client.get("${TestConfig.nplUrl}/npl/store/PolicyStore/") {
             header("Authorization", "Bearer $adminToken")
         }
 
@@ -627,7 +627,7 @@ class NplIntegrationTest {
     /** Call getPolicyData on the PolicyStore singleton using the gateway token. */
     private suspend fun getPolicyData(): JsonObject {
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/getPolicyData"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/getPolicyData"
         ) {
             header("Authorization", "Bearer $gatewayToken")
             contentType(ContentType.Application.Json)

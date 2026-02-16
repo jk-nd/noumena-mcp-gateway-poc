@@ -10,6 +10,13 @@ A hands-on walkthrough for configuring and operating the MCP Gateway security pi
 4. [Managing Users & Access](#4-managing-users--access)
 5. [Writing a Security Policy](#5-writing-a-security-policy-mcp-securityyaml)
 6. [Contextual Routing Protocols](#6-contextual-routing-protocols)
+   - 6.1 [ApprovalPolicy](#61-approvalpolicy-human-in-the-loop)
+   - 6.2 [RateLimitPolicy](#62-ratelimitpolicy-automated-rate-limiting)
+   - 6.3 [ConstraintPolicy](#63-constraintpolicy-tool-level-budget-constraints)
+   - 6.4 [PreconditionPolicy](#64-preconditionpolicy-system-state-gates)
+   - 6.5 [FlowPolicy](#65-flowpolicy-cross-call-data-flow-governance)
+   - 6.6 [IdentityPolicy](#66-identitypolicy-identity-governance)
+   - 6.7 [Route Groups (AND/OR Composition)](#67-route-groups-andor-composition)
 7. [Credential Injection](#7-credential-injection-optional)
 8. [Debugging & Troubleshooting](#8-debugging--troubleshooting)
 9. [Configuration Reference](#9-configuration-reference)
@@ -128,23 +135,23 @@ TOKEN=$(curl -s -X POST "http://localhost:11000/realms/mcpgateway/protocol/openi
 
 # Find the PolicyStore instance
 POLICY_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:12000/npl/policy/PolicyStore/" \
+  "http://localhost:12000/npl/store/PolicyStore/" \
   | jq -r '.[0].id')
 
 # Register a service
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/registerService" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerService" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"serviceName": "my-service"}'
 
 # Enable the service
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/enableService" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/enableService" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"serviceName": "my-service"}'
 
 # Enable a tool
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/enableTool" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/enableTool" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"serviceName": "my-service", "toolName": "my-tool"}'
@@ -234,13 +241,13 @@ From the TUI, select a user and grant access to tools. You can grant:
 
 ```bash
 # Grant all tools for a service
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/grantAllToolsForService" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/grantAllToolsForService" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subjectId": "user@example.com", "serviceName": "duckduckgo"}'
 
 # Grant a specific tool
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/grantTool" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/grantTool" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subjectId": "user@example.com", "serviceName": "duckduckgo", "toolName": "search"}'
@@ -250,13 +257,13 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/grantT
 
 ```bash
 # Revoke a specific tool
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/revokeTool" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/revokeTool" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subjectId": "user@example.com", "serviceName": "duckduckgo", "toolName": "search"}'
 
 # Revoke all access to a service
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/revokeServiceAccess" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/revokeServiceAccess" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subjectId": "user@example.com", "serviceName": "duckduckgo"}'
@@ -267,7 +274,7 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/revoke
 `revokeSubject` blocks ALL access for a user instantly — across every service:
 
 ```bash
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/revokeSubject" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/revokeSubject" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subjectId": "compromised-user@example.com"}'
@@ -276,7 +283,7 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/revoke
 To restore access later:
 
 ```bash
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/reinstateSubject" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/reinstateSubject" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subjectId": "compromised-user@example.com"}'
@@ -577,7 +584,7 @@ The TUI reads the YAML, converts it to JSON, and calls `setSecurityPolicy(jsonSt
 # Convert YAML to JSON and set the policy
 POLICY_JSON=$(python3 -c "import yaml, json, sys; print(json.dumps(yaml.safe_load(open('mcp-security.yaml'))))")
 
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/setSecurityPolicy" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/setSecurityPolicy" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"jsonString\": $(echo "$POLICY_JSON" | jq -Rs .)}"
@@ -586,7 +593,7 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/setSec
 **Clearing the security policy:**
 
 ```bash
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/clearSecurityPolicy" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/clearSecurityPolicy" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{}'
@@ -606,12 +613,16 @@ Once loaded, the policy is embedded in the OPA bundle and evaluated in-memory on
 
 When a security policy rule uses `action: npl_evaluate`, the gateway delegates the decision to a **contextual routing protocol** (Layer 2). OPA calls the registered NPL protocol's `evaluate()` endpoint, which returns `"allow"`, `"deny"`, or `"pending:<id>"`. Any protocol implementing this contract can be plugged in.
 
-The gateway ships with two protocols:
+The gateway ships with six protocols:
 
 | Protocol | Type | Response | Use Case |
 |----------|------|----------|----------|
 | **ApprovalPolicy** | Human-in-the-loop | `"allow"`, `"deny"`, `"pending:APR-N"` | Human approval before sensitive actions |
 | **RateLimitPolicy** | Automated | `"allow"`, `"deny"` | Per-user call limits |
+| **ConstraintPolicy** | Automated | `"allow"`, `"deny"` | Tool-level budget constraints per caller |
+| **PreconditionPolicy** | Automated | `"allow"`, `"deny"` | System state flags gating tool calls |
+| **FlowPolicy** | Automated | `"allow"`, `"deny"` | Cross-call data flow governance per session |
+| **IdentityPolicy** | Automated | `"allow"`, `"deny"` | Identity governance (segregation of duties, four-eyes, exclusive actor) |
 
 **TUI:** Main menu > **Contextual Policies** to manage all protocols and routes.
 
@@ -626,7 +637,7 @@ INSTANCE_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
   | jq -r '.[0].id')
 
 # Register a route for a specific tool
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/registerRoute" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
@@ -638,7 +649,7 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/regist
   }"
 
 # Or register a wildcard route for all tools in a service
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/registerRoute" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
@@ -754,7 +765,7 @@ RL_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
   | jq -r '.[0].id')
 
 # Register a route for duckduckgo
-curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/registerRoute" \
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
@@ -801,6 +812,317 @@ curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/rese
 curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/resetAllUsage" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
 ```
+
+### 6.3 ConstraintPolicy (Tool-Level Budget Constraints)
+
+ConstraintPolicy enforces per-caller occurrence limits on specific tools. Unlike RateLimitPolicy (which limits by service), ConstraintPolicy operates at the individual tool level — e.g., "user X can call `transfer_funds` at most 3 times."
+
+**Setup:**
+
+1. Register a contextual route pointing to a ConstraintPolicy instance (via TUI or API)
+2. Configure constraints for specific tools
+
+```bash
+# Find the ConstraintPolicy instance ID
+CP_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:12000/npl/policies/ConstraintPolicy/" \
+  | jq -r '.[0].id')
+
+# Register a route
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"serviceName\": \"banking\",
+    \"toolName\": \"transfer_funds\",
+    \"routeProtocol\": \"ConstraintPolicy\",
+    \"instanceId\": \"$CP_ID\",
+    \"endpoint\": \"/npl/policies/ConstraintPolicy/$CP_ID/evaluate\"
+  }"
+
+# Set a constraint: max 3 calls to transfer_funds per caller
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/setConstraint" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"serviceName": "banking", "toolName": "transfer_funds", "maxOccurrences": 3, "description": "Max 3 transfers per caller"}'
+```
+
+**Managing constraints:**
+
+```bash
+# View all constraints
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/getConstraints" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# View all usage counters
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/getAllCounters" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Reset counter for a specific caller/tool
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/resetCounter" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"callerIdentity": "user@acme.com", "serviceName": "banking", "toolName": "transfer_funds"}'
+
+# Reset all counters
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/resetAllCounters" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Remove a constraint
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/removeConstraint" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"serviceName": "banking", "toolName": "transfer_funds"}'
+
+# View statistics
+curl -s -X POST "http://localhost:12000/npl/policies/ConstraintPolicy/$CP_ID/getStatistics" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+```
+
+### 6.4 PreconditionPolicy (System State Gates)
+
+PreconditionPolicy gates tool calls on named system state flags. Administrators set conditions (key-value pairs representing system state), then define rules that require a specific condition value before a tool can be called. For example, "the `deploy` tool can only be called when `maintenance_window` is `open`."
+
+**Setup:**
+
+```bash
+# Find the PreconditionPolicy instance ID
+PP_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:12000/npl/policies/PreconditionPolicy/" \
+  | jq -r '.[0].id')
+
+# Register a route
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"serviceName\": \"infrastructure\",
+    \"toolName\": \"deploy\",
+    \"routeProtocol\": \"PreconditionPolicy\",
+    \"instanceId\": \"$PP_ID\",
+    \"endpoint\": \"/npl/policies/PreconditionPolicy/$PP_ID/evaluate\"
+  }"
+
+# Set a condition (system state flag)
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/setCondition" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"conditionName": "maintenance_window", "value": "open"}'
+
+# Add a rule: deploy requires maintenance_window == "open"
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/addRule" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"conditionName": "maintenance_window", "requiredValue": "open", "serviceName": "infrastructure", "toolName": "deploy"}'
+```
+
+**Managing preconditions:**
+
+```bash
+# View all conditions
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/getConditions" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# View all rules
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/getRules" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Remove a condition
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/removeCondition" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"conditionName": "maintenance_window"}'
+
+# Remove a rule
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/removeRule" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"conditionName": "maintenance_window", "serviceName": "infrastructure", "toolName": "deploy"}'
+
+# View statistics
+curl -s -X POST "http://localhost:12000/npl/policies/PreconditionPolicy/$PP_ID/getStatistics" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+```
+
+### 6.5 FlowPolicy (Cross-Call Data Flow Governance)
+
+FlowPolicy governs data flow between tools within a session. It tracks which tools a session has called and enforces rules about what can be called next. For example, "if an agent read PII via `read_customer`, it cannot then call `slack.send_message` in the same session."
+
+**Setup:**
+
+```bash
+# Find the FlowPolicy instance ID
+FP_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:12000/npl/policies/FlowPolicy/" \
+  | jq -r '.[0].id')
+
+# Register a route (wildcard for all tools on slack)
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"serviceName\": \"slack\",
+    \"toolName\": \"*\",
+    \"routeProtocol\": \"FlowPolicy\",
+    \"instanceId\": \"$FP_ID\",
+    \"endpoint\": \"/npl/policies/FlowPolicy/$FP_ID/evaluate\"
+  }"
+
+# Set a flow rule: after calling crm.read_customer, block slack.send_message
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/setFlowRule" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sourceService": "crm", "sourceTool": "read_customer", "targetService": "slack", "targetTool": "send_message", "description": "Block PII exfiltration via Slack after reading customer data"}'
+```
+
+**Managing flow rules:**
+
+```bash
+# View all flow rules
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/getFlowRules" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# View session history (what tools were called in a session)
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/getSessionHistory" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"sessionId": "session-abc-123"}'
+
+# Clear history for a specific session
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/clearSessionHistory" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"sessionId": "session-abc-123"}'
+
+# Clear all session history
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/clearAllHistory" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Remove a flow rule
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/removeFlowRule" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"sourceService": "crm", "sourceTool": "read_customer", "targetService": "slack", "targetTool": "send_message"}'
+
+# View statistics
+curl -s -X POST "http://localhost:12000/npl/policies/FlowPolicy/$FP_ID/getStatistics" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+```
+
+### 6.6 IdentityPolicy (Identity Governance)
+
+IdentityPolicy enforces identity-based governance rules on tool calls. It supports three rule types:
+
+| Rule Type | Meaning |
+|-----------|---------|
+| `segregation_of_duties` | The same actor who performed `primaryVerb` on a tool cannot perform `secondaryVerb` on it. E.g., the person who creates an order cannot approve it. |
+| `four_eyes` | A tool call requires that two different actors have acted on the entity (both `primaryVerb` and `secondaryVerb` must have been performed by different people). |
+| `exclusive_actor` | Only the actor who first performed `primaryVerb` on an entity can subsequently perform `secondaryVerb`. |
+
+**Setup:**
+
+```bash
+# Find the IdentityPolicy instance ID
+IP_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:12000/npl/policies/IdentityPolicy/" \
+  | jq -r '.[0].id')
+
+# Register a route
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/registerRoute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"serviceName\": \"procurement\",
+    \"toolName\": \"approve_order\",
+    \"routeProtocol\": \"IdentityPolicy\",
+    \"instanceId\": \"$IP_ID\",
+    \"endpoint\": \"/npl/policies/IdentityPolicy/$IP_ID/evaluate\"
+  }"
+
+# Add a segregation of duties rule:
+# the person who creates an order cannot approve it
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/addIdentityRule" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"serviceName": "procurement", "toolName": "approve_order", "ruleType": "segregation_of_duties", "primaryVerb": "create", "secondaryVerb": "approve"}'
+```
+
+**Managing identity rules:**
+
+```bash
+# View all identity rules
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/getIdentityRules" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# View actor history for an entity
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/getActorHistory" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"entityKey": "procurement:approve_order"}'
+
+# Clear actor history for an entity
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/clearActorHistory" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"entityKey": "procurement:approve_order"}'
+
+# Clear all actor history
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/clearAllHistory" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Remove an identity rule
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/removeIdentityRule" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"serviceName": "procurement", "toolName": "approve_order", "ruleType": "segregation_of_duties"}'
+
+# View statistics
+curl -s -X POST "http://localhost:12000/npl/policies/IdentityPolicy/$IP_ID/getStatistics" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+```
+
+### 6.7 Route Groups (AND/OR Composition)
+
+By default, each tool can have one contextual route. **Route Groups** allow composing multiple protocols for the same tool with AND or OR semantics. For example, a tool call might need to pass both a RateLimitPolicy AND a ConstraintPolicy, or either an ApprovalPolicy OR an automated ConstraintPolicy.
+
+Route groups are managed on the PolicyStore:
+
+```bash
+# Add a route to a group (tool can have multiple routes)
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/addRouteToGroup" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"serviceName\": \"banking\",
+    \"toolName\": \"transfer_funds\",
+    \"routeProtocol\": \"RateLimitPolicy\",
+    \"instanceId\": \"$RL_ID\",
+    \"endpoint\": \"/npl/policies/RateLimitPolicy/$RL_ID/evaluate\"
+  }"
+
+# Add a second route to the same group
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/addRouteToGroup" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"serviceName\": \"banking\",
+    \"toolName\": \"transfer_funds\",
+    \"routeProtocol\": \"ConstraintPolicy\",
+    \"instanceId\": \"$CP_ID\",
+    \"endpoint\": \"/npl/policies/ConstraintPolicy/$CP_ID/evaluate\"
+  }"
+
+# Set the composition mode: "and" (all must allow) or "or" (any can allow)
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/setRouteGroupMode" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"serviceName": "banking", "toolName": "transfer_funds", "mode": "and"}'
+
+# Remove a route from a group
+curl -s -X POST "http://localhost:12000/npl/store/PolicyStore/$POLICY_ID/removeRouteFromGroup" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"serviceName": "banking", "toolName": "transfer_funds", "routeProtocol": "ConstraintPolicy"}'
+```
+
+**Composition modes:**
+
+| Mode | Behavior |
+|------|----------|
+| `and` | ALL protocols in the group must return `"allow"`. If any returns `"deny"` or `"pending"`, the request is denied/held. This is the default. |
+| `or` | ANY protocol in the group returning `"allow"` is sufficient. The request is only denied if all protocols deny it. |
+
+Route groups appear in the OPA bundle as an array of routes (instead of a single route object), with a `mode` field. OPA evaluates each route in the group and combines results according to the mode.
 
 ---
 
@@ -1001,10 +1323,11 @@ Look for `x-sp-action`, `x-sp-rule`, and `x-authz-reason` in the response header
 - Verify the policy is loaded: `curl -s http://localhost:8181/v1/data/security_policy | jq .`
 - Check if the bundle was rebuilt after loading: compare `x-bundle-revision` header with `curl -s http://localhost:8282/health | jq .revision`
 
-**Contextual routing not working (approvals, rate limits):**
+**Contextual routing not working (approvals, rate limits, constraints, etc.):**
 - Verify the contextual route is registered: `curl -s http://localhost:8181/v1/data/contextual_routing | jq .`
-- Check that the protocol singleton exists: `curl -s -H "Authorization: Bearer $TOKEN" http://localhost:12000/npl/policies/ApprovalPolicy/` (or `RateLimitPolicy`)
+- Check that the protocol singleton exists: `curl -s -H "Authorization: Bearer $TOKEN" http://localhost:12000/npl/policies/ApprovalPolicy/` (or `RateLimitPolicy`, `ConstraintPolicy`, `PreconditionPolicy`, `FlowPolicy`, `IdentityPolicy`)
 - Verify the route points to the correct protocol and instance ID
+- For route groups, verify the mode and all routes are registered: check `contextual_routing` for an array with `mode` field
 
 ---
 

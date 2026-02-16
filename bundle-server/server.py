@@ -115,7 +115,7 @@ def fetch_npl_data() -> dict:
 
     # 1. Find the PolicyStore singleton
     resp = requests.get(
-        f"{NPL_URL}/npl/policy/PolicyStore/", headers=headers, timeout=10
+        f"{NPL_URL}/npl/store/PolicyStore/", headers=headers, timeout=10
     )
     resp.raise_for_status()
     items = resp.json().get("items", [])
@@ -132,7 +132,7 @@ def fetch_npl_data() -> dict:
 
     # 2. Get everything in one call
     data_resp = requests.post(
-        f"{NPL_URL}/npl/policy/PolicyStore/{store_id}/getPolicyData",
+        f"{NPL_URL}/npl/store/PolicyStore/{store_id}/getPolicyData",
         headers={**headers, "Content-Type": "application/json"},
         json={},
         timeout=10,
