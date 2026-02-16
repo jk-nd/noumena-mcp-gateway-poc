@@ -15,7 +15,8 @@ import org.junit.jupiter.api.Assertions.*
 /**
  * Integration tests for Layer 2 contextual routing protocols.
  *
- * Tests all 4 new protocols directly via NPL REST API:
+ * Tests all 5 Layer 2 protocols directly via NPL REST API:
+ * - RateLimitPolicy: per-service call limits
  * - ConstraintPolicy: per-caller tool call budgets
  * - PreconditionPolicy: system state flags gating tool calls
  * - FlowPolicy: cross-call data flow governance within sessions
@@ -38,6 +39,7 @@ class Layer2PolicyTest {
     private lateinit var gatewayToken: String
     private lateinit var client: HttpClient
 
+    private lateinit var rateLimitPolicyId: String
     private lateinit var constraintPolicyId: String
     private lateinit var preconditionPolicyId: String
     private lateinit var flowPolicyId: String
@@ -74,6 +76,8 @@ class Layer2PolicyTest {
         println("    ✓ Gateway token obtained (pGateway)")
 
         // Find-or-create singletons for each protocol
+        rateLimitPolicyId = ensureProtocol("RateLimitPolicy")
+        println("    ✓ RateLimitPolicy: $rateLimitPolicyId")
         constraintPolicyId = ensureProtocol("ConstraintPolicy")
         println("    ✓ ConstraintPolicy: $constraintPolicyId")
         preconditionPolicyId = ensureProtocol("PreconditionPolicy")
@@ -421,6 +425,144 @@ class Layer2PolicyTest {
         println("    ✓ alice finalize entity-2: allow (four_eyes satisfied — bob reviewed)")
     }
 
+    // ── IdentityPolicy — "Exclusive actor" ──────────────────────────────────
+
+    @Test
+    @Order(37)
+    fun `IP - add exclusive actor rule`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ IP-8: Add exclusive_actor rule (docs.wiki create/update)   │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        callAdmin("IdentityPolicy", identityPolicyId, "addIdentityRule",
+            """{"serviceName": "docs", "toolName": "wiki", "ruleType": "exclusive_actor", "primaryVerb": "create", "secondaryVerb": "update"}""")
+        println("    ✓ Exclusive actor rule: docs.wiki create -> update (only creator can update)")
+    }
+
+    @Test
+    @Order(38)
+    fun `IP - exclusive actor creator can update`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ IP-9: Exclusive actor — creator can update own entity      │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        // Alice creates the wiki page
+        val createResult = callEvaluate("IdentityPolicy", identityPolicyId,
+            serviceName = "docs", toolName = "wiki",
+            verb = "create", callerIdentity = "alice@acme.com", argumentDigest = "wiki-page-1")
+        assertEquals("allow", createResult, "Create should be allowed")
+        println("    ✓ alice create wiki-page-1: allow")
+
+        // Alice updates her own page
+        val updateResult = callEvaluate("IdentityPolicy", identityPolicyId,
+            serviceName = "docs", toolName = "wiki",
+            verb = "update", callerIdentity = "alice@acme.com", argumentDigest = "wiki-page-1")
+        assertEquals("allow", updateResult, "Creator should be able to update own entity")
+        println("    ✓ alice update wiki-page-1: allow (exclusive_actor — alice is creator)")
+    }
+
+    @Test
+    @Order(39)
+    fun `IP - exclusive actor non-creator denied`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ IP-10: Exclusive actor — non-creator cannot update         │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        // Bob tries to update alice's page
+        val result = callEvaluate("IdentityPolicy", identityPolicyId,
+            serviceName = "docs", toolName = "wiki",
+            verb = "update", callerIdentity = "bob@acme.com", argumentDigest = "wiki-page-1")
+        assertEquals("deny", result, "Non-creator should be denied (exclusive_actor)")
+        println("    ✓ bob update wiki-page-1: deny (exclusive_actor — alice is creator)")
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // RateLimitPolicy — "Search API throttle"
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    @Order(40)
+    fun `RL - set rate limit`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ RL-1: Set rate limit (search max 5 per-session)            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        callAdmin("RateLimitPolicy", rateLimitPolicyId, "setLimit",
+            """{"serviceName": "search", "maxCalls": 5, "windowLabel": "per-session"}""")
+        println("    ✓ Rate limit set: search max 5 per-session")
+    }
+
+    @Test
+    @Order(41)
+    fun `RL - under limit allows calls`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ RL-2: Under limit — 5 calls allowed for alice              │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        for (i in 1..5) {
+            val result = callEvaluate("RateLimitPolicy", rateLimitPolicyId,
+                serviceName = "search", toolName = "web_search", callerIdentity = "alice@acme.com")
+            assertEquals("allow", result, "Call $i/5 should be allowed")
+            println("    ✓ Call $i/5: allow")
+        }
+    }
+
+    @Test
+    @Order(42)
+    fun `RL - at limit denies call`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ RL-3: At limit — 6th call denied for alice                 │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val result = callEvaluate("RateLimitPolicy", rateLimitPolicyId,
+            serviceName = "search", toolName = "web_search", callerIdentity = "alice@acme.com")
+        assertEquals("deny", result, "6th call should be denied (limit reached)")
+        println("    ✓ Call 6/5: deny (limit reached)")
+    }
+
+    @Test
+    @Order(43)
+    fun `RL - separate caller has own counter`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ RL-4: Separate caller — bob has own counter                │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val result = callEvaluate("RateLimitPolicy", rateLimitPolicyId,
+            serviceName = "search", toolName = "web_search", callerIdentity = "bob@acme.com")
+        assertEquals("allow", result, "Bob's first call should be allowed (own counter)")
+        println("    ✓ bob@acme.com: allow (own counter, 1/5)")
+    }
+
+    @Test
+    @Order(44)
+    fun `RL - reset usage allows again`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ RL-5: Reset usage — alice can call again                   │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        callAdmin("RateLimitPolicy", rateLimitPolicyId, "resetUsage",
+            """{"callerIdentity": "alice@acme.com", "serviceName": "search"}""")
+        println("    ✓ Usage reset for alice on search")
+
+        val result = callEvaluate("RateLimitPolicy", rateLimitPolicyId,
+            serviceName = "search", toolName = "web_search", callerIdentity = "alice@acme.com")
+        assertEquals("allow", result, "Alice should be allowed after usage reset")
+        println("    ✓ alice@acme.com: allow (usage reset)")
+    }
+
+    @Test
+    @Order(45)
+    fun `RL - no limit configured allows unlimited`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ RL-6: No limit configured — unlimited calls allowed        │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        val result = callEvaluate("RateLimitPolicy", rateLimitPolicyId,
+            serviceName = "unconfigured-service", toolName = "any_tool", callerIdentity = "alice@acme.com")
+        assertEquals("allow", result, "Service with no limit should be unlimited")
+        println("    ✓ unconfigured-service: allow (no limit = unlimited)")
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // Cleanup
     // ════════════════════════════════════════════════════════════════════════
@@ -432,6 +574,17 @@ class Layer2PolicyTest {
         println("╠════════════════════════════════════════════════════════════════╣")
 
         if (::client.isInitialized && ::adminToken.isInitialized) {
+            try {
+                if (::rateLimitPolicyId.isInitialized) {
+                    callAdminSafe("RateLimitPolicy", rateLimitPolicyId, "resetAllUsage", "{}")
+                    callAdminSafe("RateLimitPolicy", rateLimitPolicyId, "removeLimit",
+                        """{"serviceName": "search"}""")
+                    println("║ ✓ RateLimitPolicy cleaned up                                 ║")
+                }
+            } catch (e: Exception) {
+                println("║ ⚠ RateLimitPolicy cleanup: ${e.message?.take(40)}")
+            }
+
             try {
                 if (::constraintPolicyId.isInitialized) {
                     callAdminSafe("ConstraintPolicy", constraintPolicyId, "resetAllCounters", "{}")
@@ -471,6 +624,8 @@ class Layer2PolicyTest {
                         """{"serviceName": "banking", "toolName": "payment", "ruleType": "segregation_of_duties"}""")
                     callAdminSafe("IdentityPolicy", identityPolicyId, "removeIdentityRule",
                         """{"serviceName": "banking", "toolName": "transfer", "ruleType": "four_eyes"}""")
+                    callAdminSafe("IdentityPolicy", identityPolicyId, "removeIdentityRule",
+                        """{"serviceName": "docs", "toolName": "wiki", "ruleType": "exclusive_actor"}""")
                     println("║ ✓ IdentityPolicy cleaned up                                  ║")
                 }
             } catch (e: Exception) {

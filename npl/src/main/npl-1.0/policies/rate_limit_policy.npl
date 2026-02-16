@@ -110,10 +110,9 @@ protocol[pAdmin, pGateway] RateLimitPolicy() {
             function(u: UsageRecord) -> u.callerIdentity == callerIdentity && u.serviceName == serviceName
         );
 
-        var currentCount = if (maybeUsage.isPresent()) {
-            maybeUsage.getOrFail().callCount
-        } else {
-            0
+        var currentCount = 0;
+        if (maybeUsage.isPresent()) {
+            currentCount = maybeUsage.getOrFail().callCount;
         };
 
         if (currentCount < limit.maxCalls) {
