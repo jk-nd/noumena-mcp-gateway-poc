@@ -37,7 +37,7 @@ services:
       ENGINE_DEV_MODE: "false"
       # Keycloak issues tokens with iss=http://keycloak:11000/realms/mcpgateway
       # (KC_HOSTNAME=keycloak), which the engine can resolve on the Docker network
-      ENGINE_ALLOWED_ISSUERS: "http://keycloak:11000/realms/mcpgateway"
+      ENGINE_ALLOWED_ISSUERS: "http://keycloak:11000/realms/mcpgateway,http://localhost:11000/realms/mcpgateway"
       ENGINE_DB_URL: "jdbc:postgresql://engine-db:5432/engine"
       ENGINE_DB_USER: engine
       ENGINE_DB_PASSWORD: secret
