@@ -1945,13 +1945,23 @@ async function contextualPoliciesFlow(): Promise<void> {
 
     const routes = policyData.contextualRoutes;
 
-    // Group routes by protocol
+    // Group routes by protocol (each route is a RouteGroup: {mode, routes: [{policyProtocol, ...}]})
     const protocolRoutes: Record<string, { serviceName: string; toolName: string; route: any }[]> = {};
     for (const [serviceName, toolRoutes] of Object.entries(routes)) {
       for (const [toolName, route] of Object.entries(toolRoutes as Record<string, any>)) {
-        const protocol = route.policyProtocol || "Unknown";
-        if (!protocolRoutes[protocol]) protocolRoutes[protocol] = [];
-        protocolRoutes[protocol].push({ serviceName, toolName, route });
+        const group = route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
+        if (group.routes && group.routes.length > 0) {
+          for (const r of group.routes) {
+            const protocol = r.policyProtocol || "Unknown";
+            if (!protocolRoutes[protocol]) protocolRoutes[protocol] = [];
+            protocolRoutes[protocol].push({ serviceName, toolName, route });
+          }
+        } else {
+          // Fallback for legacy flat routes
+          const protocol = route.policyProtocol || "Unknown";
+          if (!protocolRoutes[protocol]) protocolRoutes[protocol] = [];
+          protocolRoutes[protocol].push({ serviceName, toolName, route });
+        }
       }
     }
 
@@ -2792,19 +2802,46 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
 
     if (allRoutes.length > 0) {
       for (const { serviceName, toolName, route } of allRoutes) {
-        const protocol = route.policyProtocol || "Unknown";
         const toolLabel = toolName === "*" ? "(all tools)" : toolName;
-        console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocol)}`);
+        const group = route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
+        if (group.routes && group.routes.length > 0) {
+          if (group.mode === "single" || group.routes.length === 1) {
+            const protocol = group.routes[0].policyProtocol || "Unknown";
+            console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocol)}`);
+          } else {
+            const modeLabel = group.mode === "and" ? "AND" : group.mode === "or" ? "OR" : (group.mode || "").toUpperCase();
+            const protocols = group.routes.map(r => r.policyProtocol).join(", ");
+            console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(`[${modeLabel}]`)} ${protocols}`);
+          }
+        } else {
+          // Fallback for legacy flat routes
+          const protocol = route.policyProtocol || "Unknown";
+          console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocol)}`);
+        }
       }
       console.log();
     }
+
+    // Identify existing groups (routes with more than one sub-route)
+    const groupRoutes = allRoutes.filter((r) => {
+      const g = r.route as { routes?: Array<any> };
+      return g.routes && g.routes.length > 1;
+    });
+    // Identify existing single routes that can be extended into a group
+    const singleRoutes = allRoutes.filter((r) => {
+      const g = r.route as { mode?: string; routes?: Array<any> };
+      return g.routes && g.routes.length >= 1;
+    });
 
     const action = await p.select({
       message: "Action:",
       options: [
         { value: "back", label: noumena.textDim("← Back") },
         { value: "register", label: noumena.success("  + Register route"), hint: "Connect a service/tool to a protocol" },
-        { value: "remove", label: noumena.warning("  Remove route"), hint: "Disconnect a route" },
+        { value: "add-to-group", label: noumena.success("  + Add to group"), hint: "Add another protocol to an existing route" },
+        { value: "set-group-mode", label: "  Set group mode", hint: "Switch AND/OR for a route group" },
+        { value: "remove-from-group", label: noumena.warning("  Remove from group"), hint: "Remove a protocol from a group" },
+        { value: "remove", label: noumena.warning("  Remove route"), hint: "Disconnect an entire route" },
         { value: "refresh", label: "  Refresh" },
       ],
     });
@@ -2852,6 +2889,10 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           { value: "ApprovalPolicy", label: "  ApprovalPolicy", hint: "Human-in-the-loop approval" },
           { value: "RateLimitPolicy", label: "  RateLimitPolicy", hint: "Automated rate limiting" },
+          { value: "ConstraintPolicy", label: "  ConstraintPolicy", hint: "Tool-level budget constraints" },
+          { value: "PreconditionPolicy", label: "  PreconditionPolicy", hint: "System state gates" },
+          { value: "FlowPolicy", label: "  FlowPolicy", hint: "Cross-call data flow governance" },
+          { value: "IdentityPolicy", label: "  IdentityPolicy", hint: "Identity governance (SoD, four-eyes)" },
         ],
       });
       if (p.isCancel(protocol) || protocol === "---cancel") continue;
@@ -2865,6 +2906,14 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
           instanceId = await ensureApprovalPolicy();
         } else if (protocol === "RateLimitPolicy") {
           instanceId = await ensureRateLimitPolicy();
+        } else if (protocol === "ConstraintPolicy") {
+          instanceId = await ensureConstraintPolicy();
+        } else if (protocol === "PreconditionPolicy") {
+          instanceId = await ensurePreconditionPolicy();
+        } else if (protocol === "FlowPolicy") {
+          instanceId = await ensureFlowPolicy();
+        } else if (protocol === "IdentityPolicy") {
+          instanceId = await ensureIdentityPolicy();
         } else {
           s.stop(noumena.error("Unknown protocol"));
           continue;
@@ -2887,11 +2936,25 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
         message: "Remove route:",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
-          ...allRoutes.map((r) => ({
-            value: `${r.serviceName}:${r.toolName}`,
-            label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
-            hint: r.route.policyProtocol || "",
-          })),
+          ...allRoutes.map((r) => {
+            const group = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
+            let hint = "";
+            if (group.routes && group.routes.length > 0) {
+              if (group.mode === "single" || group.routes.length === 1) {
+                hint = group.routes[0].policyProtocol || "";
+              } else {
+                const modeLabel = group.mode === "and" ? "AND" : group.mode === "or" ? "OR" : (group.mode || "").toUpperCase();
+                hint = `[${modeLabel}] ${group.routes.map(gr => gr.policyProtocol).join(", ")}`;
+              }
+            } else {
+              hint = r.route.policyProtocol || "";
+            }
+            return {
+              value: `${r.serviceName}:${r.toolName}`,
+              label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
+              hint,
+            };
+          }),
         ],
       });
       if (p.isCancel(selected) || selected === "---cancel") continue;
@@ -2908,6 +2971,176 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       try {
         await removeContextualRoute(svc, tool);
         s.stop(noumena.success(`Route removed: ${svc}/${tool}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "add-to-group") {
+      // Add another protocol to an existing route (upgrades single → and group)
+      if (singleRoutes.length === 0) {
+        p.log.info("No existing routes to add to. Register a route first.");
+        continue;
+      }
+
+      const targetRoute = await p.select({
+        message: "Add protocol to which route:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...singleRoutes.map((r) => {
+            const g = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
+            const protocols = g.routes ? g.routes.map(gr => gr.policyProtocol).join(", ") : "?";
+            return {
+              value: `${r.serviceName}:${r.toolName}`,
+              label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
+              hint: protocols,
+            };
+          }),
+        ],
+      });
+      if (p.isCancel(targetRoute) || targetRoute === "---cancel") continue;
+
+      const [grpSvc, grpTool] = String(targetRoute).split(":");
+
+      // Pick protocol to add
+      const addProtocol = await p.select({
+        message: "Protocol to add:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          { value: "ApprovalPolicy", label: "  ApprovalPolicy", hint: "Human-in-the-loop approval" },
+          { value: "RateLimitPolicy", label: "  RateLimitPolicy", hint: "Automated rate limiting" },
+          { value: "ConstraintPolicy", label: "  ConstraintPolicy", hint: "Tool-level budget constraints" },
+          { value: "PreconditionPolicy", label: "  PreconditionPolicy", hint: "System state gates" },
+          { value: "FlowPolicy", label: "  FlowPolicy", hint: "Cross-call data flow governance" },
+          { value: "IdentityPolicy", label: "  IdentityPolicy", hint: "Identity governance (SoD, four-eyes)" },
+        ],
+      });
+      if (p.isCancel(addProtocol) || addProtocol === "---cancel") continue;
+
+      const s = p.spinner();
+      s.start(`Discovering ${addProtocol} instance...`);
+      try {
+        let instanceId: string;
+        if (addProtocol === "ApprovalPolicy") {
+          instanceId = await ensureApprovalPolicy();
+        } else if (addProtocol === "RateLimitPolicy") {
+          instanceId = await ensureRateLimitPolicy();
+        } else if (addProtocol === "ConstraintPolicy") {
+          instanceId = await ensureConstraintPolicy();
+        } else if (addProtocol === "PreconditionPolicy") {
+          instanceId = await ensurePreconditionPolicy();
+        } else if (addProtocol === "FlowPolicy") {
+          instanceId = await ensureFlowPolicy();
+        } else if (addProtocol === "IdentityPolicy") {
+          instanceId = await ensureIdentityPolicy();
+        } else {
+          s.stop(noumena.error("Unknown protocol"));
+          continue;
+        }
+
+        const endpoint = `http://npl-engine:12000/npl/policies/${addProtocol}/${instanceId}/evaluate`;
+        await addRouteToGroup(grpSvc, grpTool, String(addProtocol), instanceId, endpoint);
+        s.stop(noumena.success(`Added ${addProtocol} to ${grpSvc}/${grpTool} group`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "set-group-mode") {
+      // Set AND/OR mode for a route group
+      if (groupRoutes.length === 0) {
+        p.log.info("No route groups found. Add multiple protocols to a route first.");
+        continue;
+      }
+
+      const targetGroup = await p.select({
+        message: "Set mode for which group:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...groupRoutes.map((r) => {
+            const g = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
+            const modeLabel = g.mode === "and" ? "AND" : g.mode === "or" ? "OR" : (g.mode || "").toUpperCase();
+            const protocols = g.routes ? g.routes.map(gr => gr.policyProtocol).join(", ") : "";
+            return {
+              value: `${r.serviceName}:${r.toolName}`,
+              label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
+              hint: `[${modeLabel}] ${protocols}`,
+            };
+          }),
+        ],
+      });
+      if (p.isCancel(targetGroup) || targetGroup === "---cancel") continue;
+
+      const [modeSvc, modeTool] = String(targetGroup).split(":");
+
+      const newMode = await p.select({
+        message: "Group mode:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          { value: "and", label: "  AND", hint: "All protocols must allow the call" },
+          { value: "or", label: "  OR", hint: "Any protocol can allow the call" },
+        ],
+      });
+      if (p.isCancel(newMode) || newMode === "---cancel") continue;
+
+      const s = p.spinner();
+      s.start("Setting group mode...");
+      try {
+        await setRouteGroupMode(modeSvc, modeTool, String(newMode));
+        s.stop(noumena.success(`Group mode set to ${String(newMode).toUpperCase()} for ${modeSvc}/${modeTool}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "remove-from-group") {
+      // Remove a specific protocol from a group
+      if (groupRoutes.length === 0) {
+        p.log.info("No route groups found. Only groups with multiple protocols can have items removed.");
+        continue;
+      }
+
+      const targetGroup = await p.select({
+        message: "Remove protocol from which group:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...groupRoutes.map((r) => {
+            const g = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
+            const protocols = g.routes ? g.routes.map(gr => gr.policyProtocol).join(", ") : "";
+            return {
+              value: `${r.serviceName}:${r.toolName}`,
+              label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
+              hint: protocols,
+            };
+          }),
+        ],
+      });
+      if (p.isCancel(targetGroup) || targetGroup === "---cancel") continue;
+
+      const [rmSvc, rmTool] = String(targetGroup).split(":");
+      const matchedRoute = groupRoutes.find((r) => r.serviceName === rmSvc && r.toolName === rmTool);
+      const groupData = matchedRoute?.route as { routes?: Array<{ policyProtocol: string }> };
+      const protocolsInGroup = groupData?.routes?.map(gr => gr.policyProtocol) || [];
+
+      if (protocolsInGroup.length === 0) {
+        p.log.warn("No protocols found in this group.");
+        continue;
+      }
+
+      const rmProtocol = await p.select({
+        message: "Remove which protocol:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...protocolsInGroup.map((proto) => ({
+            value: proto,
+            label: `  ${proto}`,
+          })),
+        ],
+      });
+      if (p.isCancel(rmProtocol) || rmProtocol === "---cancel") continue;
+
+      const s = p.spinner();
+      s.start(`Removing ${rmProtocol} from group...`);
+      try {
+        await removeRouteFromGroup(rmSvc, rmTool, String(rmProtocol));
+        s.stop(noumena.success(`Removed ${rmProtocol} from ${rmSvc}/${rmTool} group`));
       } catch (err) {
         s.stop(noumena.error("Failed"));
         p.log.error(`${err}`);
