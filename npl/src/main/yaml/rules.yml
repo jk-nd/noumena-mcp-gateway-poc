@@ -1,4 +1,4 @@
-clau# Party Automation Rules for MCP Gateway
+# Party Automation Rules for MCP Gateway
 #
 # Maps JWT claims to NPL protocol parties.
 # Party names use 'p' prefix to distinguish from JWT claim roles.
