@@ -41,7 +41,7 @@ struct PendingApproval {
  * ApprovalPolicy — stateful human-in-the-loop approval for tool calls.
  *
  * Flow:
- *   1. OPA classifies tool call → security policy says "require_approval"
+ *   1. OPA classifies tool call → security policy says "npl_evaluate"
  *   2. OPA calls evaluate() via contextual route (Layer 2)
  *   3. First call: creates pending approval, returns "pending:<id>"
  *   4. Human approves/denies via approve()/deny()

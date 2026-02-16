@@ -2,7 +2,9 @@
 
 Technical reference for the human-in-the-loop approval system, including the ApprovalPolicy state machine, store-and-forward replay, and the NPL protocol API.
 
-> This is a reference companion to the [How-To Guide](HOWTO.md). See [Section 6](HOWTO.md#6-setting-up-approval-workflows) for setup instructions.
+> **Context:** ApprovalPolicy is one implementation of the gateway's generic [contextual routing framework](HOWTO.md#6-contextual-routing-protocols). The framework supports any protocol that implements `evaluate()` returning `"allow"`, `"deny"`, or `"pending:<id>"`. For a contrasting example, see [RateLimitPolicy](HOWTO.md#62-ratelimitpolicy-automated-rate-limiting) — a fully automated protocol that returns immediate allow/deny decisions based on per-user call counters.
+
+> This is a reference companion to the [How-To Guide](HOWTO.md). See [Section 6](HOWTO.md#6-contextual-routing-protocols) for setup instructions.
 
 ---
 
@@ -23,7 +25,7 @@ Technical reference for the human-in-the-loop approval system, including the App
 
 ## Overview
 
-The approval workflow provides human-in-the-loop control for tool calls that the security policy marks as `require_approval`. It is implemented as an NPL (Noumena Protocol Language) protocol called `ApprovalPolicy`.
+The approval workflow provides human-in-the-loop control for tool calls that the security policy delegates via contextual routing (`action: npl_evaluate`). It is implemented as an NPL (Noumena Protocol Language) protocol called `ApprovalPolicy` — one of several contextual routing protocols available in the gateway.
 
 **Key design principles:**
 - **One-time consumption** — each approval can only be used once, preventing replay attacks
@@ -258,7 +260,7 @@ policies:
   - name: Approve external email
     when:
       labels: [scope:external]
-    action: require_approval
+    action: npl_evaluate
     approvers: [manager, compliance]
 ```
 
@@ -545,5 +547,5 @@ Removes all non-pending approvals from the list. Pending approvals are preserved
 **See also:**
 - [How-To Guide](HOWTO.md) — step-by-step setup instructions
 - [Architecture Reference](ARCHITECTURE.md) — system topology and data flow
-- [Security Policy Reference](SECURITY_POLICY_REFERENCE.md) — writing `require_approval` rules
+- [Security Policy Reference](SECURITY_POLICY_REFERENCE.md) — writing `npl_evaluate` rules
 - [OPA Policy Internals](OPA_POLICY_INTERNALS.md) — how OPA triggers Layer 2 evaluation

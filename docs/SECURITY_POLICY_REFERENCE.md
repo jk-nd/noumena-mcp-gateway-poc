@@ -261,9 +261,9 @@ Policy rules are evaluated in priority order. The first matching rule determines
     openWorldHint: true                #   Match on MCP hint
     idempotentHint: false              #   Match on MCP hint
   match: all                           # Optional. "all" (AND) or "any" (OR). Default: "all".
-  action: allow                        # Required. "allow", "deny", or "require_approval".
-  approvers: [admin, manager]          # Required if action is "require_approval".
-  timeout: 60m                         # Optional. Approval timeout (for require_approval).
+  action: allow                        # Required. "allow", "deny", or "npl_evaluate".
+  approvers: [admin, manager]          # Required if action is "npl_evaluate".
+  timeout: 60m                         # Optional. Approval timeout (for npl_evaluate).
   priority: 10                         # Required. Lower number = higher priority.
 ```
 
@@ -275,8 +275,8 @@ Policy rules are evaluated in priority order. The first matching rule determines
 | `description` | string | No | Human-readable explanation. |
 | `when` | object | Yes | Conditions to match. Empty `{}` matches everything. |
 | `match` | string | No | `"all"` (AND, default) or `"any"` (OR). |
-| `action` | string | Yes | `"allow"`, `"deny"`, or `"require_approval"`. |
-| `approvers` | string[] | Conditional | Required when action is `require_approval`. List of approver identities/roles. |
+| `action` | string | Yes | `"allow"`, `"deny"`, or `"npl_evaluate"`. |
+| `approvers` | string[] | Conditional | Required when action is `npl_evaluate`. List of approver identities/roles. |
 | `timeout` | string | No | Approval timeout duration (e.g., `"30m"`, `"1h"`). |
 | `priority` | number | Yes | Evaluation order. Lowest number wins. |
 
@@ -328,7 +328,7 @@ Matches when the tool has `destructiveHint: true` OR the `data:pii` label (or bo
 |--------|--------|----------|
 | `allow` | Tool call proceeds to the backend MCP server | 200 (proxied response) |
 | `deny` | Tool call is blocked | 403 with `x-authz-reason` header |
-| `require_approval` | Tool call is held pending human approval | 403 with `x-approval-id` header |
+| `npl_evaluate` | Tool call is delegated to the registered contextual routing protocol (Layer 2). OPA calls the NPL protocol's `evaluate()` endpoint. Returns `"allow"`, `"deny"`, or `"pending:<id>"` depending on the protocol (e.g., ApprovalPolicy returns pending, RateLimitPolicy returns allow/deny immediately). | 403 with `x-approval-id` header (if pending) or `x-authz-reason` (if denied) |
 
 ### Priority
 
@@ -420,7 +420,7 @@ Based on the matched rule's action:
 
 - **`allow`**: OPA returns an allow decision. The tool call proceeds.
 - **`deny`**: OPA returns a deny decision with the rule name in `x-sp-rule` and reason in `x-authz-reason`.
-- **`require_approval`**: OPA checks for a contextual route. If found, calls NPL Engine's `evaluate()` endpoint (Layer 2). Returns either `pending:APR-N` (first time) or `allow`/`deny` (after human decision).
+- **`npl_evaluate`**: OPA checks for a contextual route. If found, calls NPL Engine's `evaluate()` endpoint (Layer 2). Returns either `pending:APR-N` (first time) or `allow`/`deny` (after human decision).
 
 ### Response Headers
 
@@ -428,7 +428,7 @@ Every security policy evaluation sets these response headers:
 
 | Header | Value |
 |--------|-------|
-| `x-sp-action` | The matched rule's action (`allow`, `deny`, `require_approval`) |
+| `x-sp-action` | The matched rule's action (`allow`, `deny`, `npl_evaluate`) |
 | `x-sp-rule` | The matched rule's `name` field |
 | `x-sp-verb` | The classified verb for the tool call |
 | `x-sp-labels` | Comma-separated list of all accumulated labels |
@@ -507,4 +507,4 @@ Each tool entry follows the [Tool Annotations](#tool-annotations) schema.
 **See also:**
 - [How-To Guide](HOWTO.md) — step-by-step configuration walkthrough
 - [OPA Policy Internals](OPA_POLICY_INTERNALS.md) — how security policies are evaluated in Rego
-- [Approval Workflow Deep Dive](APPROVAL_WORKFLOW.md) — what happens when `require_approval` fires
+- [Approval Workflow Deep Dive](APPROVAL_WORKFLOW.md) — what happens when `npl_evaluate` fires

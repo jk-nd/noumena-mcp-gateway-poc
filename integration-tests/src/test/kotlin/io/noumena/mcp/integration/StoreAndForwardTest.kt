@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Assertions.*
  *
  * Tests the full flow: Envoy -> OPA -> NPL ApprovalPolicy -> approve -> verify execution state.
  *
- * Security policy marks create_event as "require_approval" while list_events (readOnly)
+ * Security policy marks create_event as "npl_evaluate" while list_events (readOnly)
  * gets "allow". The test verifies:
  * - Read-only tools bypass approval
  * - Mutating tools get 403 + x-approval-id header
@@ -109,7 +109,7 @@ class StoreAndForwardTest {
 
         // 5. Set security policy on PolicyStore
         setSecurityPolicy()
-        println("    ✓ Security policy set (create_event=require_approval, list_events=allow)")
+        println("    ✓ Security policy set (create_event=npl_evaluate, list_events=allow)")
 
         // 6. Register contextual route: mock-calendar.* -> ApprovalPolicy/evaluate
         registerApprovalRoute()
@@ -179,7 +179,7 @@ class StoreAndForwardTest {
         response.headers.forEach { name, values -> println("      $name: ${values.joinToString(", ")}") }
 
         assertEquals(HttpStatusCode.Forbidden, response.status,
-            "create_event should return 403 (require_approval)")
+            "create_event should return 403 (npl_evaluate)")
 
         val approvalId = response.headers["x-approval-id"]
         assertNotNull(approvalId, "Response should include x-approval-id header")
@@ -187,7 +187,7 @@ class StoreAndForwardTest {
         capturedApprovalId = approvalId
 
         val spAction = response.headers["x-sp-action"]
-        assertEquals("require_approval", spAction, "x-sp-action should be require_approval")
+        assertEquals("npl_evaluate", spAction, "x-sp-action should be npl_evaluate")
 
         println("    ✓ create_event returned 403 with x-approval-id=$capturedApprovalId")
     }
@@ -527,7 +527,7 @@ class StoreAndForwardTest {
             },
             "classifiers": {},
             "policies": [
-                {"name": "Approve creates", "when": {"verb": "create"}, "action": "require_approval", "priority": 20, "approvers": []},
+                {"name": "Approve creates", "when": {"verb": "create"}, "action": "npl_evaluate", "priority": 20, "approvers": []},
                 {"name": "Default allow", "when": {}, "action": "allow", "priority": 999}
             ]
         }

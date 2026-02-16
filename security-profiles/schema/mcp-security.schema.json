@@ -178,19 +178,19 @@
         },
         "action": {
           "type": "string",
-          "enum": ["allow", "deny", "require_approval"],
-          "description": "What to do when this rule matches."
+          "enum": ["allow", "deny", "npl_evaluate"],
+          "description": "What to do when this rule matches. npl_evaluate delegates to a contextual routing protocol (Layer 2)."
         },
         "approvers": {
           "type": "array",
-          "description": "Required approver roles (only for require_approval action).",
+          "description": "Approver roles/identities passed to the NPL protocol (optional, used by ApprovalPolicy).",
           "items": {
             "type": "string"
           }
         },
         "timeout": {
           "type": "string",
-          "description": "Approval timeout (e.g., '60m', '24h'). Only for require_approval.",
+          "description": "Timeout duration (e.g., '60m', '24h'). Protocol-specific.",
           "pattern": "^[0-9]+[mhd]$"
         },
         "priority": {
@@ -202,10 +202,9 @@
       },
       "additionalProperties": false,
       "if": {
-        "properties": { "action": { "const": "require_approval" } }
+        "properties": { "action": { "const": "npl_evaluate" } }
       },
       "then": {
-        "required": ["approvers"]
       }
     }
   }

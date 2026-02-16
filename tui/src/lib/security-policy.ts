@@ -48,7 +48,7 @@ export interface PolicyRule {
   description?: string;
   when: PolicyCondition;
   match?: "all" | "any";
-  action: "allow" | "deny" | "require_approval";
+  action: "allow" | "deny" | "npl_evaluate";
   approvers?: string[];
   timeout?: string;
   priority: number;
@@ -95,7 +95,7 @@ export interface MergedSecurityPolicy {
 // --- Validation ---
 
 const VALID_VERBS = new Set(["get", "list", "create", "update", "delete"]);
-const VALID_ACTIONS = new Set(["allow", "deny", "require_approval"]);
+const VALID_ACTIONS = new Set(["allow", "deny", "npl_evaluate"]);
 const VALID_HINTS = new Set(["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]);
 const LABEL_PATTERN = /^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/;
 const PROFILE_PATTERN = /^@[a-z0-9-]+\/security-([a-z0-9-]+)$/;
@@ -157,8 +157,8 @@ export function validateConfig(config: SecurityPolicyConfig): string[] {
     if (!VALID_ACTIONS.has(policy.action)) {
       errors.push(`policies[${i}].action: invalid action "${policy.action}"`);
     }
-    if (policy.action === "require_approval" && !policy.approvers?.length) {
-      errors.push(`policies[${i}]: require_approval action needs "approvers"`);
+    if (policy.action === "npl_evaluate" && policy.approvers?.length) {
+      // approvers are optional for npl_evaluate — only used by ApprovalPolicy
     }
     if (policy.priority === undefined || policy.priority < 0 || policy.priority > 999) {
       errors.push(`policies[${i}].priority: must be 0-999`);

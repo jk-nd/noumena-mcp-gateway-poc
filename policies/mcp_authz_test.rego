@@ -868,7 +868,7 @@ test_sp_tracing_headers if {
 }
 
 # ============================================================================
-# Test: require_approval flow (Step 3 — ApprovalPolicy integration)
+# Test: npl_evaluate flow (Step 3 — contextual routing integration)
 # ============================================================================
 
 mock_sp_with_approval := {
@@ -907,7 +907,7 @@ mock_sp_with_approval := {
 	"policies": [
 		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
 		{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
-		{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "require_approval", "priority": 20, "approvers": ["compliance", "legal"]},
+		{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "npl_evaluate", "priority": 20, "approvers": ["compliance", "legal"]},
 		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
 	],
 }
@@ -918,10 +918,10 @@ mock_approval_route := {"gmail": {"*": {
 	"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
 }}}
 
-# Test: require_approval with contextual route → denied (NPL unreachable in unit tests)
-# In production: ApprovalPolicy would return "pending:<id>" or "allow"
-test_sp_require_approval_with_route if {
-	# send_email to external → scope:external → "Approve external" → require_approval
+# Test: npl_evaluate with contextual route → denied (NPL unreachable in unit tests)
+# In production: the NPL protocol would return "pending:<id>", "allow", or "deny"
+test_sp_npl_evaluate_with_route if {
+	# send_email to external → scope:external → "Approve external" → npl_evaluate
 	# Contextual route to ApprovalPolicy exists → security_policy_allows passes
 	# But http.send fails in unit tests → Rule 3b fails → denied
 	not allow with input as mock_input(
@@ -935,8 +935,8 @@ test_sp_require_approval_with_route if {
 		with security_policy as mock_sp_with_approval
 }
 
-# Test: require_approval without contextual route → denied (no approval mechanism)
-test_sp_require_approval_without_route if {
+# Test: npl_evaluate without contextual route → denied (no route configured)
+test_sp_npl_evaluate_without_route if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -948,8 +948,8 @@ test_sp_require_approval_without_route if {
 		with security_policy as mock_sp_with_approval
 }
 
-# Test: require_approval without route → reason includes "no approval route"
-test_sp_require_approval_no_route_reason if {
+# Test: npl_evaluate without route → reason includes "no contextual route"
+test_sp_npl_evaluate_no_route_reason if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -960,13 +960,13 @@ test_sp_require_approval_no_route_reason if {
 		with contextual_routing as {}
 		with security_policy as mock_sp_with_approval
 
-	contains(r, "require_approval")
+	contains(r, "npl_evaluate")
 	contains(r, "Approve external")
-	contains(r, "no approval route")
+	contains(r, "no contextual route")
 }
 
-# Test: deny action still works even with approval route configured
-test_sp_deny_not_bypassed_by_approval_route if {
+# Test: deny action still works even with contextual route configured
+test_sp_deny_not_bypassed_by_contextual_route if {
 	# delete_email → destructiveHint=true → "Deny destructive" → deny
 	# Even though approval route exists, deny takes precedence (lower priority)
 	not allow with input as mock_input(
@@ -980,10 +980,10 @@ test_sp_deny_not_bypassed_by_approval_route if {
 		with security_policy as mock_sp_with_approval
 }
 
-# Test: allow action still works with approval route configured
-test_sp_allow_bypasses_approval_route if {
+# Test: allow action still works with contextual route configured
+test_sp_allow_bypasses_contextual_route if {
 	# read_email → readOnlyHint=true → "Allow read-only" → allow
-	# Approval route exists but sp_action is "allow", not "require_approval"
+	# Contextual route exists but sp_action is "allow", not "npl_evaluate"
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -995,8 +995,8 @@ test_sp_allow_bypasses_approval_route if {
 		with security_policy as mock_sp_with_approval
 }
 
-# Test: internal send → scope:internal (no scope:external) → "Default allow" even with approval route
-test_sp_internal_send_allowed_with_approval_route if {
+# Test: internal send → scope:internal (no scope:external) → "Default allow" even with contextual route
+test_sp_internal_send_allowed_with_contextual_route if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -1008,8 +1008,8 @@ test_sp_internal_send_allowed_with_approval_route if {
 		with security_policy as mock_sp_with_approval
 }
 
-# Test: approval pending reason header when route exists but NPL unreachable
-test_sp_approval_pending_reason if {
+# Test: contextual route pending reason header when NPL returns pending
+test_sp_contextual_route_pending_reason if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -1021,7 +1021,7 @@ test_sp_approval_pending_reason if {
 		with security_policy as mock_sp_with_approval
 		with npl_evaluate_response as "pending:APR-42"
 
-	contains(r, "approval pending")
+	contains(r, "contextual route pending")
 	contains(r, "APR-42")
 	contains(r, "Approve external")
 }
@@ -1066,8 +1066,8 @@ test_no_approval_headers_when_allowed if {
 	not rh["retry-after"]
 }
 
-# Test: denial by approval policy (npl returns "deny")
-test_approval_policy_deny_reason if {
+# Test: denial by contextual route (npl returns "deny")
+test_contextual_route_deny_reason if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -1079,10 +1079,10 @@ test_approval_policy_deny_reason if {
 		with security_policy as mock_sp_with_approval
 		with npl_evaluate_response as "deny"
 
-	contains(r, "denied by approval policy")
+	contains(r, "contextual route denied")
 }
 
-# Test: sp_approvers extracted from winning require_approval policy
+# Test: sp_approvers extracted from winning npl_evaluate policy
 test_sp_approvers_extracted if {
 	result := sp_approvers with input as mock_input(
 		"POST", "/mcp",
@@ -1118,7 +1118,7 @@ test_sp_approvers_empty_when_not_specified if {
 			},
 		},
 		"policies": [
-			{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "require_approval", "priority": 20},
+			{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "npl_evaluate", "priority": 20},
 		],
 	}
 

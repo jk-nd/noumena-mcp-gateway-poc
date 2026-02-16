@@ -49,7 +49,7 @@ policies:
       labels: [scope:external]
       openWorldHint: true
     match: all
-    action: require_approval
+    action: npl_evaluate
     approvers: [manager]
     timeout: 60m
     priority: 10
@@ -60,7 +60,7 @@ policies:
       Prevents accidental or malicious data loss.
     when:
       destructiveHint: true
-    action: require_approval
+    action: npl_evaluate
     approvers: [admin]
     timeout: 30m
     priority: 20

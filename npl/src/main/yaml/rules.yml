@@ -1,4 +1,4 @@
-# Party Automation Rules for MCP Gateway
+clau# Party Automation Rules for MCP Gateway
 #
 # Maps JWT claims to NPL protocol parties.
 # Party names use 'p' prefix to distinguish from JWT claim roles.
@@ -46,3 +46,19 @@ policies.ApprovalPolicy:
       claims:
         role:
           - admin
+
+# ============================================================================
+# POLICIES PACKAGE - RateLimitPolicy (automated rate limiting)
+# ============================================================================
+
+policies.RateLimitPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway

@@ -24,7 +24,7 @@ ACME_EXAMPLE = PROFILES_DIR / "examples" / "acme-corp.yaml"
 VALID_VERBS = {"get", "list", "create", "update", "delete"}
 VALID_LABEL_NAMESPACES = {"scope", "env", "category", "data"}
 MCP_ANNOTATIONS = {"readOnlyHint", "destructiveHint", "openWorldHint", "idempotentHint"}
-VALID_ACTIONS = {"allow", "deny", "require_approval"}
+VALID_ACTIONS = {"allow", "deny", "npl_evaluate"}
 
 
 @pytest.fixture
@@ -311,8 +311,8 @@ class TestAcmePolicyEvaluation:
             gmail_profile, acme_config, "send_email",
             {"to": ["vendor@external.com"], "subject": "Quote", "body": "Hi"},
         )
-        assert action == "require_approval", (
-            f"Expected require_approval, got {action} from '{rule}'"
+        assert action == "npl_evaluate", (
+            f"Expected npl_evaluate, got {action} from '{rule}'"
         )
 
     def test_bcc_email_denied(self, gmail_profile, acme_config):
@@ -327,8 +327,8 @@ class TestAcmePolicyEvaluation:
             gmail_profile, acme_config, "delete_email",
             {"messageId": "msg-123"},
         )
-        assert action == "require_approval", (
-            f"Expected require_approval, got {action} from '{rule}'"
+        assert action == "npl_evaluate", (
+            f"Expected npl_evaluate, got {action} from '{rule}'"
         )
 
     def test_batch_delete_requires_approval(self, gmail_profile, acme_config):
@@ -336,8 +336,8 @@ class TestAcmePolicyEvaluation:
             gmail_profile, acme_config, "batch_delete_emails",
             {"messageIds": ["msg-1", "msg-2"]},
         )
-        assert action == "require_approval", (
-            f"Expected require_approval, got {action} from '{rule}'"
+        assert action == "npl_evaluate", (
+            f"Expected npl_evaluate, got {action} from '{rule}'"
         )
 
     def test_draft_internal_allowed(self, gmail_profile, acme_config):

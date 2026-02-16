@@ -28,6 +28,9 @@ let policyStoreId: string | null = null;
 // Cached ApprovalPolicy instance ID
 let approvalPolicyId: string | null = null;
 
+// Cached RateLimitPolicy instance ID
+let rateLimitPolicyId: string | null = null;
+
 // ============================================================================
 // PolicyStore types (mirrors NPL structs)
 // ============================================================================
@@ -69,6 +72,18 @@ export interface PendingApproval {
   serviceName: string;
   executionStatus: string;
   executionResult: string;
+}
+
+export interface RateLimitConfig {
+  serviceName: string;
+  maxCalls: number;
+  windowLabel: string;
+}
+
+export interface UsageRecord {
+  callerIdentity: string;
+  serviceName: string;
+  callCount: number;
 }
 
 // ============================================================================
@@ -162,6 +177,7 @@ export function setAdminCredentials(username: string, password: string): void {
   tokenExpiry = 0;
   policyStoreId = null; // Reset PolicyStore cache on re-login
   approvalPolicyId = null;
+  rateLimitPolicyId = null;
 }
 
 export function hasAdminCredentials(): boolean {
@@ -458,6 +474,178 @@ export async function getExecutionResult(approvalId: string): Promise<PendingApp
     throw new Error(`getExecutionResult failed: ${error}`);
   }
   return await response.json();
+}
+
+// ============================================================================
+// RateLimitPolicy Core
+// ============================================================================
+
+/**
+ * Find or create the RateLimitPolicy singleton. Caches the ID.
+ */
+export async function ensureRateLimitPolicy(): Promise<string> {
+  if (rateLimitPolicyId) return rateLimitPolicyId;
+
+  const token = await getKeycloakToken();
+
+  // List existing instances
+  const listResponse = await fetch(`${NPL_URL}/npl/policies/RateLimitPolicy/`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+
+  if (listResponse.ok) {
+    const text = await listResponse.text();
+    const clean = text.replace(/[\x00-\x1f]/g, "");
+    const data = JSON.parse(clean);
+    if (data.items && data.items.length > 0) {
+      rateLimitPolicyId = data.items[0]["@id"];
+      if (rateLimitPolicyId) return rateLimitPolicyId;
+    }
+  }
+
+  // Create singleton
+  const createResponse = await fetch(`${NPL_URL}/npl/policies/RateLimitPolicy/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ "@parties": {} }),
+  });
+
+  if (!createResponse.ok) {
+    const error = await createResponse.text();
+    throw new Error(`Failed to create RateLimitPolicy: ${error}`);
+  }
+
+  const createData = await createResponse.json();
+  rateLimitPolicyId = createData["@id"];
+  if (!rateLimitPolicyId) throw new Error("RateLimitPolicy created but no ID returned");
+  return rateLimitPolicyId;
+}
+
+/**
+ * Call a RateLimitPolicy action.
+ */
+async function callRateLimitPolicy(
+  action: string,
+  body: Record<string, unknown> = {}
+): Promise<Response> {
+  const instanceId = await ensureRateLimitPolicy();
+  const token = await getKeycloakToken();
+  return fetch(`${NPL_URL}/npl/policies/RateLimitPolicy/${instanceId}/${action}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+// ============================================================================
+// RateLimitPolicy Actions
+// ============================================================================
+
+export async function setRateLimit(
+  serviceName: string,
+  maxCalls: number,
+  windowLabel: string
+): Promise<void> {
+  const response = await callRateLimitPolicy("setLimit", { serviceName, maxCalls, windowLabel });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`setLimit failed: ${error}`);
+  }
+}
+
+export async function removeRateLimit(serviceName: string): Promise<void> {
+  const response = await callRateLimitPolicy("removeLimit", { serviceName });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`removeLimit failed: ${error}`);
+  }
+}
+
+export async function getAllRateLimits(): Promise<RateLimitConfig[]> {
+  const response = await callRateLimitPolicy("getAllLimits");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`getAllLimits failed: ${error}`);
+  }
+  return await response.json();
+}
+
+export async function getAllRateLimitUsage(): Promise<UsageRecord[]> {
+  const response = await callRateLimitPolicy("getAllUsage");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`getAllUsage failed: ${error}`);
+  }
+  return await response.json();
+}
+
+export async function resetRateLimitUsage(
+  callerIdentity: string,
+  serviceName: string
+): Promise<void> {
+  const response = await callRateLimitPolicy("resetUsage", { callerIdentity, serviceName });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`resetUsage failed: ${error}`);
+  }
+}
+
+export async function resetAllRateLimitUsage(): Promise<void> {
+  const response = await callRateLimitPolicy("resetAllUsage");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`resetAllUsage failed: ${error}`);
+  }
+}
+
+export async function getRateLimitStatistics(): Promise<string> {
+  const response = await callRateLimitPolicy("getStatistics");
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`getStatistics failed: ${error}`);
+  }
+  return await response.json();
+}
+
+// ============================================================================
+// Contextual Route Management (via PolicyStore)
+// ============================================================================
+
+export async function registerContextualRoute(
+  serviceName: string,
+  toolName: string,
+  routeProtocol: string,
+  instanceId: string,
+  endpoint: string
+): Promise<void> {
+  const response = await callPolicyStore("registerRoute", {
+    serviceName,
+    toolName,
+    routeProtocol,
+    instanceId,
+    endpoint,
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`registerRoute failed: ${error}`);
+  }
+}
+
+export async function removeContextualRoute(
+  serviceName: string,
+  toolName: string
+): Promise<void> {
+  const response = await callPolicyStore("removeRoute", { serviceName, toolName });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`removeRoute failed: ${error}`);
+  }
 }
 
 // ============================================================================

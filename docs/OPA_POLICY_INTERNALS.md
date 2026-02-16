@@ -1,4 +1,4 @@
-# OPA Rego Policy Internals
+   # OPA Rego Policy Internals
 
 Technical reference for the OPA authorization policy (`policies/mcp_authz.rego`), bundle structure, and testing.
 
@@ -37,7 +37,8 @@ OPA uses a two-layer design to balance speed and flexibility:
 
 - Triggered only when a contextual route exists for the service/tool combination
 - Calls the NPL Engine's `evaluate()` endpoint via `http.send()`
-- Used for stateful decisions (approval workflows) that can't be pre-computed
+- Used for stateful decisions (e.g., approvals, rate limiting) that can't be pre-computed
+- Any protocol implementing `evaluate()` can be plugged in via contextual routing
 - Handles ~1% of requests
 
 **Layer 2 is skipped when:**
@@ -75,14 +76,16 @@ The OPA bundle is a `tar.gz` file containing `data.json` and `.manifest`. The `d
   "contextual_routing": {
     "gmail": {
       "send_email": {
-        "protocolName": "ApprovalPolicy",
+        "policyProtocol": "ApprovalPolicy",
         "instanceId": "abc-123",
         "endpoint": "/npl/policies/ApprovalPolicy/abc-123/evaluate"
-      },
+      }
+    },
+    "duckduckgo": {
       "*": {
-        "protocolName": "ApprovalPolicy",
-        "instanceId": "abc-123",
-        "endpoint": "/npl/policies/ApprovalPolicy/abc-123/evaluate"
+        "policyProtocol": "RateLimitPolicy",
+        "instanceId": "def-456",
+        "endpoint": "/npl/policies/RateLimitPolicy/def-456/evaluate"
       }
     }
   },
@@ -274,11 +277,11 @@ Network call to NPL Engine
 
 OPA looks up the contextual route for the service/tool (or service/*), constructs the HTTP request, and calls the NPL endpoint. The NPL response determines the final decision:
 
-| NPL Response | OPA Decision |
-|-------------|-------------|
-| `"allow"` | Allow |
-| `"deny"` | Deny |
-| `"pending:APR-N"` | Deny with `x-approval-id: APR-N` header |
+| NPL Response | OPA Decision | Typical Source |
+|-------------|-------------|----------------|
+| `"allow"` | Allow | ApprovalPolicy (consumed approval), RateLimitPolicy (under limit) |
+| `"deny"` | Deny | ApprovalPolicy (consumed denial), RateLimitPolicy (over limit) |
+| `"pending:APR-N"` | Deny with `x-approval-id: APR-N` header | ApprovalPolicy (awaiting human decision) |
 
 ---
 
@@ -348,7 +351,7 @@ The matched rule's `action` field determines the response:
 
 - `allow`: Sets headers and allows the request
 - `deny`: Returns deny with reason headers
-- `require_approval`: Checks for contextual route, may trigger Layer 2
+- `npl_evaluate`: Checks for contextual route, may trigger Layer 2
 
 ---
 
@@ -407,7 +410,7 @@ OPA communicates with Envoy via the gRPC ext_authz protocol. The `result` object
 | `x-mcp-service` | Resolved service name | Tool call requests |
 | `x-granted-services` | CSV of service names with grants | `tools/list` requests |
 | `x-bundle-revision` | Bundle SHA256 hash (16 chars) | Every request |
-| `x-sp-action` | `allow`, `deny`, `require_approval` | When security policy is active |
+| `x-sp-action` | `allow`, `deny`, `npl_evaluate` | When security policy is active |
 | `x-sp-rule` | Matched rule name | When security policy matched |
 | `x-sp-verb` | Classified verb | When security policy is active |
 | `x-sp-labels` | Comma-separated labels | When security policy is active |
@@ -519,7 +522,7 @@ test_user_id_header if {
 | Specific grants | Per-tool access control |
 | Contextual routing | Layer 2 route lookup and fast-path logic |
 | Security policy | Classification, rule matching, annotation hints |
-| Approval workflow | Pending states, approval routes, require_approval action |
+| Approval workflow | Pending states, approval routes, npl_evaluate action |
 
 ---
 

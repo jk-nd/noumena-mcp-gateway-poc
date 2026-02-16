@@ -63,12 +63,25 @@ import {
   getAdminUsername,
   setSecurityPolicy,
   clearSecurityPolicy,
+  ensureApprovalPolicy,
+  ensureRateLimitPolicy,
+  getAllRateLimits,
+  setRateLimit,
+  removeRateLimit,
+  getAllRateLimitUsage,
+  resetRateLimitUsage,
+  resetAllRateLimitUsage,
+  getRateLimitStatistics,
+  registerContextualRoute,
+  removeContextualRoute,
   type KeycloakUser,
   type PolicyData,
   type ServiceEntry,
   type GrantEntry,
   type DiscoveredTool,
   type PendingApproval,
+  type RateLimitConfig,
+  type UsageRecord,
 } from "./lib/api.js";
 import {
   processSecurityPolicy,
@@ -265,6 +278,11 @@ async function mainMenu(): Promise<boolean> {
   // Count grants (unique subjects)
   const grantCount = Object.keys(policyData.grants).length;
 
+  // Count contextual routes
+  const routeCount = Object.values(policyData.contextualRoutes).reduce(
+    (sum, routes) => sum + Object.keys(routes).length, 0
+  );
+
   // Count pending approvals (best-effort — ApprovalPolicy may not exist yet)
   let pendingCount = 0;
   try {
@@ -283,9 +301,9 @@ async function mainMenu(): Promise<boolean> {
     ? noumena.success("● Connected")
     : noumena.grayDim("○ Disconnected");
 
-  const approvalStatus = pendingCount > 0
-    ? noumena.warning(`${pendingCount} pending`)
-    : noumena.text("0");
+  const routeStatus = routeCount > 0
+    ? noumena.text(`${routeCount}`) + (pendingCount > 0 ? noumena.warning(` (${pendingCount} pending)`) : "")
+    : noumena.grayDim("0");
   const policyStatus = hasSecurityPolicy
     ? noumena.success("active")
     : noumena.grayDim("none");
@@ -294,7 +312,7 @@ async function mainMenu(): Promise<boolean> {
     noumena.textDim("  Gateway: ") + gatewayStatus +
     noumena.textDim("  |  Services: ") + noumena.text(`${enabledCount}/${services.length}`) +
     noumena.textDim("  |  Grants: ") + noumena.text(`${grantCount}`) +
-    noumena.textDim("  |  Approvals: ") + approvalStatus +
+    noumena.textDim("  |  Routes: ") + routeStatus +
     noumena.textDim("  |  Policy: ") + policyStatus
   );
   console.log(
@@ -363,7 +381,7 @@ async function mainMenu(): Promise<boolean> {
     { value: "users", label: "  Manage users & tool access", hint: `${grantCount} subject(s) with grants` },
 
     { value: "---hdr-sec", label: noumena.purple("── Security ──"), hint: "" },
-    { value: "approvals", label: "  Pending Approvals", hint: pendingCount > 0 ? `${pendingCount} waiting` : "None" },
+    { value: "contextual", label: "  Contextual Policies", hint: routeCount > 0 ? `${routeCount} route(s)` + (pendingCount > 0 ? `, ${pendingCount} pending` : "") : "No routes" },
     { value: "security", label: "  Security Policy", hint: hasSecurityPolicy ? "Active" : "Not configured" },
 
     { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
@@ -386,8 +404,8 @@ async function mainMenu(): Promise<boolean> {
     await addCustomImageFlow();
   } else if (action === "users") {
     await userManagementFlow();
-  } else if (action === "approvals") {
-    await pendingApprovalsFlow();
+  } else if (action === "contextual") {
+    await contextualPoliciesFlow();
   } else if (action === "security") {
     await securityPolicyFlow();
   } else if (action === "config") {
@@ -1859,6 +1877,488 @@ async function deleteUserFromKeycloakFlow(kcUser: KeycloakUser): Promise<void> {
 }
 
 // ============================================================================
+// Contextual Policies — Generic entry point for all Layer 2 protocols
+// ============================================================================
+
+async function contextualPoliciesFlow(): Promise<void> {
+  while (true) {
+    let policyData: PolicyData;
+    try {
+      policyData = await getPolicyData();
+    } catch (err) {
+      p.log.error(`PolicyStore error: ${err}`);
+      return;
+    }
+
+    const routes = policyData.contextualRoutes;
+
+    // Group routes by protocol
+    const protocolRoutes: Record<string, { serviceName: string; toolName: string; route: any }[]> = {};
+    for (const [serviceName, toolRoutes] of Object.entries(routes)) {
+      for (const [toolName, route] of Object.entries(toolRoutes as Record<string, any>)) {
+        const protocol = route.policyProtocol || "Unknown";
+        if (!protocolRoutes[protocol]) protocolRoutes[protocol] = [];
+        protocolRoutes[protocol].push({ serviceName, toolName, route });
+      }
+    }
+
+    // Gather protocol summaries
+    let pendingCount = 0;
+    try {
+      const pending = await getPendingApprovals();
+      pendingCount = pending.length;
+    } catch { /* ApprovalPolicy may not exist */ }
+
+    let rateLimitStats = "";
+    try {
+      rateLimitStats = await getRateLimitStatistics();
+    } catch { /* RateLimitPolicy may not exist */ }
+
+    console.log();
+    console.log(noumena.purple("  Contextual Policies"));
+    console.log(noumena.textDim("  Protocols that evaluate tool calls at request time (Layer 2)"));
+    console.log();
+
+    const totalRoutes = Object.values(protocolRoutes).reduce((s, r) => s + r.length, 0);
+    if (totalRoutes === 0) {
+      console.log(noumena.textDim("  No contextual routes registered yet."));
+      console.log(noumena.textDim("  Use '+ Register new route' to connect a service/tool to a protocol."));
+      console.log();
+    }
+
+    // Build options
+    const options: { value: string; label: string; hint?: string }[] = [
+      { value: "back", label: noumena.textDim("← Back") },
+    ];
+
+    // ApprovalPolicy entry
+    const approvalRouteCount = (protocolRoutes["ApprovalPolicy"] || []).length;
+    const approvalHint = approvalRouteCount > 0
+      ? `${approvalRouteCount} route(s)` + (pendingCount > 0 ? `, ${pendingCount} pending` : "")
+      : "No routes";
+    options.push({
+      value: "protocol:ApprovalPolicy",
+      label: `  ApprovalPolicy`,
+      hint: approvalHint,
+    });
+
+    // RateLimitPolicy entry
+    const rlRouteCount = (protocolRoutes["RateLimitPolicy"] || []).length;
+    let rlHint = rlRouteCount > 0 ? `${rlRouteCount} route(s)` : "No routes";
+    if (rateLimitStats) {
+      const statsMap: Record<string, string> = {};
+      for (const part of rateLimitStats.split(",")) {
+        const [k, v] = part.split("=");
+        if (k && v) statsMap[k] = v;
+      }
+      if (statsMap.evaluations && statsMap.evaluations !== "0") {
+        rlHint += `, ${statsMap.evaluations} evals`;
+      }
+      if (statsMap.denied && statsMap.denied !== "0") {
+        rlHint += `, ${statsMap.denied} denied`;
+      }
+    }
+    options.push({
+      value: "protocol:RateLimitPolicy",
+      label: `  RateLimitPolicy`,
+      hint: rlHint,
+    });
+
+    // Other protocols (future-proofing)
+    for (const protocol of Object.keys(protocolRoutes)) {
+      if (protocol === "ApprovalPolicy" || protocol === "RateLimitPolicy") continue;
+      const count = protocolRoutes[protocol].length;
+      options.push({
+        value: `protocol:${protocol}`,
+        label: `  ${protocol}`,
+        hint: `${count} route(s)`,
+      });
+    }
+
+    options.push({ value: "---sep", label: noumena.grayDim("  ──────────"), hint: "" });
+    options.push({ value: "routes", label: noumena.accent("  Manage routes"), hint: "Register/remove contextual routes" });
+
+    const action = await p.select({ message: "Select protocol or action:", options });
+    if (p.isCancel(action) || action === "back") return;
+    if (typeof action === "string" && action.startsWith("---")) continue;
+
+    if (action === "protocol:ApprovalPolicy") {
+      await pendingApprovalsFlow();
+    } else if (action === "protocol:RateLimitPolicy") {
+      await rateLimitPolicyFlow();
+    } else if (action === "routes") {
+      await manageRoutesFlow(policyData);
+    } else if (typeof action === "string" && action.startsWith("protocol:")) {
+      p.log.info(`No management UI for ${action.replace("protocol:", "")} yet.`);
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    }
+  }
+}
+
+// ============================================================================
+// Rate Limit Policy Management
+// ============================================================================
+
+async function rateLimitPolicyFlow(): Promise<void> {
+  while (true) {
+    let limits: RateLimitConfig[] = [];
+    let usageRecords: UsageRecord[] = [];
+    let stats = "";
+    let error = "";
+
+    try {
+      limits = await getAllRateLimits();
+      usageRecords = await getAllRateLimitUsage();
+      stats = await getRateLimitStatistics();
+    } catch (err) {
+      error = `${err}`;
+    }
+
+    console.log();
+    console.log(noumena.purple("  RateLimitPolicy"));
+    console.log(noumena.textDim("  Automated per-user rate limiting for tool calls"));
+    console.log();
+
+    if (error) {
+      p.log.warn(`RateLimitPolicy not available: ${error.substring(0, 60)}`);
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+      return;
+    }
+
+    // Show stats
+    if (stats) {
+      const statsMap: Record<string, string> = {};
+      for (const part of stats.split(",")) {
+        const [k, v] = part.split("=");
+        if (k && v) statsMap[k] = v;
+      }
+      console.log(
+        noumena.textDim("  Evaluations: ") + noumena.text(statsMap.evaluations || "0") +
+        noumena.textDim("  |  Denied: ") + (parseInt(statsMap.denied || "0") > 0 ? noumena.warning(statsMap.denied!) : noumena.text("0")) +
+        noumena.textDim("  |  Limits: ") + noumena.text(statsMap.limits || "0") +
+        noumena.textDim("  |  Active users: ") + noumena.text(statsMap.activeUsers || "0")
+      );
+      console.log();
+    }
+
+    // Show configured limits
+    if (limits.length > 0) {
+      console.log(noumena.accent("  Configured limits:"));
+      for (const limit of limits) {
+        const usageForService = usageRecords.filter((u) => u.serviceName === limit.serviceName);
+        const totalUsed = usageForService.reduce((s, u) => s + u.callCount, 0);
+        console.log(
+          `  ${noumena.success("●")} ${limit.serviceName}: ` +
+          noumena.text(`${limit.maxCalls}`) + noumena.textDim(` ${limit.windowLabel}`) +
+          noumena.textDim(` (${totalUsed} calls used across ${usageForService.length} user(s))`)
+        );
+      }
+      console.log();
+    }
+
+    const action = await p.select({
+      message: "Action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "add", label: noumena.success("  Set rate limit"), hint: "Add or update a limit for a service" },
+        { value: "remove", label: noumena.warning("  Remove rate limit"), hint: "Remove a configured limit" },
+        { value: "usage", label: "  View usage", hint: "Per-user call counts" },
+        { value: "reset", label: "  Reset usage", hint: "Reset counters for a user" },
+        { value: "reset_all", label: "  Reset all usage", hint: "Clear all counters" },
+        { value: "refresh", label: "  Refresh" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") return;
+    if (action === "refresh") continue;
+
+    if (action === "add") {
+      const serviceName = await p.text({
+        message: "Service name:",
+        placeholder: "e.g., duckduckgo",
+        validate: (v) => (!v || v.trim().length === 0 ? "Required" : undefined),
+      });
+      if (p.isCancel(serviceName)) continue;
+
+      const maxCallsStr = await p.text({
+        message: "Max calls:",
+        placeholder: "e.g., 10",
+        validate: (v) => {
+          if (!v) return "Must be a positive number";
+          const n = parseInt(v);
+          return isNaN(n) || n <= 0 ? "Must be a positive number" : undefined;
+        },
+      });
+      if (p.isCancel(maxCallsStr)) continue;
+
+      const windowLabel = await p.text({
+        message: "Window label:",
+        initialValue: "per-session",
+        placeholder: "e.g., per-session, per-hour",
+        validate: (v) => (!v || v.trim().length === 0 ? "Required" : undefined),
+      });
+      if (p.isCancel(windowLabel)) continue;
+
+      const s = p.spinner();
+      s.start("Setting rate limit...");
+      try {
+        await setRateLimit(String(serviceName).trim(), parseInt(String(maxCallsStr)), String(windowLabel).trim());
+        s.stop(noumena.success(`Rate limit set: ${serviceName} → ${maxCallsStr} ${windowLabel}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "remove") {
+      if (limits.length === 0) {
+        p.log.info("No limits configured");
+        continue;
+      }
+
+      const serviceName = await p.select({
+        message: "Remove limit for:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...limits.map((l) => ({
+            value: l.serviceName,
+            label: `  ${l.serviceName}`,
+            hint: `${l.maxCalls} ${l.windowLabel}`,
+          })),
+        ],
+      });
+      if (p.isCancel(serviceName) || serviceName === "---cancel") continue;
+
+      const s = p.spinner();
+      s.start("Removing rate limit...");
+      try {
+        await removeRateLimit(String(serviceName));
+        s.stop(noumena.success(`Removed limit: ${serviceName}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "usage") {
+      console.log();
+      console.log(noumena.purple("  Usage Records"));
+      console.log();
+      if (usageRecords.length === 0) {
+        p.log.info("No usage records");
+      } else {
+        for (const record of usageRecords) {
+          const limit = limits.find((l) => l.serviceName === record.serviceName);
+          const maxStr = limit ? `/${limit.maxCalls}` : "";
+          const atLimit = limit && record.callCount >= limit.maxCalls;
+          const countStr = atLimit
+            ? noumena.warning(`${record.callCount}${maxStr}`)
+            : noumena.text(`${record.callCount}${maxStr}`);
+          console.log(`  ${record.callerIdentity} → ${record.serviceName}: ${countStr}`);
+        }
+      }
+      console.log();
+      await p.text({ message: "Press Enter to continue...", defaultValue: "", placeholder: "" });
+    } else if (action === "reset") {
+      if (usageRecords.length === 0) {
+        p.log.info("No usage records to reset");
+        continue;
+      }
+
+      const selected = await p.select({
+        message: "Reset usage for:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...usageRecords.map((r) => ({
+            value: `${r.callerIdentity}:${r.serviceName}`,
+            label: `  ${r.callerIdentity} → ${r.serviceName}`,
+            hint: `${r.callCount} calls`,
+          })),
+        ],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+
+      const [callerIdentity, serviceName] = String(selected).split(":");
+      const s = p.spinner();
+      s.start("Resetting usage...");
+      try {
+        await resetRateLimitUsage(callerIdentity, serviceName);
+        s.stop(noumena.success(`Reset: ${callerIdentity} → ${serviceName}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "reset_all") {
+      const confirmed = await p.confirm({
+        message: "Reset ALL usage counters?",
+        initialValue: false,
+      });
+      if (p.isCancel(confirmed) || !confirmed) continue;
+
+      const s = p.spinner();
+      s.start("Resetting all usage...");
+      try {
+        await resetAllRateLimitUsage();
+        s.stop(noumena.success("All usage counters reset"));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Route Management — Register/remove contextual routes
+// ============================================================================
+
+async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
+  while (true) {
+    // Refresh policy data
+    try {
+      policyData = await getPolicyData();
+    } catch (err) {
+      p.log.error(`PolicyStore error: ${err}`);
+      return;
+    }
+
+    const routes = policyData.contextualRoutes;
+    const allRoutes: { serviceName: string; toolName: string; route: any }[] = [];
+    for (const [serviceName, toolRoutes] of Object.entries(routes)) {
+      for (const [toolName, route] of Object.entries(toolRoutes as Record<string, any>)) {
+        allRoutes.push({ serviceName, toolName, route });
+      }
+    }
+
+    console.log();
+    console.log(noumena.purple("  Contextual Routes"));
+    console.log(noumena.textDim("  Map service/tool combinations to policy protocols"));
+    console.log();
+
+    if (allRoutes.length > 0) {
+      for (const { serviceName, toolName, route } of allRoutes) {
+        const protocol = route.policyProtocol || "Unknown";
+        const toolLabel = toolName === "*" ? "(all tools)" : toolName;
+        console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocol)}`);
+      }
+      console.log();
+    }
+
+    const action = await p.select({
+      message: "Action:",
+      options: [
+        { value: "back", label: noumena.textDim("← Back") },
+        { value: "register", label: noumena.success("  + Register route"), hint: "Connect a service/tool to a protocol" },
+        { value: "remove", label: noumena.warning("  Remove route"), hint: "Disconnect a route" },
+        { value: "refresh", label: "  Refresh" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "back") return;
+    if (action === "refresh") continue;
+
+    if (action === "register") {
+      // Pick service
+      const serviceNames = Object.keys(policyData.services);
+      if (serviceNames.length === 0) {
+        p.log.warn("No services registered. Add a service first.");
+        continue;
+      }
+
+      const serviceName = await p.select({
+        message: "Service:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...serviceNames.map((s) => ({ value: s, label: `  ${s}` })),
+        ],
+      });
+      if (p.isCancel(serviceName) || serviceName === "---cancel") continue;
+
+      // Pick tool
+      const serviceEntry = policyData.services[String(serviceName)];
+      const toolOptions = [
+        { value: "*", label: "  * (all tools)", hint: "Service-wide route" },
+        ...serviceEntry.enabledTools.map((t) => ({ value: t, label: `  ${t}` })),
+      ];
+
+      const toolName = await p.select({
+        message: "Tool:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...toolOptions,
+        ],
+      });
+      if (p.isCancel(toolName) || toolName === "---cancel") continue;
+
+      // Pick protocol
+      const protocol = await p.select({
+        message: "Protocol:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          { value: "ApprovalPolicy", label: "  ApprovalPolicy", hint: "Human-in-the-loop approval" },
+          { value: "RateLimitPolicy", label: "  RateLimitPolicy", hint: "Automated rate limiting" },
+        ],
+      });
+      if (p.isCancel(protocol) || protocol === "---cancel") continue;
+
+      // Auto-discover instance ID
+      const s = p.spinner();
+      s.start(`Discovering ${protocol} instance...`);
+      try {
+        let instanceId: string;
+        if (protocol === "ApprovalPolicy") {
+          instanceId = await ensureApprovalPolicy();
+        } else if (protocol === "RateLimitPolicy") {
+          instanceId = await ensureRateLimitPolicy();
+        } else {
+          s.stop(noumena.error("Unknown protocol"));
+          continue;
+        }
+
+        const endpoint = `http://npl-engine:12000/npl/policies/${protocol}/${instanceId}/evaluate`;
+        await registerContextualRoute(String(serviceName), String(toolName), String(protocol), instanceId, endpoint);
+        s.stop(noumena.success(`Route registered: ${serviceName}/${toolName} → ${protocol}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    } else if (action === "remove") {
+      if (allRoutes.length === 0) {
+        p.log.info("No routes to remove");
+        continue;
+      }
+
+      const selected = await p.select({
+        message: "Remove route:",
+        options: [
+          { value: "---cancel", label: noumena.textDim("← Cancel") },
+          ...allRoutes.map((r) => ({
+            value: `${r.serviceName}:${r.toolName}`,
+            label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
+            hint: r.route.policyProtocol || "",
+          })),
+        ],
+      });
+      if (p.isCancel(selected) || selected === "---cancel") continue;
+
+      const [svc, tool] = String(selected).split(":");
+      const confirmed = await p.confirm({
+        message: `Remove route ${svc}/${tool}?`,
+        initialValue: true,
+      });
+      if (p.isCancel(confirmed) || !confirmed) continue;
+
+      const s = p.spinner();
+      s.start("Removing route...");
+      try {
+        await removeContextualRoute(svc, tool);
+        s.stop(noumena.success(`Route removed: ${svc}/${tool}`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    }
+  }
+}
+
+// ============================================================================
 // Pending Approvals — Human-in-the-loop approval workflow
 // ============================================================================
 
@@ -2088,7 +2588,7 @@ async function securityPolicyFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  Security Policy"));
-    console.log(noumena.textDim("  Manage mcp-security.yaml rules (deny/allow/require_approval)"));
+    console.log(noumena.textDim("  Manage mcp-security.yaml rules (deny/allow/npl_evaluate)"));
     console.log();
     console.log(
       noumena.textDim("  Active: ") +
@@ -2241,12 +2741,12 @@ async function importSecurityPolicyFlow(): Promise<void> {
     return;
   }
 
-  // Remind about require_approval routes
-  const hasApprovalRules = result.merged.policies.some((pol) => pol.action === "require_approval");
-  if (hasApprovalRules) {
+  // Remind about npl_evaluate routes
+  const hasNplEvaluateRules = result.merged.policies.some((pol) => pol.action === "npl_evaluate");
+  if (hasNplEvaluateRules) {
     console.log();
-    p.log.info("This policy includes require_approval rules.");
-    p.log.info("Ensure contextual routes are registered for the ApprovalPolicy instance.");
+    p.log.info("This policy includes npl_evaluate rules.");
+    p.log.info("Ensure contextual routes are registered via Contextual Policies > Manage routes.");
   }
 
   console.log();

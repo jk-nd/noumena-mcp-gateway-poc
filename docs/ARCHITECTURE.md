@@ -72,7 +72,7 @@ This document describes the MCP Gateway's service topology, network isolation de
 | Keycloak | Java | 11000 (HTTP), 9000 (health) | public | OIDC identity provider (user auth, JWT issuance) |
 | OPA Sidecar | Go | 9191 (gRPC), 8181 (HTTP) | policy | Rego policy evaluation, Envoy ext_authz |
 | Bundle Server | Python | 8282 | policy, public | SSE-driven OPA bundle builder and server |
-| NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (PolicyStore, ApprovalPolicy) |
+| NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (PolicyStore, ApprovalPolicy, RateLimitPolicy) |
 | Engine DB | PostgreSQL | 5432 | policy | NPL Engine persistence |
 | MCP Aggregator | Node.js | 8000 | backend | Multi-backend MCP request routing |
 | DuckDuckGo MCP | Node.js | 8000 | backend | Supergateway sidecar for DuckDuckGo search |
@@ -131,7 +131,7 @@ Agent                 Envoy              OPA              NPL Engine        MCP 
 ### Layer 1 vs Layer 2
 
 - **Layer 1** (~1ms): OPA evaluates catalog, grants, and security policy entirely from in-memory bundle data. No network I/O. Handles ~99% of requests.
-- **Layer 2** (~60ms): When a contextual route exists (e.g., approval workflow), OPA calls the NPL Engine via `http.send()`. Handles ~1% of requests.
+- **Layer 2** (~60ms): When a contextual route exists (e.g., approvals, rate limiting), OPA calls the NPL Engine via `http.send()`. Handles ~1% of requests.
 
 ---
 
@@ -260,7 +260,9 @@ JWT claims are mapped to NPL protocol parties via `npl/src/main/yaml/rules.yml`:
 |-----------|---------------|---------|
 | `pAdmin` | `admin` | Organization administrator — manages policies, views all state |
 | `pGateway` | `gateway` | Gateway service account — runtime policy enforcement |
-| `pApprover` | `admin` | Human approver — approves/denies pending requests |
+| `pApprover` | `admin` | Human approver — approves/denies pending requests (ApprovalPolicy only) |
+
+> **Note:** `pAdmin` and `pGateway` are shared across all contextual routing protocols (ApprovalPolicy, RateLimitPolicy, etc.). `pApprover` is specific to ApprovalPolicy.
 
 > Tool users (humans and AI agents) are NOT NPL parties. They are governed by grants inside the PolicyStore, identified by `subjectId`.
 

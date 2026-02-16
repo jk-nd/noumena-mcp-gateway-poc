@@ -208,7 +208,7 @@ contextual_route := contextual_routing[resolved_service_name]["*"] if {
 
 # --- Security Policy Evaluation ---
 # Classifies tools/call requests into MCP annotations + verb + labels
-# and evaluates security policy rules to determine allow/deny/require_approval.
+# and evaluates security policy rules to determine allow/deny/npl_evaluate.
 
 # Check if security policies are configured
 has_security_policies if {
@@ -442,7 +442,7 @@ sp_matched_rule := "no matching policy (default allow)" if {
 	count(matching_policies) == 0
 }
 
-# Approvers from the winning security policy rule (for require_approval)
+# Approvers from the winning security policy rule (for npl_evaluate)
 sp_approvers := p.approvers if {
 	some p in matching_policies
 	p.priority == sp_winning_priority
@@ -500,11 +500,11 @@ security_policy_allows if {
 	sp_action == "allow"
 }
 
-# Allow require_approval to proceed to Layer 2 if a contextual route exists
-# (ApprovalPolicy will manage the approval state)
+# Allow npl_evaluate to proceed to Layer 2 if a contextual route exists
+# (The registered NPL protocol will evaluate the request)
 security_policy_allows if {
 	has_security_policies
-	sp_action == "require_approval"
+	sp_action == "npl_evaluate"
 	contextual_route
 }
 
@@ -565,7 +565,7 @@ allow if {
 
 # Rule 3a-sp: tools/call — security policy explicitly allows, skip contextual route
 # When the security policy says "allow", the decision is final — no need for Layer 2.
-# Contextual routes are only used for "require_approval" (ApprovalPolicy workflow).
+# Contextual routes are only used for "npl_evaluate" (delegated to NPL protocols).
 allow if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
@@ -718,10 +718,10 @@ reason := sprintf("tools/call: denied by security policy '%s'", [sp_matched_rule
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 	has_security_policies
 	not security_policy_allows
-	sp_action != "require_approval"
+	sp_action != "npl_evaluate"
 }
 
-reason := sprintf("tools/call: require_approval by '%s' but no approval route configured", [sp_matched_rule]) if {
+reason := sprintf("tools/call: npl_evaluate by '%s' but no contextual route configured", [sp_matched_rule]) if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
 	jsonrpc_tool_name
@@ -731,11 +731,11 @@ reason := sprintf("tools/call: require_approval by '%s' but no approval route co
 	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 	has_security_policies
-	sp_action == "require_approval"
+	sp_action == "npl_evaluate"
 	not contextual_route
 }
 
-reason := sprintf("tools/call: approval pending %s (policy '%s')", [pending_approval_id, sp_matched_rule]) if {
+reason := sprintf("tools/call: contextual route pending %s (policy '%s')", [pending_approval_id, sp_matched_rule]) if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
 	jsonrpc_tool_name
@@ -745,12 +745,12 @@ reason := sprintf("tools/call: approval pending %s (policy '%s')", [pending_appr
 	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 	has_security_policies
-	sp_action == "require_approval"
+	sp_action == "npl_evaluate"
 	contextual_route
 	pending_approval_id
 }
 
-reason := sprintf("tools/call: denied by approval policy (policy '%s')", [sp_matched_rule]) if {
+reason := sprintf("tools/call: contextual route denied (policy '%s')", [sp_matched_rule]) if {
 	not is_stream_setup
 	jsonrpc_method == "tools/call"
 	jsonrpc_tool_name
@@ -760,7 +760,7 @@ reason := sprintf("tools/call: denied by approval policy (policy '%s')", [sp_mat
 	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
 	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
 	has_security_policies
-	sp_action == "require_approval"
+	sp_action == "npl_evaluate"
 	contextual_route
 	npl_evaluate_response
 	npl_evaluate_response != "allow"

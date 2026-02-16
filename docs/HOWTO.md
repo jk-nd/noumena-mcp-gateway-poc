@@ -9,7 +9,7 @@ A hands-on walkthrough for configuring and operating the MCP Gateway security pi
 3. [Adding an MCP Service](#3-adding-an-mcp-service)
 4. [Managing Users & Access](#4-managing-users--access)
 5. [Writing a Security Policy](#5-writing-a-security-policy-mcp-securityyaml)
-6. [Setting Up Approval Workflows](#6-setting-up-approval-workflows)
+6. [Contextual Routing Protocols](#6-contextual-routing-protocols)
 7. [Credential Injection](#7-credential-injection-optional)
 8. [Debugging & Troubleshooting](#8-debugging--troubleshooting)
 9. [Configuration Reference](#9-configuration-reference)
@@ -334,7 +334,7 @@ policies:
       labels: [scope:external]
       openWorldHint: true
     match: all
-    action: require_approval
+    action: npl_evaluate
     approvers: [manager]
     timeout: 60m
     priority: 10
@@ -344,7 +344,7 @@ policies:
       Deleting emails or filters requires admin approval.
     when:
       destructiveHint: true
-    action: require_approval
+    action: npl_evaluate
     approvers: [admin]
     timeout: 30m
     priority: 20
@@ -390,7 +390,7 @@ The file has four top-level sections:
 | `tenant` | Template variables (e.g., `{company_domain}` used in classifiers) |
 | `profiles` | Community security profiles to import |
 | `tool_overrides` | Override specific hint values from profiles |
-| `policies` | Ordered rules that determine allow/deny/require_approval |
+| `policies` | Ordered rules that determine allow/deny/npl_evaluate |
 
 ### 5.2 Tool Annotations (MCP Standard)
 
@@ -529,9 +529,9 @@ Each rule in the `policies` array has this structure:
     openWorldHint: true
     idempotentHint: false
   match: all          # "all" (AND, default) or "any" (OR)
-  action: allow       # "allow", "deny", or "require_approval"
-  approvers: [admin]  # only for require_approval
-  timeout: 60m        # only for require_approval
+  action: allow       # "allow", "deny", or "npl_evaluate"
+  approvers: [admin]  # only for npl_evaluate
+  timeout: 60m        # only for npl_evaluate
   priority: 10        # lowest number wins (evaluated first)
 ```
 
@@ -547,15 +547,15 @@ Each rule in the `policies` array has this structure:
 |--------|--------|
 | `allow` | Tool call proceeds to the backend |
 | `deny` | Tool call is blocked with 403 |
-| `require_approval` | Tool call is held pending human approval |
+| `npl_evaluate` | Tool call is held pending human approval |
 
 **Walking through the acme-corp example:**
 
 1. **Priority 0 — Block BCC** (`deny`): If the tool call has the `data:bcc-used` label (set by classifier when `bcc` field is present), block it immediately. No exceptions.
 
-2. **Priority 10 — Approve external email** (`require_approval`): If the tool call has `scope:external` AND `openWorldHint: true` (both must match — `match: all`), require manager approval. Drafts (`openWorldHint: false`) skip this rule.
+2. **Priority 10 — Approve external email** (`npl_evaluate`): If the tool call has `scope:external` AND `openWorldHint: true` (both must match — `match: all`), require manager approval. Drafts (`openWorldHint: false`) skip this rule.
 
-3. **Priority 20 — Approve destructive ops** (`require_approval`): If `destructiveHint: true`, require admin approval. Catches `delete_email`, `delete_filter`, etc.
+3. **Priority 20 — Approve destructive ops** (`npl_evaluate`): If `destructiveHint: true`, require admin approval. Catches `delete_email`, `delete_filter`, etc.
 
 4. **Priority 50 — Allow read-only** (`allow`): If `readOnlyHint: true`, allow. Catches `read_email`, `search_emails`, `list_filters`, etc.
 
@@ -602,33 +602,26 @@ Once loaded, the policy is embedded in the OPA bundle and evaluated in-memory on
 
 ---
 
-## 6. Setting Up Approval Workflows
+## 6. Contextual Routing Protocols
 
-When a security policy rule uses `action: require_approval`, the gateway needs an approval workflow to handle pending requests.
+When a security policy rule uses `action: npl_evaluate`, the gateway delegates the decision to a **contextual routing protocol** (Layer 2). OPA calls the registered NPL protocol's `evaluate()` endpoint, which returns `"allow"`, `"deny"`, or `"pending:<id>"`. Any protocol implementing this contract can be plugged in.
 
-> [-> Approval Workflow Deep Dive](APPROVAL_WORKFLOW.md) for the complete state machine and protocol reference.
+The gateway ships with two protocols:
 
-### Prerequisites
+| Protocol | Type | Response | Use Case |
+|----------|------|----------|----------|
+| **ApprovalPolicy** | Human-in-the-loop | `"allow"`, `"deny"`, `"pending:APR-N"` | Human approval before sensitive actions |
+| **RateLimitPolicy** | Automated | `"allow"`, `"deny"` | Per-user call limits |
 
-1. A security policy with at least one `require_approval` rule (see [Section 5](#5-writing-a-security-policy-mcp-securityyaml))
-2. The ApprovalPolicy singleton (created automatically by the TUI, or manually below)
-
-### Creating the ApprovalPolicy
-
-The TUI creates this on first use. To create it manually:
-
-```bash
-# The ApprovalPolicy singleton is created when the TUI first accesses approvals.
-# It can also be bootstrapped by the NPL Engine on startup.
-```
+**TUI:** Main menu > **Contextual Policies** to manage all protocols and routes.
 
 ### Registering a contextual route
 
-For approval workflows to work, OPA needs to know where to send evaluation requests. Register a route on the PolicyStore:
+For any contextual protocol to work, OPA needs to know where to send evaluation requests. Register a route on the PolicyStore:
 
 ```bash
-# Find the ApprovalPolicy instance ID
-APPROVAL_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+# Find the protocol instance ID (ApprovalPolicy or RateLimitPolicy)
+INSTANCE_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
   "http://localhost:12000/npl/policies/ApprovalPolicy/" \
   | jq -r '.[0].id')
 
@@ -639,9 +632,9 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/regist
   -d "{
     \"serviceName\": \"gmail\",
     \"toolName\": \"send_email\",
-    \"protocolName\": \"ApprovalPolicy\",
-    \"instanceId\": \"$APPROVAL_ID\",
-    \"endpoint\": \"/npl/policies/ApprovalPolicy/$APPROVAL_ID/evaluate\"
+    \"routeProtocol\": \"ApprovalPolicy\",
+    \"instanceId\": \"$INSTANCE_ID\",
+    \"endpoint\": \"/npl/policies/ApprovalPolicy/$INSTANCE_ID/evaluate\"
   }"
 
 # Or register a wildcard route for all tools in a service
@@ -651,34 +644,43 @@ curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/regist
   -d "{
     \"serviceName\": \"gmail\",
     \"toolName\": \"*\",
-    \"protocolName\": \"ApprovalPolicy\",
-    \"instanceId\": \"$APPROVAL_ID\",
-    \"endpoint\": \"/npl/policies/ApprovalPolicy/$APPROVAL_ID/evaluate\"
+    \"routeProtocol\": \"ApprovalPolicy\",
+    \"instanceId\": \"$INSTANCE_ID\",
+    \"endpoint\": \"/npl/policies/ApprovalPolicy/$INSTANCE_ID/evaluate\"
   }"
 ```
 
-### 6.1 The Approval Flow (Step by Step)
+The TUI automates this via **Contextual Policies > Manage routes > Register route**.
 
-Here's what happens when a tool call triggers `require_approval`:
+### 6.1 ApprovalPolicy (Human-in-the-Loop)
+
+> [-> Approval Workflow Deep Dive](APPROVAL_WORKFLOW.md) for the complete state machine and protocol reference.
+
+**Prerequisites:**
+
+1. A security policy with at least one `npl_evaluate` rule (see [Section 5](#5-writing-a-security-policy-mcp-securityyaml))
+2. A contextual route pointing to an ApprovalPolicy instance
+
+**The approval flow:**
 
 ```
 1. Agent calls tool
    POST /mcp  {"method":"tools/call","params":{"name":"gmail.send_email",...}}
 
 2. Envoy → OPA ext_authz
-   OPA evaluates security policy → action: "require_approval"
+   OPA evaluates security policy → action: "npl_evaluate"
 
 3. OPA → NPL evaluate() (Layer 2, via http.send)
    NPL creates a PendingApproval record → returns "pending:APR-1"
 
 4. OPA → Envoy: 403 Forbidden
-   Headers: x-approval-id: APR-1, x-sp-action: require_approval
+   Headers: x-approval-id: APR-1, x-sp-action: npl_evaluate
 
 5. Admin reviews pending approvals (TUI or API)
    Sees: APR-1 | user@acme.com | send_email | scope:external | pending
 
 6. Admin approves (or denies with reason)
-   TUI: Approvals > Approve
+   TUI: Contextual Policies > ApprovalPolicy > Approve
    API: POST .../approve {"approvalId":"APR-1","approverIdentity":"admin"}
 
 7. Agent retries the same tool call
@@ -687,18 +689,16 @@ Here's what happens when a tool call triggers `require_approval`:
    (Approval is consumed — cannot be replayed)
 ```
 
-### 6.2 Store-and-Forward (Automatic Replay)
+**Store-and-Forward (Automatic Replay):**
 
-Instead of requiring the agent to retry, the gateway can automatically replay approved requests.
+Instead of requiring the agent to retry, the gateway can automatically replay approved requests:
 
-**How it works:**
-
-1. When `require_approval` triggers, the original JSON-RPC request payload is stored in the PendingApproval record.
-2. When an admin approves, the approval status changes to `approved` and `executionStatus` changes to `queued`.
-3. The bundle server's replay worker picks up queued approvals, replays the request to the backend MCP server, and records the result.
+1. When `npl_evaluate` triggers, the original JSON-RPC request payload is stored in the PendingApproval record.
+2. When an admin approves, `executionStatus` changes to `queued`.
+3. The bundle server's replay worker picks up queued approvals, replays the request, and records the result.
 4. The result is available via `getExecutionResult(approvalId)`.
 
-**Enable store-and-forward** on the bundle server (`deployments/docker-compose.yml`):
+Enable store-and-forward on the bundle server (`deployments/docker-compose.yml`):
 
 ```yaml
   bundle-server:
@@ -708,24 +708,13 @@ Instead of requiring the agent to retry, the gateway can automatically replay ap
       BACKENDS: '{"gmail": "http://gmail-mcp:8000/mcp"}'
 ```
 
-The `BACKENDS` JSON maps service names to backend MCP server URLs. The replay worker uses this to route replayed requests.
+**Managing approvals:**
 
-**Retrieving execution results:**
-
-```bash
-curl -s -X POST "http://localhost:12000/npl/policies/ApprovalPolicy/$APPROVAL_ID/getExecutionResult" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"approvalId": "APR-1"}'
-```
-
-### 6.3 Managing Approvals
-
-**Via TUI:** Main menu > **Pending Approvals**
+**Via TUI:** Main menu > **Contextual Policies** > **ApprovalPolicy**
 
 - View all pending approvals with details
 - Approve or deny with optional reason
-- Clear resolved (consumed) approvals
+- View history and clear resolved records
 
 **Via API:**
 
@@ -747,18 +736,70 @@ curl -s -X POST "http://localhost:12000/npl/policies/ApprovalPolicy/$APPROVAL_ID
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"approvalId": "APR-1", "approverIdentity": "admin", "reason": "Not authorized for external comms"}'
+```
 
-# Get all approvals (including resolved)
-curl -s -X POST "http://localhost:12000/npl/policies/ApprovalPolicy/$APPROVAL_ID/getAllApprovals" \
+### 6.2 RateLimitPolicy (Automated Rate Limiting)
+
+RateLimitPolicy enforces per-user call limits. Unlike ApprovalPolicy, it is fully automated — returning `"allow"` or `"deny"` immediately with no human intervention.
+
+**Setup:**
+
+1. Register a contextual route pointing to a RateLimitPolicy instance (via TUI or API)
+2. Configure a limit for the service
+
+```bash
+# Find the RateLimitPolicy instance ID
+RL_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:12000/npl/policies/RateLimitPolicy/" \
+  | jq -r '.[0].id')
+
+# Register a route for duckduckgo
+curl -s -X POST "http://localhost:12000/npl/policy/PolicyStore/$POLICY_ID/registerRoute" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d "{
+    \"serviceName\": \"duckduckgo\",
+    \"toolName\": \"*\",
+    \"routeProtocol\": \"RateLimitPolicy\",
+    \"instanceId\": \"$RL_ID\",
+    \"endpoint\": \"/npl/policies/RateLimitPolicy/$RL_ID/evaluate\"
+  }"
 
-# Clear resolved approvals
-curl -s -X POST "http://localhost:12000/npl/policies/ApprovalPolicy/$APPROVAL_ID/clearResolved" \
+# Set a rate limit: 5 calls per session
+curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/setLimit" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"serviceName": "duckduckgo", "maxCalls": 5, "windowLabel": "per-session"}'
+```
+
+**Managing rate limits:**
+
+**Via TUI:** Main menu > **Contextual Policies** > **RateLimitPolicy**
+
+- View configured limits with usage stats
+- Add/update/remove limits
+- View per-user usage records
+- Reset counters (individual or all)
+
+**Via API:**
+
+```bash
+# Get all limits
+curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/getAllLimits" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Get all usage records
+curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/getAllUsage" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Reset usage for a specific user/service
+curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/resetUsage" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"callerIdentity": "user@acme.com", "serviceName": "duckduckgo"}'
+
+# Reset all usage counters
+curl -s -X POST "http://localhost:12000/npl/policies/RateLimitPolicy/$RL_ID/resetAllUsage" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
 ```
 
 ---
@@ -920,7 +961,7 @@ Every request through the gateway gets tracing headers in the response:
 | Header | Value | When |
 |--------|-------|------|
 | `x-authz-reason` | Denial reason | On 403 |
-| `x-sp-action` | `allow`, `deny`, `require_approval` | When security policy is active |
+| `x-sp-action` | `allow`, `deny`, `npl_evaluate` | When security policy is active |
 | `x-sp-rule` | Name of matched policy rule | When security policy matched |
 | `x-sp-verb` | Classified verb (get, create, etc.) | When security policy is active |
 | `x-sp-labels` | Comma-separated labels | When security policy is active |
@@ -960,9 +1001,10 @@ Look for `x-sp-action`, `x-sp-rule`, and `x-authz-reason` in the response header
 - Verify the policy is loaded: `curl -s http://localhost:8181/v1/data/security_policy | jq .`
 - Check if the bundle was rebuilt after loading: compare `x-bundle-revision` header with `curl -s http://localhost:8282/health | jq .revision`
 
-**Approvals not working:**
+**Contextual routing not working (approvals, rate limits):**
 - Verify the contextual route is registered: `curl -s http://localhost:8181/v1/data/contextual_routing | jq .`
-- Check that the ApprovalPolicy singleton exists: `curl -s -H "Authorization: Bearer $TOKEN" http://localhost:12000/npl/policies/ApprovalPolicy/`
+- Check that the protocol singleton exists: `curl -s -H "Authorization: Bearer $TOKEN" http://localhost:12000/npl/policies/ApprovalPolicy/` (or `RateLimitPolicy`)
+- Verify the route points to the correct protocol and instance ID
 
 ---
 

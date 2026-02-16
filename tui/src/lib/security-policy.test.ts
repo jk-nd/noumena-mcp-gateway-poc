@@ -110,20 +110,20 @@ test("valid labels pass", () => {
   assert.equal(errors.length, 0);
 });
 
-test("require_approval without approvers fails", () => {
+test("npl_evaluate without approvers is valid", () => {
   const config: SecurityPolicyConfig = {
     version: "1.0",
     policies: [
       {
-        name: "Broken",
+        name: "Rate limited",
         when: { destructiveHint: true },
-        action: "require_approval",
+        action: "npl_evaluate",
         priority: 10,
       },
     ],
   };
   const errors = validateConfig(config);
-  assert.ok(errors.some((e) => e.includes("approvers")));
+  assert.equal(errors.length, 0);
 });
 
 test("policy priority out of range fails", () => {

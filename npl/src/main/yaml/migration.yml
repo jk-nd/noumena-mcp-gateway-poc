@@ -79,3 +79,11 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V11: RateLimitPolicy — automated rate limiting contextual routing protocol
+  - name: mcp-11.0-rate-limit-policy
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

@@ -1,0 +1,250 @@
+package policies
+
+/**
+ * Configuration for a rate limit on a specific service.
+ *
+ * @param serviceName  MCP service name (e.g., "duckduckgo")
+ * @param maxCalls     Maximum number of allowed calls within the window
+ * @param windowLabel  Human-readable label for the window (e.g., "per-session", "per-hour")
+ */
+struct RateLimitConfig {
+    serviceName: Text,
+    maxCalls: Number,
+    windowLabel: Text
+};
+
+/**
+ * Per-user call counter for a specific service.
+ *
+ * @param callerIdentity  Authenticated user identity
+ * @param serviceName     MCP service name
+ * @param callCount       Number of calls made
+ */
+struct UsageRecord {
+    callerIdentity: Text,
+    serviceName: Text,
+    callCount: Number
+};
+
+/**
+ * RateLimitPolicy — automated rate limiting for tool calls.
+ *
+ * A contextual routing protocol (Layer 2) that enforces per-user call limits.
+ * Unlike ApprovalPolicy (which requires human intervention), RateLimitPolicy
+ * is fully automated — it returns "allow" or "deny" immediately.
+ *
+ * Flow:
+ *   1. OPA classifies tool call → security policy says "npl_evaluate"
+ *   2. OPA calls evaluate() via contextual route (Layer 2)
+ *   3. RateLimitPolicy checks counter vs configured limit
+ *   4. Returns "allow" (under limit) or "deny" (at/over limit) immediately
+ *
+ * No limit configured for a service = unlimited (always "allow").
+ *
+ * @party pAdmin    Organization administrator (configures limits, views usage)
+ * @party pGateway  MCP Gateway (calls evaluate at request time)
+ */
+@api
+protocol[pAdmin, pGateway] RateLimitPolicy() {
+    initial state active;
+
+    private var limits: List<RateLimitConfig> = listOf<RateLimitConfig>();
+    private var usage: List<UsageRecord> = listOf<UsageRecord>();
+    private var totalEvaluations: Number = 0;
+    private var totalDenied: Number = 0;
+
+    // ========================================================================
+    // Gateway evaluation (called by OPA Layer 2)
+    // ========================================================================
+
+    /**
+     * Evaluate a tool call against rate limits.
+     *
+     * Returns:
+     *   "allow" — under limit (or no limit configured)
+     *   "deny"  — at or over limit
+     *
+     * Accepts the full 10-parameter Layer 2 contract signature. Only
+     * callerIdentity and serviceName are used for rate limiting.
+     *
+     * @param toolName        Tool being called
+     * @param callerIdentity  Authenticated user identity
+     * @param sessionId       MCP session ID (reserved)
+     * @param verb            Classified verb (reserved)
+     * @param labels          Comma-separated labels (reserved)
+     * @param annotations     Comma-separated hints (reserved)
+     * @param argumentDigest  SHA-256 of tool arguments (reserved)
+     * @param approvers       Required approver roles (reserved)
+     * @param requestPayload  Serialized JSON-RPC body (reserved)
+     * @param serviceName     Resolved MCP service name
+     */
+    @api
+    permission[pGateway] evaluate(
+        toolName: Text,
+        callerIdentity: Text,
+        sessionId: Text,
+        verb: Text,
+        labels: Text,
+        annotations: Text,
+        argumentDigest: Text,
+        approvers: List<Text>,
+        requestPayload: Text,
+        serviceName: Text
+    ) returns Text | active {
+        totalEvaluations = totalEvaluations + 1;
+
+        // Find limit for this service
+        var maybeLimit = limits.findFirstOrNone(
+            function(l: RateLimitConfig) -> l.serviceName == serviceName
+        );
+
+        // No limit configured = unlimited
+        if (!maybeLimit.isPresent()) {
+            return "allow";
+        };
+
+        var limit = maybeLimit.getOrFail();
+
+        // Find or create usage record
+        var maybeUsage = usage.findFirstOrNone(
+            function(u: UsageRecord) -> u.callerIdentity == callerIdentity && u.serviceName == serviceName
+        );
+
+        var currentCount = if (maybeUsage.isPresent()) {
+            maybeUsage.getOrFail().callCount
+        } else {
+            0
+        };
+
+        if (currentCount < limit.maxCalls) {
+            // Under limit — increment and allow
+            var newRecord = UsageRecord(
+                callerIdentity = callerIdentity,
+                serviceName = serviceName,
+                callCount = currentCount + 1
+            );
+            if (maybeUsage.isPresent()) {
+                usage = usage.without(maybeUsage.getOrFail()).with(newRecord);
+            } else {
+                usage = usage.with(newRecord);
+            };
+            info("[RateLimitPolicy] Allow " + callerIdentity + " -> " + serviceName + " (" + (currentCount + 1).toText() + "/" + limit.maxCalls.toText() + ")");
+            return "allow";
+        };
+
+        // At or over limit — deny
+        totalDenied = totalDenied + 1;
+        info("[RateLimitPolicy] Deny " + callerIdentity + " -> " + serviceName + " (" + currentCount.toText() + "/" + limit.maxCalls.toText() + " limit reached)");
+        return "deny";
+    };
+
+    // ========================================================================
+    // Admin: limit management
+    // ========================================================================
+
+    /**
+     * Set or update a rate limit for a service.
+     */
+    @api
+    permission[pAdmin] setLimit(serviceName: Text, maxCalls: Number, windowLabel: Text) | active {
+        var maybeExisting = limits.findFirstOrNone(
+            function(l: RateLimitConfig) -> l.serviceName == serviceName
+        );
+        var newLimit = RateLimitConfig(
+            serviceName = serviceName,
+            maxCalls = maxCalls,
+            windowLabel = windowLabel
+        );
+        if (maybeExisting.isPresent()) {
+            limits = limits.without(maybeExisting.getOrFail()).with(newLimit);
+        } else {
+            limits = limits.with(newLimit);
+        };
+        info("[RateLimitPolicy] Set limit: " + serviceName + " -> " + maxCalls.toText() + " " + windowLabel);
+    };
+
+    /**
+     * Remove a rate limit for a service.
+     */
+    @api
+    permission[pAdmin] removeLimit(serviceName: Text) | active {
+        var maybeExisting = limits.findFirstOrNone(
+            function(l: RateLimitConfig) -> l.serviceName == serviceName
+        );
+        if (maybeExisting.isPresent()) {
+            limits = limits.without(maybeExisting.getOrFail());
+        };
+        info("[RateLimitPolicy] Removed limit: " + serviceName);
+    };
+
+    /**
+     * Get all configured rate limits.
+     */
+    @api
+    permission[pAdmin] getAllLimits() returns List<RateLimitConfig> | active {
+        return limits;
+    };
+
+    // ========================================================================
+    // Admin: usage queries
+    // ========================================================================
+
+    /**
+     * Get the usage record for a specific caller and service.
+     */
+    @api
+    permission[pAdmin] getUsage(callerIdentity: Text, serviceName: Text) returns UsageRecord | active {
+        var maybeUsage = usage.findFirstOrNone(
+            function(u: UsageRecord) -> u.callerIdentity == callerIdentity && u.serviceName == serviceName
+        );
+        require(maybeUsage.isPresent(), "No usage record found");
+        return maybeUsage.getOrFail();
+    };
+
+    /**
+     * Get all usage records.
+     */
+    @api
+    permission[pAdmin] getAllUsage() returns List<UsageRecord> | active {
+        return usage;
+    };
+
+    /**
+     * Reset usage for a specific caller and service.
+     */
+    @api
+    permission[pAdmin] resetUsage(callerIdentity: Text, serviceName: Text) | active {
+        var maybeUsage = usage.findFirstOrNone(
+            function(u: UsageRecord) -> u.callerIdentity == callerIdentity && u.serviceName == serviceName
+        );
+        if (maybeUsage.isPresent()) {
+            usage = usage.without(maybeUsage.getOrFail());
+        };
+        info("[RateLimitPolicy] Reset usage: " + callerIdentity + " -> " + serviceName);
+    };
+
+    /**
+     * Reset all usage records.
+     */
+    @api
+    permission[pAdmin] resetAllUsage() | active {
+        usage = listOf<UsageRecord>();
+        info("[RateLimitPolicy] Reset all usage");
+    };
+
+    // ========================================================================
+    // Admin: statistics
+    // ========================================================================
+
+    /**
+     * Get summary statistics.
+     * Returns a human-readable text summary.
+     */
+    @api
+    permission[pAdmin] getStatistics() returns Text | active {
+        return "evaluations=" + totalEvaluations.toText()
+            + ",denied=" + totalDenied.toText()
+            + ",limits=" + limits.size().toText()
+            + ",activeUsers=" + usage.size().toText();
+    };
+}
