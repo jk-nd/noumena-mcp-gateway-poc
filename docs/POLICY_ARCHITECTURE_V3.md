@@ -2,9 +2,9 @@
 
 ## Status
 
-**Implemented** (Phases 1-2) — Design captured 2026-02-14, implemented 2026-02-14.
+**Implemented** (Phases 1-3) — Design captured 2026-02-14, implemented through 2026-02-16.
 
-Phases 1-2 are complete: bundle server with SSE push + PolicyStore singleton replacing the old 3-layer model. Phase 3 (contextual evaluation) infrastructure is in place (routing table in PolicyStore, Rego router ready) but no concrete contextual policy protocols have been implemented yet. Phase 4 (decision audit trail) is not yet started.
+Phases 1-3 are complete: bundle server with SSE push + PolicyStore singleton replacing the old 3-layer model + six contextual evaluation protocols (ApprovalPolicy, RateLimitPolicy, ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy) with route group AND/OR composition. Phase 4 (decision audit trail) is not yet started.
 
 **Implementation notes**: The original design proposed two protocols (ToolCatalog + AccessGrant). The actual implementation consolidated further into a single **PolicyStore** singleton that holds catalog, grants, revoked subjects, and contextual routing in one protocol. Bundle server reads everything in 2 HTTP calls (list singleton + `getPolicyData()`), constant time regardless of user/service count.
 
@@ -120,7 +120,7 @@ The 110ms cold call happened every 5 seconds when the OPA cache expired.
 
 ### Original design: 2 protocols → Actual implementation: 1 singleton
 
-The original design below proposed two protocols (ToolCatalog + AccessGrant). The actual implementation went further and consolidated into a **single PolicyStore singleton** (see `npl/src/main/npl-1.0/policy/policy_store.npl`). The PolicyStore holds catalog, grants, revoked subjects, and contextual routing in one protocol with 2 parties (pAdmin, pGateway). The bundle shape (catalog/grants/contextual_routing) is the same as proposed.
+The original design below proposed two protocols (ToolCatalog + AccessGrant). The actual implementation went further and consolidated into a **single PolicyStore singleton** (see `npl/src/main/npl-1.0/store/policy_store.npl`). The PolicyStore holds catalog, grants, revoked subjects, and contextual routing in one protocol with 2 parties (pAdmin, pGateway). The bundle shape (catalog/grants/contextual_routing) is the same as proposed.
 
 #### ToolCatalog (original design — merged into PolicyStore)
 
@@ -603,9 +603,20 @@ Built bundle server with SSE push. Replaced `http.send` polling with OPA bundles
 
 Replaced all 4 NPL protocols (ServiceRegistry, ToolPolicy, UserToolAccess, UserRegistry) with a single **PolicyStore** singleton. Bundle server reads everything in 2 HTTP calls. The original design proposed ToolCatalog + AccessGrant (2 protocols), but implementation consolidated into PolicyStore (1 protocol). Rego updated to use `catalog`/`grants` data paths. Integration tests fully rewritten (27 tests passing).
 
-### Phase 3: Contextual evaluation — INFRASTRUCTURE READY
+### Phase 3: Contextual evaluation — DONE
 
-The routing table is in PolicyStore (`contextualRoutes`). Admin can register/remove routes via `registerRoute()`/`removeRoute()`. Routes flow into the bundle as `contextual_routing`. The Rego Layer 2 router structure is ready. **No concrete contextual policy protocols have been implemented yet** (PiiGuardPolicy, ApprovalPolicy, BudgetPolicy are designs only).
+The routing table is in PolicyStore (`contextualRoutes`). Admin can register/remove routes via `registerRoute()`/`removeRoute()`. Routes flow into the bundle as `contextual_routing`. The Rego Layer 2 router evaluates single routes and route groups (AND/OR composition). Six contextual policy protocols are implemented:
+
+| Protocol | Type | Purpose |
+|----------|------|---------|
+| **ApprovalPolicy** | Human-in-the-loop | Human approval before sensitive actions |
+| **RateLimitPolicy** | Automated | Per-user call limits per service |
+| **ConstraintPolicy** | Automated | Tool-level budget constraints per caller |
+| **PreconditionPolicy** | Automated | System state flags gating tool calls |
+| **FlowPolicy** | Automated | Cross-call data flow governance per session |
+| **IdentityPolicy** | Automated | Identity governance (segregation of duties, four-eyes, exclusive actor) |
+
+Route groups allow composing multiple protocols per tool with AND (all must allow) or OR (any can allow) semantics via `addRouteToGroup()`, `removeRouteFromGroup()`, and `setRouteGroupMode()` on the PolicyStore.
 
 ### Phase 4: Decision audit trail — NOT STARTED
 
@@ -619,11 +630,13 @@ Enable OPA decision logs. Build the NPL audit ingestion endpoint. Wire up the TU
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        NPL (single source of truth)                   │
 │                                                                       │
-│  PolicyStore (singleton)                  ContextualPolicy* (future)  │
-│  ├── Catalog (what exists)                                            │
-│  ├── Grants (who can use it)              * PiiGuardPolicy,           │
-│  ├── Revoked Subjects (emergency kill)      ApprovalPolicy,           │
-│  └── Contextual Routes (Layer 2 routing)    BudgetPolicy, ...         │
+│  PolicyStore (singleton)                  Contextual Policies          │
+│  ├── Catalog (what exists)                ├── ApprovalPolicy           │
+│  ├── Grants (who can use it)              ├── RateLimitPolicy          │
+│  ├── Revoked Subjects (emergency kill)    ├── ConstraintPolicy         │
+│  └── Contextual Routes (Layer 2 routing)  ├── PreconditionPolicy       │
+│     (incl. Route Groups AND/OR)           ├── FlowPolicy               │
+│                                           └── IdentityPolicy           │
 │                                                                       │
 └───────────────┬───────────────────────────────┬──────────────────────┘
                 │ bundle (SSE-triggered rebuild)  │ http.send (on-demand)
@@ -632,8 +645,8 @@ Enable OPA decision logs. Build the NPL audit ingestion endpoint. Wire up the TU
 │  OPA Layer 1: Static Access       │  │  OPA Layer 2: Contextual     │
 │  In-memory data lookups           │  │  Calls NPL evaluate()        │
 │  ~11ms E2E, zero network I/O     │  │  ~60ms, only when triggered   │
-│  99% of requests resolve here     │  │  Infrastructure ready,        │
-│  ✅ IMPLEMENTED                   │  │  no concrete policies yet     │
+│  99% of requests resolve here     │  │  6 protocols implemented      │
+│  ✅ IMPLEMENTED                   │  │  Route groups (AND/OR)        │
 └──────────────────────────────────┘  └──────────────────────────────┘
                 │                                │
                 └────────── single decision ─────┘

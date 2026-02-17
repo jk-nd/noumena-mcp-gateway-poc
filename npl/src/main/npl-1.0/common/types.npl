@@ -1,4 +1,0 @@
-package common
-
-// Common types for the MCP Gateway NPL protocols.
-// V2: Executor-specific types (ExecuteToolNotification, PolicyResult) removed.

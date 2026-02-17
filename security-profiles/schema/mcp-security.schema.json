@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noumena.io/mcp-security/v1.0/schema",
+  "title": "MCP Security Policy",
+  "description": "Schema for mcp-security.yaml — developer-facing security policy configuration for MCP Gateway.",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version. Must be \"1.0\"."
+    },
+    "tenant": {
+      "type": "object",
+      "description": "Tenant-specific values interpolated into classifier patterns (e.g., {company_domain}).",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "description": "Community-maintained security profiles to import (e.g., \"@openclaw/security-gmail\").",
+      "items": {
+        "type": "string",
+        "pattern": "^@[a-z0-9-]+/[a-z0-9-]+$"
+      }
+    },
+    "tool_overrides": {
+      "type": "object",
+      "description": "Per-service, per-tool annotation overrides. Keys are service names, values are tool override maps.",
+      "additionalProperties": {
+        "$ref": "#/$defs/serviceToolOverrides"
+      }
+    },
+    "classifiers": {
+      "type": "object",
+      "description": "Per-service, per-tool argument classifiers. Keys are service names.",
+      "additionalProperties": {
+        "$ref": "#/$defs/serviceClassifiers"
+      }
+    },
+    "value_extractors": {
+      "type": "object",
+      "description": "Per-service, per-tool value extractors. Extract argument values into labels for Layer 2 evaluation.",
+      "additionalProperties": {
+        "$ref": "#/$defs/serviceValueExtractors"
+      }
+    },
+    "policies": {
+      "type": "array",
+      "description": "Policy rules evaluated in priority order (lowest number = highest priority). First match wins.",
+      "items": {
+        "$ref": "#/$defs/policyRule"
+      }
+    }
+  },
+  "$defs": {
+    "mcpAnnotations": {
+      "type": "object",
+      "description": "MCP tool annotation overrides.",
+      "properties": {
+        "readOnlyHint": {
+          "type": "boolean",
+          "description": "Tool does not modify its environment."
+        },
+        "destructiveHint": {
+          "type": "boolean",
+          "description": "Tool may perform destructive updates."
+        },
+        "idempotentHint": {
+          "type": "boolean",
+          "description": "Repeated calls with same arguments have no additional effect."
+        },
+        "openWorldHint": {
+          "type": "boolean",
+          "description": "Tool may interact with external entities."
+        }
+      },
+      "additionalProperties": false
+    },
+    "verb": {
+      "type": "string",
+      "enum": ["get", "list", "create", "update", "delete"],
+      "description": "Kubernetes-style RBAC verb for the operation type."
+    },
+    "labels": {
+      "type": "array",
+      "description": "Namespaced labels (e.g., [\"scope:internal\", \"category:communication\"]).",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$"
+      }
+    },
+    "classifierRule": {
+      "type": "object",
+      "description": "An argument classifier rule that matches a field value and sets labels.",
+      "required": ["field", "set_labels"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "The argument field name to inspect."
+        },
+        "contains": {
+          "type": "string",
+          "description": "Match if the field value contains this substring."
+        },
+        "not_contains": {
+          "type": "string",
+          "description": "Match if the field value does NOT contain this substring."
+        },
+        "present": {
+          "type": "boolean",
+          "description": "Match if the field is present (true) or absent (false)."
+        },
+        "greater_than": {
+          "type": "number",
+          "description": "Match if the numeric field value is greater than this threshold."
+        },
+        "less_than": {
+          "type": "number",
+          "description": "Match if the numeric field value is less than this threshold."
+        },
+        "equals_value": {
+          "description": "Match if the field value equals this value (string or numeric).",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "number" }
+          ]
+        },
+        "set_labels": {
+          "$ref": "#/$defs/labels",
+          "description": "Labels to add when this classifier matches."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceToolOverrides": {
+      "type": "object",
+      "description": "Per-tool overrides for a service. Keys are tool names.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "readOnlyHint": { "type": "boolean" },
+          "destructiveHint": { "type": "boolean" },
+          "idempotentHint": { "type": "boolean" },
+          "openWorldHint": { "type": "boolean" },
+          "verb": { "$ref": "#/$defs/verb" },
+          "labels": { "$ref": "#/$defs/labels" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "serviceClassifiers": {
+      "type": "object",
+      "description": "Per-tool classifiers for a service. Keys are tool names.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/classifierRule"
+        }
+      }
+    },
+    "valueExtractor": {
+      "type": "object",
+      "description": "Extracts an argument field value into a label for Layer 2 evaluation.",
+      "required": ["field", "label_prefix"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "The argument field name to extract."
+        },
+        "label_prefix": {
+          "type": "string",
+          "description": "Label prefix. The extracted value is appended after a colon (e.g., \"arg:amount\" → \"arg:amount:500\")."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceValueExtractors": {
+      "type": "object",
+      "description": "Per-tool value extractors for a service. Keys are tool names.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/valueExtractor"
+        }
+      }
+    },
+    "policyCondition": {
+      "type": "object",
+      "description": "Conditions for a policy rule to match.",
+      "properties": {
+        "readOnlyHint": { "type": "boolean" },
+        "destructiveHint": { "type": "boolean" },
+        "idempotentHint": { "type": "boolean" },
+        "openWorldHint": { "type": "boolean" },
+        "verb": { "$ref": "#/$defs/verb" },
+        "labels": { "$ref": "#/$defs/labels" }
+      },
+      "additionalProperties": false
+    },
+    "policyRule": {
+      "type": "object",
+      "description": "A policy rule that matches conditions and triggers an action.",
+      "required": ["name", "when", "action", "priority"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable name for this policy rule."
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of what this rule does and why."
+        },
+        "when": {
+          "$ref": "#/$defs/policyCondition",
+          "description": "Conditions that must be met for this rule to match."
+        },
+        "match": {
+          "type": "string",
+          "enum": ["all", "any"],
+          "default": "any",
+          "description": "How to combine conditions: 'all' (AND) or 'any' (OR). Default: 'any'."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["allow", "deny", "npl_evaluate"],
+          "description": "What to do when this rule matches. npl_evaluate delegates to a contextual routing protocol (Layer 2)."
+        },
+        "approvers": {
+          "type": "array",
+          "description": "Approver roles/identities passed to the NPL protocol (optional, used by ApprovalPolicy).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Timeout duration (e.g., '60m', '24h'). Protocol-specific.",
+          "pattern": "^[0-9]+[mhd]$"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999,
+          "description": "Priority (0-999). Lower number = higher priority. First match wins."
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "properties": { "action": { "const": "npl_evaluate" } }
+      },
+      "then": {
+      }
+    }
+  }
+}

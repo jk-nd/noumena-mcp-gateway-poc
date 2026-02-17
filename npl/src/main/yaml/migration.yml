@@ -55,3 +55,44 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V8: Scoped approvals — approvers List<Text> on PendingApproval, approverIdentity on approve/deny
+  - name: mcp-8.0-scoped-approvals
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V9: Store-and-forward — requestPayload, execution tracking on PendingApproval
+  - name: mcp-9.0-store-and-forward
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V10: ApprovalPolicy party mappings in rules.yml (pAdmin, pGateway, pApprover)
+  - name: mcp-10.0-approval-policy-rules
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V11: RateLimitPolicy — automated rate limiting contextual routing protocol
+  - name: mcp-11.0-rate-limit-policy
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V12: Layer 2 protocols — RouteGroup composition, ConstraintPolicy,
+  #      PreconditionPolicy, FlowPolicy, IdentityPolicy, package rename
+  - name: mcp-12.0-layer2-protocols
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

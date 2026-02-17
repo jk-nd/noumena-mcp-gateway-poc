@@ -14,7 +14,108 @@
 # POLICY PACKAGE - Unified PolicyStore
 # ============================================================================
 
-policy.PolicyStore:
+store.PolicyStore:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+
+# ============================================================================
+# POLICIES PACKAGE - ApprovalPolicy (human-in-the-loop approval)
+# ============================================================================
+
+policies.ApprovalPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+  pApprover:
+    set:
+      claims:
+        role:
+          - admin
+
+# ============================================================================
+# POLICIES PACKAGE - RateLimitPolicy (automated rate limiting)
+# ============================================================================
+
+policies.RateLimitPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+
+# ============================================================================
+# POLICIES PACKAGE - ConstraintPolicy (tool-level budget constraints)
+# ============================================================================
+
+policies.ConstraintPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+
+# ============================================================================
+# POLICIES PACKAGE - PreconditionPolicy (system state flags)
+# ============================================================================
+
+policies.PreconditionPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+
+# ============================================================================
+# POLICIES PACKAGE - FlowPolicy (cross-call data flow governance)
+# ============================================================================
+
+policies.FlowPolicy:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+
+# ============================================================================
+# POLICIES PACKAGE - IdentityPolicy (identity governance)
+# ============================================================================
+
+policies.IdentityPolicy:
   pAdmin:
     set:
       claims:

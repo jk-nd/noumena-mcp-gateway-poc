@@ -542,3 +542,822 @@ test_user_id_header_not_emitted_without_auth if {
 
 	not result["x-user-id"]
 }
+
+# ============================================================================
+# Test: security_policy data accessible from bundle
+# ============================================================================
+
+mock_security_policy := {
+	"version": "1.0",
+	"tool_annotations": {
+		"gmail": {
+			"send_email": {
+				"annotations": {
+					"readOnlyHint": false,
+					"destructiveHint": false,
+					"openWorldHint": true,
+				},
+				"verb": "create",
+				"labels": ["category:communication"],
+			},
+			"read_email": {
+				"annotations": {"readOnlyHint": true},
+				"verb": "get",
+				"labels": ["category:communication"],
+			},
+		},
+	},
+	"classifiers": {
+		"gmail": {
+			"send_email": [
+				{"field": "to", "contains": "@acme.com", "set_labels": ["scope:internal"]},
+				{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
+			],
+		},
+	},
+	"policies": [
+		{"name": "Block BCC", "when": {"labels": ["data:bcc-used"]}, "action": "deny", "priority": 0},
+		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
+		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
+	],
+}
+
+test_security_policy_accessible if {
+	# Verify security_policy data is loaded from bundle and accessible
+	sp := security_policy with security_policy as mock_security_policy
+	sp.version == "1.0"
+	sp.tool_annotations.gmail.send_email.verb == "create"
+	sp.tool_annotations.gmail.read_email.annotations.readOnlyHint == true
+}
+
+test_security_policy_has_classifiers if {
+	sp := security_policy with security_policy as mock_security_policy
+	some rule in sp.classifiers.gmail.send_email
+	rule.field == "to"
+	rule.contains == "@acme.com"
+}
+
+test_security_policy_has_policies if {
+	sp := security_policy with security_policy as mock_security_policy
+	count(sp.policies) == 3
+	sp.policies[0].name == "Block BCC"
+	sp.policies[0].action == "deny"
+	sp.policies[0].priority == 0
+}
+
+test_security_policy_default_empty if {
+	# When no security policy is loaded, should be empty object
+	sp := security_policy with security_policy as {}
+	count(sp) == 0
+}
+
+test_allow_still_works_with_security_policy if {
+	# Ensure existing allow rules work when security_policy is present
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as mock_contextual_routing
+		with security_policy as mock_security_policy
+}
+
+# ============================================================================
+# Test: Security policy evaluation — tag classification and policy matching
+# ============================================================================
+
+mock_grants_with_gmail := {
+	"jarvis@acme.com": [
+		{"serviceName": "duckduckgo", "allowedTools": ["*"]},
+		{"serviceName": "mock-calendar", "allowedTools": ["*"]},
+		{"serviceName": "gmail", "allowedTools": ["*"]},
+	],
+	"alice@acme.com": [],
+}
+
+mock_sp_evaluation := {
+	"version": "1.0",
+	"tool_annotations": {
+		"gmail": {
+			"send_email": {
+				"annotations": {
+					"readOnlyHint": false,
+					"destructiveHint": false,
+					"openWorldHint": true,
+				},
+				"verb": "create",
+				"labels": ["category:communication"],
+			},
+			"read_email": {
+				"annotations": {"readOnlyHint": true},
+				"verb": "get",
+				"labels": ["category:communication"],
+			},
+			"delete_email": {
+				"annotations": {"destructiveHint": true},
+				"verb": "delete",
+				"labels": ["category:communication"],
+			},
+		},
+	},
+	"classifiers": {
+		"gmail": {
+			"send_email": [
+				{"field": "to", "contains": "@acme.com", "set_labels": ["scope:internal"]},
+				{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
+			],
+		},
+	},
+	"policies": [
+		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
+		{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
+		{"name": "Deny external", "when": {"labels": ["scope:external"]}, "action": "deny", "priority": 20},
+		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
+	],
+}
+
+# Test: read_email with readOnlyHint=true → "Allow read-only" → allowed
+test_sp_read_only_tool_allowed if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":200,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.read_email\",\"arguments\":{\"id\":\"123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+}
+
+# Test: delete_email with destructiveHint=true → "Deny destructive" → denied
+test_sp_destructive_tool_denied if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.delete_email\",\"arguments\":{\"id\":\"123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+}
+
+# Test: send_email to external address → classifier adds scope:external → "Deny external" → denied
+test_sp_external_send_denied if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":202,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+}
+
+# Test: send_email to internal address → classifier adds scope:internal (no scope:external) → "Default allow" → allowed
+test_sp_internal_send_allowed if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"colleague@acme.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+}
+
+# Test: unclassified tool (not in security policy) → "Default allow" → allowed
+test_sp_unclassified_tool_default_allow if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":204,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+}
+
+# Test: no security policies configured → existing allow rules work (backward compatible)
+test_sp_empty_policy_allows if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":205,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as {}
+		with security_policy as {}
+}
+
+# Test: tool-name fallback — "list_events" inferred as readOnlyHint=true → "Allow read-only"
+test_sp_tool_name_fallback_read_only if {
+	sp_with_policies_only := {
+		"version": "1.0",
+		"tool_annotations": {},
+		"classifiers": {},
+		"policies": [
+			{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
+			{"name": "Default deny", "when": {}, "action": "deny", "priority": 999},
+		],
+	}
+
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":206,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-13\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants
+		with contextual_routing as {}
+		with security_policy as sp_with_policies_only
+}
+
+# Test: tool-name fallback — "delete_event" inferred as destructiveHint=true → denied
+test_sp_tool_name_fallback_destructive if {
+	sp_with_policies_only := {
+		"version": "1.0",
+		"tool_annotations": {},
+		"classifiers": {},
+		"policies": [
+			{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
+			{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
+		],
+	}
+
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":207,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.delete_event\",\"arguments\":{\"id\":\"evt-123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants
+		with contextual_routing as {}
+		with security_policy as sp_with_policies_only
+}
+
+# Test: verb-based policy — only allow "get" verb, deny "create"
+test_sp_verb_based_policy if {
+	sp_verb := {
+		"version": "1.0",
+		"tool_annotations": {
+			"gmail": {
+				"send_email": {
+					"annotations": {},
+					"verb": "create",
+					"labels": [],
+				},
+			},
+		},
+		"classifiers": {},
+		"policies": [
+			{"name": "Allow get only", "when": {"verb": "get"}, "action": "allow", "priority": 50},
+			{"name": "Default deny", "when": {}, "action": "deny", "priority": 999},
+		],
+	}
+
+	# send_email has verb "create" → doesn't match "Allow get only" → "Default deny" → denied
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":208,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"test@test.com\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as sp_verb
+}
+
+# Test: security policy denial surfaces in reason header
+test_sp_deny_reason_header if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":209,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.delete_email\",\"arguments\":{\"id\":\"123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+
+	contains(r, "Deny destructive")
+}
+
+# Test: security policy tracing headers emitted
+test_sp_tracing_headers if {
+	rh := response_headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":210,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.read_email\",\"arguments\":{\"id\":\"123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_evaluation
+
+	rh["x-sp-action"] == "allow"
+	rh["x-sp-rule"] == "Allow read-only"
+	rh["x-sp-verb"] == "get"
+	contains(rh["x-sp-labels"], "category:communication")
+}
+
+# ============================================================================
+# Test: npl_evaluate flow (Step 3 — contextual routing integration)
+# ============================================================================
+
+mock_sp_with_approval := {
+	"version": "1.0",
+	"tool_annotations": {
+		"gmail": {
+			"send_email": {
+				"annotations": {
+					"readOnlyHint": false,
+					"destructiveHint": false,
+					"openWorldHint": true,
+				},
+				"verb": "create",
+				"labels": ["category:communication"],
+			},
+			"read_email": {
+				"annotations": {"readOnlyHint": true},
+				"verb": "get",
+				"labels": ["category:communication"],
+			},
+			"delete_email": {
+				"annotations": {"destructiveHint": true},
+				"verb": "delete",
+				"labels": ["category:communication"],
+			},
+		},
+	},
+	"classifiers": {
+		"gmail": {
+			"send_email": [
+				{"field": "to", "contains": "@acme.com", "set_labels": ["scope:internal"]},
+				{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
+			],
+		},
+	},
+	"policies": [
+		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
+		{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
+		{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "npl_evaluate", "priority": 20, "approvers": ["compliance", "legal"]},
+		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
+	],
+}
+
+mock_approval_route := {"gmail": {"*": {
+	"policyProtocol": "ApprovalPolicy",
+	"instanceId": "apr-001",
+	"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
+}}}
+
+# Test: npl_evaluate with contextual route → denied (NPL unreachable in unit tests)
+# In production: the NPL protocol would return "pending:<id>", "allow", or "deny"
+test_sp_npl_evaluate_with_route if {
+	# send_email to external → scope:external → "Approve external" → npl_evaluate
+	# Contextual route to ApprovalPolicy exists → security_policy_allows passes
+	# But http.send fails in unit tests → Rule 3b fails → denied
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":300,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+}
+
+# Test: npl_evaluate without contextual route → denied (no route configured)
+test_sp_npl_evaluate_without_route if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":301,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_approval
+}
+
+# Test: npl_evaluate without route → reason includes "no contextual route"
+test_sp_npl_evaluate_no_route_reason if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":302,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_approval
+
+	contains(r, "npl_evaluate")
+	contains(r, "Approve external")
+	contains(r, "no contextual route")
+}
+
+# Test: deny action still works even with contextual route configured
+test_sp_deny_not_bypassed_by_contextual_route if {
+	# delete_email → destructiveHint=true → "Deny destructive" → deny
+	# Even though approval route exists, deny takes precedence (lower priority)
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":303,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.delete_email\",\"arguments\":{\"id\":\"123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+}
+
+# Test: allow action still works with contextual route configured
+test_sp_allow_bypasses_contextual_route if {
+	# read_email → readOnlyHint=true → "Allow read-only" → allow
+	# Contextual route exists but sp_action is "allow", not "npl_evaluate"
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":304,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.read_email\",\"arguments\":{\"id\":\"123\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+}
+
+# Test: internal send → scope:internal (no scope:external) → "Default allow" even with contextual route
+test_sp_internal_send_allowed_with_contextual_route if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":305,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"colleague@acme.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+}
+
+# Test: contextual route pending reason header when NPL returns pending
+test_sp_contextual_route_pending_reason if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":306,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+		with npl_evaluate_response as "pending:APR-42"
+
+	contains(r, "contextual route pending")
+	contains(r, "APR-42")
+	contains(r, "Approve external")
+}
+
+# Test: pending_approval_id extraction from npl_evaluate_response
+test_pending_approval_id_extracted if {
+	id := pending_approval_id with npl_evaluate_response as "pending:APR-7"
+	id == "APR-7"
+}
+
+# Test: x-approval-id response header emitted when pending
+test_approval_id_header_emitted if {
+	rh := response_headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":400,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+		with npl_evaluate_response as "pending:APR-99"
+
+	rh["x-approval-id"] == "APR-99"
+	rh["retry-after"] == "30"
+}
+
+# Test: no approval headers when npl_evaluate_response is "allow"
+test_no_approval_headers_when_allowed if {
+	rh := response_headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":401,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+		with npl_evaluate_response as "allow"
+
+	not rh["x-approval-id"]
+	not rh["retry-after"]
+}
+
+# Test: denial by contextual route (npl returns "deny")
+test_contextual_route_deny_reason if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":402,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+		with npl_evaluate_response as "deny"
+
+	contains(r, "contextual route denied")
+}
+
+# Test: sp_approvers extracted from winning npl_evaluate policy
+test_sp_approvers_extracted if {
+	result := sp_approvers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":403,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as mock_sp_with_approval
+
+	result == ["compliance", "legal"]
+}
+
+# ============================================================================
+# Test: Multi-route AND/OR composition
+# ============================================================================
+
+# Test: RouteGroup with mode "single" backward compat
+test_route_group_single_mode if {
+	routes := {"duckduckgo": {"search": {
+		"mode": "single",
+		"routes": [{
+			"policyProtocol": "ApprovalPolicy",
+			"instanceId": "apr-001",
+			"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
+		}],
+	}}}
+
+	# Route group exists → blocks fast path (same as legacy)
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":500,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with grants as mock_grants
+		with contextual_routing as routes
+}
+
+# Test: AND mode — both allow → allow
+test_route_group_and_both_allow if {
+	result := npl_evaluate_response
+		with route_group_mode as "and"
+		with route_results as ["allow", "allow"]
+		with contextual_route as true
+
+	result == "allow"
+}
+
+# Test: AND mode — one deny → deny
+test_route_group_and_one_deny if {
+	result := npl_evaluate_response
+		with route_group_mode as "and"
+		with route_results as ["allow", "deny"]
+		with contextual_route as true
+
+	result == "deny"
+}
+
+# Test: AND mode — one pending → pending
+test_route_group_and_one_pending if {
+	result := npl_evaluate_response
+		with route_group_mode as "and"
+		with route_results as ["allow", "pending:APR-1"]
+		with contextual_route as true
+
+	result == "pending:APR-1"
+}
+
+# Test: OR mode — one allow → allow
+test_route_group_or_one_allow if {
+	result := npl_evaluate_response
+		with route_group_mode as "or"
+		with route_results as ["deny", "allow"]
+		with contextual_route as true
+
+	result == "allow"
+}
+
+# Test: OR mode — both deny → last deny
+test_route_group_or_both_deny if {
+	result := npl_evaluate_response
+		with route_group_mode as "or"
+		with route_results as ["deny", "deny"]
+		with contextual_route as true
+
+	result == "deny"
+}
+
+# ============================================================================
+# Test: MCP Session ID extraction
+# ============================================================================
+
+test_mcp_session_id_extracted if {
+	result := mcp_session_id with input as {"attributes": {"request": {"http": {
+		"method": "POST",
+		"path": "/mcp",
+		"headers": {
+			"authorization": mock_bearer(mock_jwt_jarvis),
+			"mcp-session-id": "session-abc-123",
+		},
+		"body": "",
+	}}}}
+
+	result == "session-abc-123"
+}
+
+test_mcp_session_id_default_empty if {
+	result := mcp_session_id with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"",
+	)
+
+	result == ""
+}
+
+# ============================================================================
+# Test: Numeric classifier conditions + value extraction
+# ============================================================================
+
+mock_sp_with_numeric := {
+	"version": "1.0",
+	"tool_annotations": {
+		"banking": {
+			"transfer": {
+				"annotations": {},
+				"verb": "create",
+				"labels": ["category:banking"],
+			},
+		},
+	},
+	"classifiers": {
+		"banking": {
+			"transfer": [
+				{"field": "amount", "greater_than": 1000, "set_labels": ["constraint:high-value"]},
+				{"field": "amount", "less_than": 10, "set_labels": ["constraint:micro-payment"]},
+				{"field": "currency", "equals_value": "BTC", "set_labels": ["constraint:crypto"]},
+			],
+		},
+	},
+	"value_extractors": {
+		"banking": {
+			"transfer": [
+				{"field": "amount", "label_prefix": "arg:amount"},
+				{"field": "currency", "label_prefix": "arg:currency"},
+			],
+		},
+	},
+	"policies": [
+		{"name": "Block high value", "when": {"labels": ["constraint:high-value"]}, "action": "deny", "priority": 10},
+		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
+	],
+}
+
+mock_grants_with_banking := {
+	"jarvis@acme.com": [
+		{"serviceName": "banking", "allowedTools": ["*"]},
+	],
+}
+
+# Test: amount > 1000 → constraint:high-value → deny
+test_numeric_greater_than_deny if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":600,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":1500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+}
+
+# Test: amount < 1000 → no constraint:high-value → allow
+test_numeric_under_threshold_allow if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":601,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+}
+
+# Test: value extractor generates arg:amount:500 label
+test_value_extractor_labels if {
+	labels := resolved_labels with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":602,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+
+	"arg:amount:500" in labels
+	"arg:currency:USD" in labels
+	"category:banking" in labels
+}
+
+# Test: equals_value classifier matches
+test_equals_value_classifier if {
+	labels := resolved_labels with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":603,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":100,\"currency\":\"BTC\",\"to\":\"bob\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_banking
+		with contextual_routing as {}
+		with security_policy as mock_sp_with_numeric
+
+	"constraint:crypto" in labels
+}
+
+# Test: Legacy route (no mode field) still works
+test_legacy_route_backward_compat if {
+	routes := {"duckduckgo": {"search": {
+		"policyProtocol": "ApprovalPolicy",
+		"instanceId": "apr-001",
+		"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
+	}}}
+
+	# Legacy route should be detected
+	result := is_legacy_route with contextual_routing as routes
+		with input as mock_input(
+			"POST", "/mcp",
+			mock_bearer(mock_jwt_jarvis),
+			"{\"jsonrpc\":\"2.0\",\"id\":510,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		)
+		with catalog as mock_catalog
+		with grants as mock_grants
+
+	result == true
+}
+
+# Test: sp_approvers defaults to empty when no approvers specified
+test_sp_approvers_empty_when_not_specified if {
+	sp_no_approvers := {
+		"version": "1.0",
+		"tool_annotations": {
+			"gmail": {
+				"send_email": {
+					"annotations": {"openWorldHint": true},
+					"verb": "create",
+					"labels": ["category:communication"],
+				},
+			},
+		},
+		"classifiers": {
+			"gmail": {
+				"send_email": [
+					{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
+				],
+			},
+		},
+		"policies": [
+			{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "npl_evaluate", "priority": 20},
+		],
+	}
+
+	result := sp_approvers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":404,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+	)
+		with catalog as {}
+		with grants as mock_grants_with_gmail
+		with contextual_routing as mock_approval_route
+		with security_policy as sp_no_approvers
+
+	result == []
+}

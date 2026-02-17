@@ -50,7 +50,7 @@ policies:
       openWorldHint: true
     match: all
     action: npl_evaluate
-    approvers: [manager]
+    approvers: [compliance, manager]
     timeout: 60m
     priority: 10
 
@@ -97,8 +97,8 @@ policies:
 
   # --- Fallback ---
 
-  - name: Default deny
-    description: Any tool call not explicitly allowed is denied.
+  - name: Default allow
+    description: Unclassified tools are allowed by default.
     when: {}
-    action: deny
+    action: allow
     priority: 999

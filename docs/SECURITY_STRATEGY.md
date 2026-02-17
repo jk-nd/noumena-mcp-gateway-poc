@@ -245,7 +245,7 @@ policies:
       labels: [scope:external]
       verb: create
     match: all
-    action: require_approval
+    action: npl_evaluate
     approvers: [manager]
     timeout: 60m
     priority: 10
@@ -253,7 +253,7 @@ policies:
   - name: Approve destructive operations
     when:
       destructiveHint: true
-    action: require_approval
+    action: npl_evaluate
     approvers: [admin]
     timeout: 60m
     priority: 20
@@ -263,7 +263,7 @@ policies:
       labels: [env:production]
       readOnlyHint: false
     match: all
-    action: require_approval
+    action: npl_evaluate
     approvers: [ops, admin]
     timeout: 30m
     priority: 20
@@ -371,7 +371,7 @@ MCP server metadata ────────────────────
                                                               ┌──────────────v──────────────┐
                                                               │  action: allow  -> allow     │
                                                               │  action: deny   -> deny      │
-                                                              │  action: require_approval     │
+                                                              │  action: npl_evaluate     │
                                                               │         │                     │
                                                               │         v                     │
                                                               │  OPA Layer 2 -> NPL evaluate()│
@@ -490,11 +490,11 @@ Policies referencing standard MCP annotations and labels:
 |------|----------|--------|-----------|---------|
 | Block SSRF to cloud metadata | `labels: [infra:cloud-metadata]` | deny | — | — |
 | Block secrets in outbound | `openWorldHint: true` + `labels: [data:secret]` | deny | — | — |
-| Approve external communication | `verb: create` + `labels: [scope:external, category:communication]` | require_approval | manager | 60m |
-| Approve financial actions | `labels: [category:financial]` + `readOnlyHint: false` | require_approval | finance | 24h |
-| Approve production changes | `labels: [env:production]` + `readOnlyHint: false` | require_approval | ops | 30m |
-| Approve destructive operations | `destructiveHint: true` | require_approval | admin | 60m |
-| Approve arbitrary execution | `verb: create` + `labels: [category:exec]` | require_approval | admin | 15m |
+| Approve external communication | `verb: create` + `labels: [scope:external, category:communication]` | npl_evaluate | manager | 60m |
+| Approve financial actions | `labels: [category:financial]` + `readOnlyHint: false` | npl_evaluate | finance | 24h |
+| Approve production changes | `labels: [env:production]` + `readOnlyHint: false` | npl_evaluate | ops | 30m |
+| Approve destructive operations | `destructiveHint: true` | npl_evaluate | admin | 60m |
+| Approve arbitrary execution | `verb: create` + `labels: [category:exec]` | npl_evaluate | admin | 15m |
 | Allow read-only | `readOnlyHint: true` | allow | — | — |
 | Allow internal scope | `labels: [scope:internal]` | allow | — | — |
 | Default allow | (fallback) | allow | — | — |

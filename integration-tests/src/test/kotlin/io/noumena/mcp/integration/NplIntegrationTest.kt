@@ -199,7 +199,7 @@ class NplIntegrationTest {
 
         // Grant alice only list_events (not wildcard)
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -236,7 +236,7 @@ class NplIntegrationTest {
         Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
 
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -271,7 +271,7 @@ class NplIntegrationTest {
 
         // Revoke mallory
         val revokeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeSubject"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeSubject"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -300,7 +300,7 @@ class NplIntegrationTest {
         Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
 
         val reinstateResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/reinstateSubject"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/reinstateSubject"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -332,7 +332,7 @@ class NplIntegrationTest {
 
         // Suspend
         val suspendResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/suspendService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/suspendService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -350,7 +350,7 @@ class NplIntegrationTest {
 
         // Resume
         val resumeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/resumeService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/resumeService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -380,7 +380,7 @@ class NplIntegrationTest {
 
         // Disable
         val disableResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/disableService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/disableService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -397,7 +397,7 @@ class NplIntegrationTest {
 
         // Re-enable
         val enableResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/enableService"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/enableService"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -424,7 +424,7 @@ class NplIntegrationTest {
 
         // Disable list_events
         val disableResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/disableTool"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/disableTool"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -465,12 +465,12 @@ class NplIntegrationTest {
         Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
 
         // First grant bob two tools
-        client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool") {
+        client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
             setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar", "toolName": "list_events"}""")
         }
-        client.post("${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/grantTool") {
+        client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantTool") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
             setBody("""{"subjectId": "bob@acme.com", "serviceName": "mock-calendar", "toolName": "create_event"}""")
@@ -488,7 +488,7 @@ class NplIntegrationTest {
 
         // Revoke all service access at once
         val revokeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/revokeServiceAccess"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/revokeServiceAccess"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -520,7 +520,7 @@ class NplIntegrationTest {
 
         // Register a wildcard route for mock-calendar
         val registerResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/registerRoute"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerRoute"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -528,19 +528,23 @@ class NplIntegrationTest {
         }
         assertTrue(registerResp.status.isSuccess(), "registerRoute should succeed")
 
-        // Verify route in getPolicyData
+        // Verify route in getPolicyData (RouteGroup model: {mode, routes: [{policyProtocol, instanceId, endpoint}]})
         var policyData = getPolicyData()
-        val route = policyData["contextualRoutes"]?.jsonObject
+        val routeGroup = policyData["contextualRoutes"]?.jsonObject
             ?.get("mock-calendar")?.jsonObject
             ?.get("*")?.jsonObject
-        assertNotNull(route, "Should have wildcard route for mock-calendar")
-        assertEquals("PiiGuardPolicy", route!!["policyProtocol"]?.jsonPrimitive?.content)
-        assertEquals("pii-001", route["instanceId"]?.jsonPrimitive?.content)
-        println("    ✓ Route registered: mock-calendar.* → PiiGuardPolicy/pii-001")
+        assertNotNull(routeGroup, "Should have wildcard route group for mock-calendar")
+        assertEquals("single", routeGroup!!["mode"]?.jsonPrimitive?.content, "New route should have mode=single")
+        val routes = routeGroup["routes"]?.jsonArray
+        assertNotNull(routes, "RouteGroup should have routes array")
+        assertEquals(1, routes!!.size, "Single route group should have 1 route")
+        assertEquals("PiiGuardPolicy", routes[0].jsonObject["policyProtocol"]?.jsonPrimitive?.content)
+        assertEquals("pii-001", routes[0].jsonObject["instanceId"]?.jsonPrimitive?.content)
+        println("    ✓ Route registered: mock-calendar.* → RouteGroup(single, [PiiGuardPolicy/pii-001])")
 
         // Remove the route
         val removeResp = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/removeRoute"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRoute"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -550,8 +554,8 @@ class NplIntegrationTest {
 
         // Verify route removed
         policyData = getPolicyData()
-        val routes = policyData["contextualRoutes"]?.jsonObject
-        val mockCalRoutes = routes?.get("mock-calendar")?.jsonObject
+        val allRoutes = policyData["contextualRoutes"]?.jsonObject
+        val mockCalRoutes = allRoutes?.get("mock-calendar")?.jsonObject
         // After removing the only route, the service entry should be gone
         assertTrue(mockCalRoutes == null || !mockCalRoutes.containsKey("*"),
             "Wildcard route should be removed")
@@ -606,7 +610,7 @@ class NplIntegrationTest {
         println("│ TEST: List PolicyStore Singleton                            │")
         println("└─────────────────────────────────────────────────────────────┘")
 
-        val listResp = client.get("${TestConfig.nplUrl}/npl/policy/PolicyStore/") {
+        val listResp = client.get("${TestConfig.nplUrl}/npl/store/PolicyStore/") {
             header("Authorization", "Bearer $adminToken")
         }
 
@@ -622,12 +626,280 @@ class NplIntegrationTest {
         println("    ✓ Exactly 1 PolicyStore instance exists")
     }
 
+    // ── Route Groups (AND/OR composition) ──────────────────────────────────
+
+    @Test
+    @Order(17)
+    fun `route group — addRouteToGroup upgrades single to AND group`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — addRouteToGroup (single → AND group)   │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // 1. Register a single route for mock-calendar.*
+        val registerResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerRoute"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "ApprovalPolicy", "instanceId": "ap-001", "endpoint": "/npl/policies/ApprovalPolicy/ap-001/evaluate"}""")
+        }
+        assertTrue(registerResp.status.isSuccess(), "registerRoute should succeed")
+
+        // Verify single route
+        var policyData = getPolicyData()
+        var group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Should have route group")
+        assertEquals("single", group!!["mode"]?.jsonPrimitive?.content)
+        assertEquals(1, group["routes"]?.jsonArray?.size)
+        println("    ✓ Single route registered: ApprovalPolicy")
+
+        // 2. Add a second protocol to the group
+        val addResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/addRouteToGroup"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "RateLimitPolicy", "instanceId": "rl-001", "endpoint": "/npl/policies/RateLimitPolicy/rl-001/evaluate"}""")
+        }
+        assertTrue(addResp.status.isSuccess(), "addRouteToGroup should succeed")
+
+        // Verify group upgraded to AND mode with 2 routes
+        policyData = getPolicyData()
+        group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Should still have route group")
+        assertEquals("and", group!!["mode"]?.jsonPrimitive?.content, "Mode should upgrade from single to and")
+        val routes = group["routes"]?.jsonArray
+        assertNotNull(routes, "Should have routes array")
+        assertEquals(2, routes!!.size, "Should have 2 routes in group")
+
+        val protocols = routes.map { it.jsonObject["policyProtocol"]?.jsonPrimitive?.content }
+        assertTrue(protocols.contains("ApprovalPolicy"), "Should contain ApprovalPolicy")
+        assertTrue(protocols.contains("RateLimitPolicy"), "Should contain RateLimitPolicy")
+        println("    ✓ Group upgraded to AND with 2 routes: $protocols")
+    }
+
+    @Test
+    @Order(18)
+    fun `route group — setRouteGroupMode switches AND to OR`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — setRouteGroupMode (AND → OR)           │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Precondition: group exists from @Order(17) with mode=and, 2 routes
+        var policyData = getPolicyData()
+        var group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Route group should exist from previous test")
+        assertEquals("and", group!!["mode"]?.jsonPrimitive?.content, "Precondition: mode should be 'and'")
+
+        // Set mode to OR
+        val modeResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/setRouteGroupMode"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "mode": "or"}""")
+        }
+        assertTrue(modeResp.status.isSuccess(), "setRouteGroupMode should succeed")
+
+        // Verify mode changed
+        policyData = getPolicyData()
+        group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Route group should still exist")
+        assertEquals("or", group!!["mode"]?.jsonPrimitive?.content, "Mode should now be 'or'")
+        assertEquals(2, group["routes"]?.jsonArray?.size, "Routes should be unchanged")
+        println("    ✓ Group mode changed to OR (2 routes preserved)")
+
+        // Switch back to AND
+        val modeResp2 = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/setRouteGroupMode"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "mode": "and"}""")
+        }
+        assertTrue(modeResp2.status.isSuccess(), "setRouteGroupMode back to AND should succeed")
+
+        policyData = getPolicyData()
+        group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertEquals("and", group!!["mode"]?.jsonPrimitive?.content, "Mode should be back to 'and'")
+        println("    ✓ Group mode toggled back to AND")
+    }
+
+    @Test
+    @Order(19)
+    fun `route group — removeRouteFromGroup reduces group and cleans up`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — removeRouteFromGroup + cleanup          │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Precondition: group exists from @Order(17-18) with mode=and, 2 routes
+        var policyData = getPolicyData()
+        var group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Route group should exist from previous tests")
+        assertEquals(2, group!!["routes"]?.jsonArray?.size, "Precondition: should have 2 routes")
+
+        // Remove RateLimitPolicy from the group
+        val removeResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRouteFromGroup"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "RateLimitPolicy"}""")
+        }
+        assertTrue(removeResp.status.isSuccess(), "removeRouteFromGroup should succeed")
+
+        // Verify only ApprovalPolicy remains
+        policyData = getPolicyData()
+        group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Route group should still exist with 1 route")
+        val routes = group!!["routes"]?.jsonArray
+        assertNotNull(routes, "Should have routes array")
+        assertEquals(1, routes!!.size, "Should have 1 route remaining")
+        assertEquals("ApprovalPolicy", routes[0].jsonObject["policyProtocol"]?.jsonPrimitive?.content)
+        println("    ✓ RateLimitPolicy removed, ApprovalPolicy remains")
+
+        // Remove the last route — group should be fully cleaned up
+        val removeLastResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRouteFromGroup"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "ApprovalPolicy"}""")
+        }
+        assertTrue(removeLastResp.status.isSuccess(), "Removing last route from group should succeed")
+
+        // Verify route group fully removed
+        policyData = getPolicyData()
+        val mockCalRoutes = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+        assertTrue(mockCalRoutes == null || !mockCalRoutes.containsKey("*"),
+            "Route group should be fully removed when last route is removed")
+        println("    ✓ Last route removed — route group cleaned up completely")
+    }
+
+    @Test
+    @Order(20)
+    fun `route group — addRouteToGroup creates new AND group when no route exists`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — addRouteToGroup (creates new group)     │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Ensure no route exists for mock-calendar.*
+        var policyData = getPolicyData()
+        val existing = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")
+        assertTrue(existing == null, "Precondition: no route should exist for mock-calendar.*")
+
+        // addRouteToGroup when no group exists — should create a new "and" group
+        val addResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/addRouteToGroup"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "ConstraintPolicy", "instanceId": "cp-001", "endpoint": "/npl/policies/ConstraintPolicy/cp-001/evaluate"}""")
+        }
+        assertTrue(addResp.status.isSuccess(), "addRouteToGroup should succeed even without existing group")
+
+        // Verify new AND group created
+        policyData = getPolicyData()
+        val group = policyData["contextualRoutes"]?.jsonObject
+            ?.get("mock-calendar")?.jsonObject
+            ?.get("*")?.jsonObject
+        assertNotNull(group, "Should have created new route group")
+        assertEquals("and", group!!["mode"]?.jsonPrimitive?.content, "New group from addRouteToGroup should be 'and'")
+        val routes = group["routes"]?.jsonArray
+        assertEquals(1, routes!!.size, "Should have 1 route")
+        assertEquals("ConstraintPolicy", routes[0].jsonObject["policyProtocol"]?.jsonPrimitive?.content)
+        println("    ✓ addRouteToGroup created new AND group with ConstraintPolicy")
+
+        // Cleanup
+        val cleanupResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRoute"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*"}""")
+        }
+        assertTrue(cleanupResp.status.isSuccess(), "Cleanup removeRoute should succeed")
+        println("    ✓ Cleanup complete")
+    }
+
+    @Test
+    @Order(21)
+    fun `route group — setRouteGroupMode rejects invalid mode`() = runBlocking {
+        println("\n┌─────────────────────────────────────────────────────────────┐")
+        println("│ TEST: PolicyStore — setRouteGroupMode validation            │")
+        println("└─────────────────────────────────────────────────────────────┘")
+
+        Assumptions.assumeTrue(::storeId.isInitialized, "PolicyStore not created")
+
+        // Register a route so we have a group
+        client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerRoute") {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "routeProtocol": "ApprovalPolicy", "instanceId": "ap-001", "endpoint": "/npl/policies/ApprovalPolicy/ap-001/evaluate"}""")
+        }
+
+        // Try invalid mode — should fail (require mode == "and" || mode == "or")
+        val invalidResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/setRouteGroupMode"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*", "mode": "invalid"}""")
+        }
+        assertFalse(invalidResp.status.isSuccess(), "setRouteGroupMode with invalid mode should fail")
+        println("    ✓ Invalid mode rejected")
+
+        // Try non-existent service — should fail
+        val noServiceResp = client.post(
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/setRouteGroupMode"
+        ) {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "nonexistent", "toolName": "*", "mode": "and"}""")
+        }
+        assertFalse(noServiceResp.status.isSuccess(), "setRouteGroupMode for non-existent service should fail")
+        println("    ✓ Non-existent service rejected")
+
+        // Cleanup
+        client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/removeRoute") {
+            header("Authorization", "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"serviceName": "mock-calendar", "toolName": "*"}""")
+        }
+        println("    ✓ Cleanup complete")
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     /** Call getPolicyData on the PolicyStore singleton using the gateway token. */
     private suspend fun getPolicyData(): JsonObject {
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/policy/PolicyStore/$storeId/getPolicyData"
+            "${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/getPolicyData"
         ) {
             header("Authorization", "Bearer $gatewayToken")
             contentType(ContentType.Application.Json)
