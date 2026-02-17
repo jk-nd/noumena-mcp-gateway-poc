@@ -137,6 +137,31 @@ const noumena = {
   grayDim: chalk.hex("#6B7280"),
 };
 
+const PROTOCOL_LABELS: Record<string, string> = {
+  ApprovalPolicy: "Approval",
+  RateLimitPolicy: "Rate Limit",
+  ConstraintPolicy: "Constraint",
+  PreconditionPolicy: "Precondition",
+  FlowPolicy: "Flow Control",
+  IdentityPolicy: "Identity",
+};
+
+function protocolLabel(proto: string): string {
+  return PROTOCOL_LABELS[proto] || proto;
+}
+
+async function ensureProtocolInstance(protocol: string): Promise<string> {
+  switch (protocol) {
+    case "ApprovalPolicy": return ensureApprovalPolicy();
+    case "RateLimitPolicy": return ensureRateLimitPolicy();
+    case "ConstraintPolicy": return ensureConstraintPolicy();
+    case "PreconditionPolicy": return ensurePreconditionPolicy();
+    case "FlowPolicy": return ensureFlowPolicy();
+    case "IdentityPolicy": return ensureIdentityPolicy();
+    default: throw new Error(`Unknown protocol: ${protocol}`);
+  }
+}
+
 function showHeader() {
   console.log();
   console.log(noumena.purple("  ◆ NOUMENA MCP Gateway Wizard"));
@@ -407,19 +432,19 @@ async function mainMenu(): Promise<boolean> {
   }
 
   const options: { value: string; label: string; hint?: string }[] = [
-    { value: "---hdr-gw", label: noumena.purple("── Gateway Settings ──"), hint: "" },
+    { value: "---hdr-start", label: noumena.purple("── Get Started ──"), hint: "" },
+    { value: "wizard-tool", label: "  Set up a tool", hint: "Add a service, configure checks, grant access" },
+    { value: "wizard-user", label: "  Set up a user", hint: "Create user, assign tools, review rules" },
+
+    { value: "---hdr-gw", label: noumena.purple("── Services ──"), hint: "" },
     ...serviceOptions,
     { value: "search", label: noumena.accent("  + Search Docker Hub"), hint: "Find and add MCP servers" },
     { value: "custom", label: noumena.accent("  + Add MCP service"), hint: "Templates, NPM, or Docker" },
 
-    { value: "---hdr-users", label: noumena.purple("── User Management ──"), hint: "" },
-    { value: "users", label: "  Manage users & tool access", hint: `${grantCount} subject(s) with grants` },
-
-    { value: "---hdr-sec", label: noumena.purple("── Security ──"), hint: "" },
-    { value: "contextual", label: "  Contextual Policies", hint: routeCount > 0 ? `${routeCount} route(s)` + (pendingCount > 0 ? `, ${pendingCount} pending` : "") : "No routes" },
+    { value: "---hdr-admin", label: noumena.purple("── Administration ──"), hint: "" },
+    { value: "users", label: "  Manage users", hint: `${grantCount} subject(s) with grants` },
+    { value: "contextual", label: "  Governance Rules", hint: routeCount > 0 ? `${routeCount} rule(s) active` + (pendingCount > 0 ? `, ${pendingCount} pending` : "") : "No rules active" },
     { value: "security", label: "  Security Policy", hint: hasSecurityPolicy ? "Active" : "Not configured" },
-
-    { value: "---hdr-sys", label: noumena.purple("── System ──"), hint: "" },
     { value: "config", label: "  Import / Export", hint: "YAML import, export, backups" },
     { value: "quit", label: "  Quit", hint: "" },
   ];
@@ -429,7 +454,11 @@ async function mainMenu(): Promise<boolean> {
   if (p.isCancel(action) || action === "quit") return false;
   if (typeof action === "string" && action.startsWith("---")) return true;
 
-  if (typeof action === "string" && action.startsWith("service:")) {
+  if (action === "wizard-tool") {
+    await toolSetupWizard();
+  } else if (action === "wizard-user") {
+    await userSetupWizard();
+  } else if (typeof action === "string" && action.startsWith("service:")) {
     const serviceName = action.replace("service:", "");
     const entry = policyData.services[serviceName];
     if (entry) await serviceActionsFlow(entry, policyData);
@@ -448,6 +477,538 @@ async function mainMenu(): Promise<boolean> {
   }
 
   return true;
+}
+
+// ============================================================================
+// Configure Governance for a Tool — used by toolSetupWizard
+// ============================================================================
+
+const GOVERNANCE_PROTOCOLS = [
+  { value: "ApprovalPolicy", label: "Require human approval", hint: "A human must sign off before the AI can call this tool" },
+  { value: "RateLimitPolicy", label: "Rate limit", hint: "Cap how often this tool can be called" },
+  { value: "ConstraintPolicy", label: "Per-user budgets", hint: "Limit how many times each user can call this tool" },
+  { value: "PreconditionPolicy", label: "System preconditions", hint: "Only allow if a system flag is set" },
+  { value: "FlowPolicy", label: "Flow control", hint: "Block dangerous call sequences" },
+  { value: "IdentityPolicy", label: "Identity rules", hint: "Segregation of duties, four-eyes" },
+] as const;
+
+async function configureGovernanceForTool(
+  serviceName: string, toolName: string, policyData: PolicyData
+): Promise<void> {
+  const toolLabel = toolName === "*" ? `${serviceName}/*` : `${serviceName}/${toolName}`;
+
+  // Determine already-configured protocols from contextualRoutes
+  const routeGroup = policyData.contextualRoutes?.[serviceName]?.[toolName] as
+    { mode?: string; routes?: Array<{ policyProtocol: string }> } | undefined;
+  const existingProtocols = new Set(
+    routeGroup?.routes?.map((r) => r.policyProtocol) || []
+  );
+
+  const selected = await p.multiselect({
+    message: `What checks should apply to ${toolLabel}? (SPACE to toggle)`,
+    options: GOVERNANCE_PROTOCOLS.map((gp) => ({
+      value: gp.value,
+      label: gp.label,
+      hint: gp.hint,
+    })),
+    initialValues: [...existingProtocols],
+    required: false,
+  });
+
+  if (p.isCancel(selected)) return;
+  const selectedSet = new Set(selected);
+
+  // Handle deselection of previously-configured protocols
+  for (const existing of existingProtocols) {
+    if (!selectedSet.has(existing)) {
+      const confirmRemove = await p.confirm({
+        message: `Remove ${protocolLabel(existing)} from ${toolLabel}? (it was unchecked)`,
+        initialValue: true,
+      });
+      if (!p.isCancel(confirmRemove) && confirmRemove) {
+        const s = p.spinner();
+        s.start(`Removing ${protocolLabel(existing)}...`);
+        try {
+          await removeRouteFromGroup(serviceName, toolName, existing);
+          s.stop(noumena.success(`Removed ${protocolLabel(existing)} from ${toolLabel}`));
+        } catch (err) {
+          s.stop(noumena.error("Failed"));
+          p.log.error(`${err}`);
+        }
+      }
+    }
+  }
+
+  // Register newly selected protocols
+  for (const protocol of selected) {
+    if (existingProtocols.has(protocol)) continue; // already registered
+
+    const s = p.spinner();
+    s.start(`Setting up ${protocolLabel(protocol)}...`);
+    try {
+      const instanceId = await ensureProtocolInstance(protocol);
+      const endpoint = `http://npl-engine:12000/npl/policies/${protocol}/${instanceId}/evaluate`;
+
+      // If there are already routes for this tool, add to group; otherwise register new
+      const currentGroup = policyData.contextualRoutes?.[serviceName]?.[toolName] as
+        { routes?: Array<any> } | undefined;
+      if (currentGroup?.routes && currentGroup.routes.length > 0) {
+        await addRouteToGroup(serviceName, toolName, protocol, instanceId, endpoint);
+      } else {
+        await registerContextualRoute(serviceName, toolName, protocol, instanceId, endpoint);
+      }
+      s.stop(noumena.success(`Added ${protocolLabel(protocol)} to ${toolLabel}`));
+    } catch (err) {
+      s.stop(noumena.error(`Failed to add ${protocolLabel(protocol)}`));
+      p.log.error(`${err}`);
+      continue;
+    }
+
+    // Refresh policyData after route registration so subsequent adds see it
+    try { policyData = await getPolicyData(); } catch { /* keep stale */ }
+
+    // Inline parameter prompts per protocol
+    if (protocol === "RateLimitPolicy") {
+      const maxCallsStr = await p.text({
+        message: "Max calls:",
+        placeholder: "e.g., 10",
+        validate: (v) => { const n = parseInt(v || ""); return isNaN(n) || n <= 0 ? "Must be a positive number" : undefined; },
+      });
+      if (p.isCancel(maxCallsStr)) continue;
+      const windowLabel = await p.text({
+        message: "Time window:",
+        initialValue: "per-session",
+        placeholder: "e.g., per-session, per-hour",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(windowLabel)) continue;
+      try {
+        await setRateLimit(serviceName, parseInt(String(maxCallsStr)), String(windowLabel).trim());
+        p.log.success(`Rate limit: ${maxCallsStr} ${windowLabel}`);
+      } catch (err) { p.log.error(`${err}`); }
+    } else if (protocol === "ConstraintPolicy") {
+      const maxStr = await p.text({
+        message: "Max per user (0 = block):",
+        placeholder: "e.g., 5",
+        validate: (v) => { const n = parseInt(v || ""); return isNaN(n) || n < 0 ? "Must be >= 0" : undefined; },
+      });
+      if (p.isCancel(maxStr)) continue;
+      const description = await p.text({
+        message: "Description:",
+        placeholder: "e.g., Limit high-value transfers",
+        initialValue: "",
+      });
+      if (p.isCancel(description)) continue;
+      try {
+        await setConstraint(serviceName, toolName, parseInt(String(maxStr)), String(description).trim());
+        p.log.success(`Constraint: max ${maxStr} per user`);
+      } catch (err) { p.log.error(`${err}`); }
+    } else if (protocol === "PreconditionPolicy") {
+      const condName = await p.text({
+        message: "Condition name:",
+        placeholder: "e.g., maintenance_mode",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(condName)) continue;
+      const reqValue = await p.text({
+        message: "Required value:",
+        placeholder: "e.g., false",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(reqValue)) continue;
+      try {
+        await addPreconditionRule(String(condName).trim(), String(reqValue).trim(), serviceName, toolName);
+        p.log.success(`Precondition: ${condName} == ${reqValue}`);
+      } catch (err) { p.log.error(`${err}`); }
+    } else if (protocol === "FlowPolicy") {
+      const srcSvc = await p.text({
+        message: "Block if preceded by (service):",
+        placeholder: "e.g., banking",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(srcSvc)) continue;
+      const srcTool = await p.text({
+        message: "Block if preceded by (tool):",
+        placeholder: "e.g., get_account",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(srcTool)) continue;
+      try {
+        await setFlowRule(String(srcSvc).trim(), String(srcTool).trim(), serviceName, toolName, `Blocked after ${srcSvc}.${srcTool}`);
+        p.log.success(`Flow rule: blocked after ${srcSvc}.${srcTool}`);
+      } catch (err) { p.log.error(`${err}`); }
+    } else if (protocol === "IdentityPolicy") {
+      const ruleType = await p.select({
+        message: "Rule type:",
+        options: [
+          { value: "segregation_of_duties", label: "Segregation of duties", hint: "Different actors for primary and secondary verbs" },
+          { value: "four_eyes", label: "Four-eyes principle", hint: "At least 2 distinct actors required" },
+          { value: "exclusive_actor", label: "Exclusive actor", hint: "Only the original actor can continue" },
+        ],
+      });
+      if (p.isCancel(ruleType)) continue;
+      const primaryVerb = await p.text({
+        message: "Primary verb:",
+        placeholder: "e.g., create",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(primaryVerb)) continue;
+      const secondaryVerb = await p.text({
+        message: "Secondary verb:",
+        placeholder: "e.g., approve",
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
+      });
+      if (p.isCancel(secondaryVerb)) continue;
+      try {
+        await addIdentityRule(serviceName, toolName, String(ruleType), String(primaryVerb).trim(), String(secondaryVerb).trim());
+        p.log.success(`Identity rule: ${ruleType} (${primaryVerb} / ${secondaryVerb})`);
+      } catch (err) { p.log.error(`${err}`); }
+    }
+    // ApprovalPolicy has no inline parameters (approvers live in Security Policy YAML)
+  }
+}
+
+// ============================================================================
+// Show Effective Rules — read-only view for a user
+// ============================================================================
+
+async function showEffectiveRules(email: string, policyData: PolicyData): Promise<void> {
+  const userGrants = policyData.grants[email] || [];
+  if (userGrants.length === 0) {
+    p.log.info("No grants — no governance rules apply.");
+    return;
+  }
+
+  // Fetch protocol details (best-effort)
+  let rateLimits: RateLimitConfig[] = [];
+  let constraints: ConstraintRule[] = [];
+  let preconditionRules: PreconditionRule[] = [];
+  let flowRules: FlowRule[] = [];
+  let identityRules: IdentityRule[] = [];
+  try { rateLimits = await getAllRateLimits(); } catch { /* may not exist */ }
+  try { constraints = await getConstraints(); } catch { /* may not exist */ }
+  try { preconditionRules = await getPreconditionRules(); } catch { /* may not exist */ }
+  try { flowRules = await getFlowRules(); } catch { /* may not exist */ }
+  try { identityRules = await getIdentityRules(); } catch { /* may not exist */ }
+
+  console.log();
+  console.log(noumena.purple(`  Effective Rules: ${email}`));
+  console.log();
+
+  for (const grant of userGrants) {
+    const svc = grant.serviceName;
+    const tools = grant.allowedTools.includes("*")
+      ? Object.keys(policyData.services[svc]?.enabledTools || {}).length > 0
+        ? policyData.services[svc].enabledTools
+        : ["*"]
+      : grant.allowedTools;
+
+    for (const tool of tools) {
+      // Collect routes for this service/tool + wildcard
+      const checks: string[] = [];
+      for (const target of [tool, "*"]) {
+        const group = policyData.contextualRoutes?.[svc]?.[target] as
+          { routes?: Array<{ policyProtocol: string }> } | undefined;
+        if (!group?.routes) continue;
+        for (const r of group.routes) {
+          const proto = r.policyProtocol;
+          if (proto === "ApprovalPolicy") {
+            checks.push("Approval required");
+          } else if (proto === "RateLimitPolicy") {
+            const rl = rateLimits.find((l) => l.serviceName === svc);
+            checks.push(rl ? `Rate limited (${rl.maxCalls} ${rl.windowLabel})` : "Rate limited");
+          } else if (proto === "ConstraintPolicy") {
+            const c = constraints.find((ct) => ct.serviceName === svc && (ct.toolName === tool || ct.toolName === "*"));
+            checks.push(c ? `Budget: max ${c.maxOccurrences} per user` : "Budget constraint");
+          } else if (proto === "PreconditionPolicy") {
+            const pr = preconditionRules.find((r) => r.serviceName === svc && (r.toolName === tool || r.toolName === "*"));
+            checks.push(pr ? `Requires ${pr.conditionName}=${pr.requiredValue}` : "Precondition");
+          } else if (proto === "FlowPolicy") {
+            const fr = flowRules.find((r) => r.targetService === svc && (r.targetTool === tool || r.targetTool === "*"));
+            checks.push(fr ? `Blocked after ${fr.sourceService}.${fr.sourceTool}` : "Flow control");
+          } else if (proto === "IdentityPolicy") {
+            const ir = identityRules.find((r) => r.serviceName === svc && (r.toolName === tool || r.toolName === "*"));
+            checks.push(ir ? `${ir.ruleType} (${ir.primaryVerb}/${ir.secondaryVerb})` : "Identity rule");
+          }
+        }
+      }
+
+      const toolLabel = tool === "*" ? "(all tools)" : tool;
+      if (checks.length > 0) {
+        console.log(`  ${noumena.success("✓")} ${svc}/${toolLabel} ${noumena.textDim("→")} ${checks.join(", ")}`);
+      } else {
+        console.log(`  ${noumena.success("✓")} ${svc}/${toolLabel} ${noumena.grayDim("(no restrictions)")}`);
+      }
+    }
+  }
+
+  console.log();
+  console.log(noumena.textDim("  Governance rules are configured per-tool. Use 'Set up a tool' to change them."));
+  console.log();
+  await p.confirm({ message: "Press Enter to continue", initialValue: true });
+}
+
+// ============================================================================
+// Tool Setup Wizard — guided onboarding for a service
+// ============================================================================
+
+async function toolSetupWizard(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Set up a tool"));
+  console.log(noumena.textDim("  Add a service, configure checks, and grant access — all in one flow."));
+  console.log();
+
+  // ── Step 1: Which service? ──
+  let policyData: PolicyData;
+  try {
+    policyData = await getPolicyData();
+  } catch {
+    policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {}, securityPolicy: "" };
+  }
+
+  const services = Object.values(policyData.services);
+  const serviceOptions: { value: string; label: string; hint?: string }[] = services.map((entry) => {
+    const statusIcon = entry.suspended ? noumena.warning("⏸") : entry.enabled ? noumena.success("●") : noumena.grayDim("–");
+    const displayName = entry.metadata?.displayName || entry.serviceName;
+    const type = entry.metadata?.type || "MCP_STDIO";
+    const toolCount = entry.enabledTools.length;
+    return {
+      value: `service:${entry.serviceName}`,
+      label: `${statusIcon}  ${displayName}`,
+      hint: `${getTypeLabel(type)} | ${toolCount} tools`,
+    };
+  });
+
+  const serviceAction = await p.select({
+    message: "Step 1: Which service?",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...serviceOptions,
+      { value: "search", label: noumena.accent("  + Search Docker Hub"), hint: "Find and add MCP servers" },
+      { value: "custom", label: noumena.accent("  + Add MCP service"), hint: "Templates, NPM, or Docker" },
+    ],
+  });
+  if (p.isCancel(serviceAction) || serviceAction === "back") return;
+
+  let selectedServiceName: string;
+
+  if (serviceAction === "search") {
+    await searchDockerHubFlow();
+    // Re-fetch and ask which service to continue with
+    try { policyData = await getPolicyData(); } catch { return; }
+    const freshServices = Object.values(policyData.services);
+    if (freshServices.length === 0) return;
+    const pick = await p.select({
+      message: "Continue setup with which service?",
+      options: [
+        { value: "back", label: noumena.textDim("← Cancel") },
+        ...freshServices.map((s) => ({
+          value: s.serviceName,
+          label: `  ${s.metadata?.displayName || s.serviceName}`,
+          hint: `${s.enabledTools.length} tools`,
+        })),
+      ],
+    });
+    if (p.isCancel(pick) || pick === "back") return;
+    selectedServiceName = String(pick);
+  } else if (serviceAction === "custom") {
+    await addCustomImageFlow();
+    try { policyData = await getPolicyData(); } catch { return; }
+    const freshServices = Object.values(policyData.services);
+    if (freshServices.length === 0) return;
+    const pick = await p.select({
+      message: "Continue setup with which service?",
+      options: [
+        { value: "back", label: noumena.textDim("← Cancel") },
+        ...freshServices.map((s) => ({
+          value: s.serviceName,
+          label: `  ${s.metadata?.displayName || s.serviceName}`,
+          hint: `${s.enabledTools.length} tools`,
+        })),
+      ],
+    });
+    if (p.isCancel(pick) || pick === "back") return;
+    selectedServiceName = String(pick);
+  } else {
+    selectedServiceName = String(serviceAction).replace("service:", "");
+  }
+
+  // Refresh policyData
+  try { policyData = await getPolicyData(); } catch { return; }
+  let entry = policyData.services[selectedServiceName];
+  if (!entry) { p.log.error("Service not found"); return; }
+  const displayName = entry.metadata?.displayName || entry.serviceName;
+
+  // ── Step 2: Which tools? ──
+  if (!entry.enabled) {
+    const shouldEnable = await p.confirm({
+      message: `${displayName} is disabled. Enable it?`,
+      initialValue: true,
+    });
+    if (!p.isCancel(shouldEnable) && shouldEnable) {
+      const s = p.spinner();
+      s.start("Enabling service...");
+      try {
+        await enableService(entry.serviceName);
+        try { await reloadGatewayConfig(); } catch { /* ok */ }
+        s.stop(noumena.success(`${displayName} enabled`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    }
+  }
+
+  if (entry.enabledTools.length === 0) {
+    p.log.info("No tools enabled yet. Let's discover them.");
+    await discoverAndEnableTools(entry);
+    try { policyData = await getPolicyData(); } catch { return; }
+    entry = policyData.services[selectedServiceName];
+    if (!entry) return;
+  } else {
+    console.log();
+    console.log(noumena.textDim(`  ${displayName} has ${entry.enabledTools.length} tool(s) enabled:`));
+    for (const tool of entry.enabledTools) {
+      console.log(`    ${noumena.success("●")} ${tool}`);
+    }
+    console.log();
+
+    const manageTools = await p.confirm({
+      message: "Discover or change enabled tools?",
+      initialValue: false,
+    });
+    if (!p.isCancel(manageTools) && manageTools) {
+      await discoverAndEnableTools(entry);
+      try { policyData = await getPolicyData(); } catch { return; }
+      entry = policyData.services[selectedServiceName];
+      if (!entry) return;
+    }
+  }
+
+  // ── Step 3: Governance ──
+  const configureGov = await p.confirm({
+    message: "Step 3: Configure governance rules?",
+    initialValue: true,
+  });
+
+  if (!p.isCancel(configureGov) && configureGov) {
+    // Ask: apply to all tools (*) or specific tools?
+    let toolTargets: string[];
+    if (entry.enabledTools.length > 1) {
+      const scope = await p.select({
+        message: "Apply to all tools (*) or specific tools?",
+        options: [
+          { value: "all", label: "All tools (*)", hint: "Same rules for every tool on this service" },
+          { value: "pick", label: "Specific tools", hint: "Choose which tools to govern" },
+        ],
+      });
+      if (p.isCancel(scope)) {
+        toolTargets = ["*"];
+      } else if (scope === "pick") {
+        const picked = await p.multiselect({
+          message: "Select tools to configure (SPACE to toggle):",
+          options: entry.enabledTools.map((t) => ({ value: t, label: t })),
+          required: false,
+        });
+        toolTargets = p.isCancel(picked) || picked.length === 0 ? ["*"] : picked;
+      } else {
+        toolTargets = ["*"];
+      }
+    } else if (entry.enabledTools.length === 1) {
+      toolTargets = [entry.enabledTools[0]];
+    } else {
+      toolTargets = ["*"];
+    }
+
+    for (const tool of toolTargets) {
+      await configureGovernanceForTool(selectedServiceName, tool, policyData);
+      // Refresh after each tool config
+      try { policyData = await getPolicyData(); } catch { /* keep stale */ }
+    }
+  }
+
+  // ── Step 4: Access ──
+  const grantAccess = await p.confirm({
+    message: "Step 4: Grant user access now?",
+    initialValue: true,
+  });
+
+  if (!p.isCancel(grantAccess) && grantAccess) {
+    let keycloakUsers: KeycloakUser[] = [];
+    try { keycloakUsers = await listKeycloakUsers(); } catch { /* ok */ }
+    const regularUsers = keycloakUsers.filter((u) => !isSystemAccount(u));
+
+    if (regularUsers.length === 0) {
+      p.log.info("No users found in Keycloak.");
+    } else {
+      const userOptions = regularUsers
+        .filter((u) => u.email)
+        .map((u) => ({
+          value: u.email!,
+          label: `${u.firstName || ""} ${u.lastName || u.email || u.username}`.trim(),
+          hint: u.email || "",
+        }));
+
+      const selectedUsers = await p.multiselect({
+        message: "Select users to grant access (SPACE to toggle):",
+        options: userOptions,
+        required: false,
+      });
+
+      if (!p.isCancel(selectedUsers) && selectedUsers.length > 0) {
+        const s = p.spinner();
+        s.start(`Granting access to ${selectedUsers.length} user(s)...`);
+        try {
+          for (const userEmail of selectedUsers) {
+            await grantAllToolsForService(userEmail, selectedServiceName);
+          }
+          s.stop(noumena.success(`${selectedUsers.length} user(s) granted access to ${displayName}`));
+        } catch (err) {
+          s.stop(noumena.error("Failed"));
+          p.log.error(`${err}`);
+        }
+      }
+    }
+  }
+
+  // ── Step 5: Summary ──
+  try { policyData = await getPolicyData(); } catch { /* keep stale */ }
+  entry = policyData.services[selectedServiceName] || entry;
+
+  console.log();
+  console.log(noumena.purple("  Setup Complete"));
+  console.log();
+  console.log(noumena.textDim("  Service: ") + noumena.text(displayName));
+  console.log(noumena.textDim("  Status:  ") + (entry.enabled ? noumena.success("Enabled") : noumena.grayDim("Disabled")));
+  console.log(noumena.textDim("  Tools:   ") + noumena.text(`${entry.enabledTools.length}`));
+
+  // Show governance routes
+  const svcRoutes = policyData.contextualRoutes?.[selectedServiceName];
+  if (svcRoutes && Object.keys(svcRoutes).length > 0) {
+    console.log();
+    console.log(noumena.textDim("  Governance:"));
+    for (const [toolName, route] of Object.entries(svcRoutes as Record<string, any>)) {
+      const group = route as { routes?: Array<{ policyProtocol: string }> };
+      const protocols = group.routes?.map((r) => protocolLabel(r.policyProtocol)).join(", ") || "?";
+      const toolLabel = toolName === "*" ? "(all tools)" : toolName;
+      console.log(`    ${noumena.success("●")} ${toolLabel} → ${protocols}`);
+    }
+  }
+
+  // Show users with access
+  const usersWithAccess = Object.entries(policyData.grants)
+    .filter(([_, grants]) => grants.some((g) => g.serviceName === selectedServiceName))
+    .map(([email]) => email);
+  if (usersWithAccess.length > 0) {
+    console.log();
+    console.log(noumena.textDim("  Users with access:"));
+    for (const email of usersWithAccess) {
+      console.log(`    ${noumena.success("✓")} ${email}`);
+    }
+  }
+
+  console.log();
+  await p.confirm({ message: "Press Enter to continue", initialValue: true });
 }
 
 // ============================================================================
@@ -1385,6 +1946,16 @@ function filterSystemUsers(users: KeycloakUser[]): KeycloakUser[] {
   return users.filter((u) => !SYSTEM_USERNAMES.has(u.username));
 }
 
+function isSystemAccount(user: KeycloakUser): boolean {
+  const username = user.username?.toLowerCase() || "";
+  const email = user.email?.toLowerCase() || "";
+  if (username === "admin" || username === "agent") return true;
+  if (email === "admin@acme.com" || email === "agent@acme.com") return true;
+  const roles = user.attributes?.role || [];
+  if (roles.includes("admin") || roles.includes("gateway")) return true;
+  return false;
+}
+
 async function userManagementFlow(): Promise<void> {
   while (true) {
     let keycloakUsers: KeycloakUser[] = [];
@@ -1394,16 +1965,6 @@ async function userManagementFlow(): Promise<void> {
     } catch (err) {
       keycloakError = `${err}`;
     }
-
-    const isSystemAccount = (user: KeycloakUser): boolean => {
-      const username = user.username?.toLowerCase() || "";
-      const email = user.email?.toLowerCase() || "";
-      if (username === "admin" || username === "agent") return true;
-      if (email === "admin@acme.com" || email === "agent@acme.com") return true;
-      const roles = user.attributes?.role || [];
-      if (roles.includes("admin") || roles.includes("gateway")) return true;
-      return false;
-    };
 
     const regularUsers = keycloakUsers.filter((u) => !isSystemAccount(u));
     const systemUsers = keycloakUsers.filter((u) => isSystemAccount(u));
@@ -1872,6 +2433,188 @@ async function createUserFlow(): Promise<void> {
   }
 }
 
+// ============================================================================
+// User Setup Wizard — guided user onboarding
+// ============================================================================
+
+async function userSetupWizard(): Promise<void> {
+  console.log();
+  console.log(noumena.purple("  Set up a user"));
+  console.log(noumena.textDim("  Create a user, assign tools, and review rules — all in one flow."));
+  console.log();
+
+  // ── Step 1: Which user? ──
+  let keycloakUsers: KeycloakUser[] = [];
+  try { keycloakUsers = await listKeycloakUsers(); } catch { /* ok */ }
+  const regularUsers = keycloakUsers.filter((u) => !isSystemAccount(u));
+
+  let policyData: PolicyData;
+  try {
+    policyData = await getPolicyData();
+  } catch {
+    policyData = { services: {}, grants: {}, revokedSubjects: [], contextualRoutes: {}, securityPolicy: "" };
+  }
+
+  const userOptions: { value: string; label: string; hint?: string }[] = regularUsers.map((u) => {
+    const email = u.email || "(no email)";
+    const userGrants = policyData.grants[email] || [];
+    const grantCount = userGrants.reduce((sum, g) => sum + g.allowedTools.length, 0);
+    const icon = grantCount > 0 ? noumena.success("✓") : noumena.grayDim("○");
+    return {
+      value: email,
+      label: `${icon}  ${u.firstName || ""} ${u.lastName || email}`.trim(),
+      hint: grantCount > 0 ? `${grantCount} tools granted` : "no grants",
+    };
+  });
+
+  const userAction = await p.select({
+    message: "Step 1: Which user?",
+    options: [
+      { value: "back", label: noumena.textDim("← Back") },
+      ...userOptions,
+      { value: "create", label: noumena.accent("  + Create new user") },
+    ],
+  });
+  if (p.isCancel(userAction) || userAction === "back") return;
+
+  let selectedEmail: string;
+
+  if (userAction === "create") {
+    await createUserFlow();
+    // Re-fetch and ask which user to continue with
+    try { keycloakUsers = await listKeycloakUsers(); } catch { return; }
+    const freshUsers = keycloakUsers.filter((u) => !isSystemAccount(u));
+    if (freshUsers.length === 0) return;
+    const pick = await p.select({
+      message: "Continue setup with which user?",
+      options: [
+        { value: "back", label: noumena.textDim("← Cancel") },
+        ...freshUsers.map((u) => ({
+          value: u.email || u.username || u.id,
+          label: `  ${u.firstName || ""} ${u.lastName || u.email || u.username}`.trim(),
+          hint: u.email || "",
+        })),
+      ],
+    });
+    if (p.isCancel(pick) || pick === "back") return;
+    selectedEmail = String(pick);
+  } else {
+    selectedEmail = String(userAction);
+  }
+
+  // ── Step 2: Tool access ──
+  try { policyData = await getPolicyData(); } catch { return; }
+
+  const allServices = Object.values(policyData.services).filter((s) => s.enabledTools.length > 0);
+  if (allServices.length === 0) {
+    p.log.info("No services with enabled tools. Set up a tool first.");
+    return;
+  }
+
+  const userGrants = policyData.grants[selectedEmail] || [];
+  const currentlyGranted = new Set(userGrants.map((g) => g.serviceName));
+
+  const serviceSelections = await p.multiselect({
+    message: `Step 2: Which services should ${selectedEmail} access? (SPACE to toggle)`,
+    options: allServices.map((s) => {
+      const displayName = s.metadata?.displayName || s.serviceName;
+      return {
+        value: s.serviceName,
+        label: displayName,
+        hint: `${s.enabledTools.length} tools`,
+      };
+    }),
+    initialValues: [...currentlyGranted].filter((svc) => allServices.some((s) => s.serviceName === svc)),
+    required: false,
+  });
+
+  if (!p.isCancel(serviceSelections)) {
+    const selectedSet = new Set(serviceSelections);
+
+    // Grant newly selected
+    const toGrant = serviceSelections.filter((svc) => !currentlyGranted.has(svc));
+    if (toGrant.length > 0) {
+      const s = p.spinner();
+      s.start(`Granting ${toGrant.length} service(s)...`);
+      try {
+        for (const svc of toGrant) {
+          await grantAllToolsForService(selectedEmail, svc);
+        }
+        s.stop(noumena.success(`${toGrant.length} service(s) granted`));
+      } catch (err) {
+        s.stop(noumena.error("Failed"));
+        p.log.error(`${err}`);
+      }
+    }
+
+    // Offer to revoke deselected
+    const toRevoke = [...currentlyGranted].filter((svc) => !selectedSet.has(svc));
+    if (toRevoke.length > 0) {
+      const confirmRevoke = await p.confirm({
+        message: `Revoke access to ${toRevoke.length} deselected service(s)?`,
+        initialValue: true,
+      });
+      if (!p.isCancel(confirmRevoke) && confirmRevoke) {
+        const s = p.spinner();
+        s.start(`Revoking ${toRevoke.length} service(s)...`);
+        try {
+          for (const svc of toRevoke) {
+            await revokeServiceAccess(selectedEmail, svc);
+          }
+          s.stop(noumena.success(`${toRevoke.length} service(s) revoked`));
+        } catch (err) {
+          s.stop(noumena.error("Failed"));
+          p.log.error(`${err}`);
+        }
+      }
+    }
+  }
+
+  // ── Step 3: Review effective rules (read-only) ──
+  try { policyData = await getPolicyData(); } catch { /* keep stale */ }
+  await showEffectiveRules(selectedEmail, policyData);
+
+  // ── Step 4: Summary ──
+  try { policyData = await getPolicyData(); } catch { /* keep stale */ }
+  const finalGrants = policyData.grants[selectedEmail] || [];
+
+  console.log();
+  console.log(noumena.purple("  Setup Complete"));
+  console.log();
+  console.log(noumena.text(`  ${selectedEmail} can now call:`));
+
+  if (finalGrants.length === 0) {
+    console.log(noumena.grayDim("    (no grants)"));
+  } else {
+    for (const grant of finalGrants) {
+      const svc = grant.serviceName;
+      const service = policyData.services[svc];
+      const displayName = service?.metadata?.displayName || svc;
+      const tools = grant.allowedTools.includes("*") ? "all tools" : grant.allowedTools.join(", ");
+
+      // Gather governance checks
+      const checks: string[] = [];
+      const svcRoutes = policyData.contextualRoutes?.[svc];
+      if (svcRoutes) {
+        const protocols = new Set<string>();
+        for (const [, route] of Object.entries(svcRoutes as Record<string, any>)) {
+          const group = route as { routes?: Array<{ policyProtocol: string }> };
+          if (group.routes) {
+            for (const r of group.routes) protocols.add(protocolLabel(r.policyProtocol));
+          }
+        }
+        checks.push(...protocols);
+      }
+
+      const checkLabel = checks.length > 0 ? noumena.textDim(` (${checks.join(", ")})`) : "";
+      console.log(`    ${noumena.success("✓")} ${displayName}: ${tools}${checkLabel}`);
+    }
+  }
+
+  console.log();
+  await p.confirm({ message: "Press Enter to continue", initialValue: true });
+}
+
 async function deleteUserFromKeycloakFlow(kcUser: KeycloakUser): Promise<void> {
   const email = kcUser.email || "(no email)";
   const displayName = `${kcUser.firstName || ""} ${kcUser.lastName || ""}`.trim() || kcUser.username || email;
@@ -1990,14 +2733,16 @@ async function contextualPoliciesFlow(): Promise<void> {
     try { identityStats = await getIdentityStatistics(); } catch { /* may not exist */ }
 
     console.log();
-    console.log(noumena.purple("  Contextual Policies"));
-    console.log(noumena.textDim("  Protocols that evaluate tool calls at request time (Layer 2)"));
+    console.log(noumena.purple("  Governance Rules"));
+    console.log(noumena.textDim("  Control what checks run when an AI agent calls a tool."));
+    console.log(noumena.textDim("  Each rule type below enforces a different kind of check."));
     console.log();
 
     const totalRoutes = Object.values(protocolRoutes).reduce((s, r) => s + r.length, 0);
     if (totalRoutes === 0) {
-      console.log(noumena.textDim("  No contextual routes registered yet."));
-      console.log(noumena.textDim("  Use '+ Register new route' to connect a service/tool to a protocol."));
+      console.log(noumena.textDim("  No governance rules active yet."));
+      console.log(noumena.textDim('  Go to "Connect tools to rules" below to connect a tool to a rule (e.g.,'));
+      console.log(noumena.textDim('  require human approval before an AI can call "transfer_money").'));
       console.log();
     }
 
@@ -2013,7 +2758,7 @@ async function contextualPoliciesFlow(): Promise<void> {
       : "No routes";
     options.push({
       value: "protocol:ApprovalPolicy",
-      label: `  ApprovalPolicy`,
+      label: `  Approval — require human sign-off`,
       hint: approvalHint,
     });
 
@@ -2035,7 +2780,7 @@ async function contextualPoliciesFlow(): Promise<void> {
     }
     options.push({
       value: "protocol:RateLimitPolicy",
-      label: `  RateLimitPolicy`,
+      label: `  Rate Limits — cap how often a tool can be called`,
       hint: rlHint,
     });
 
@@ -2043,7 +2788,7 @@ async function contextualPoliciesFlow(): Promise<void> {
     const cpRouteCount = (protocolRoutes["ConstraintPolicy"] || []).length;
     options.push({
       value: "protocol:ConstraintPolicy",
-      label: `  ConstraintPolicy`,
+      label: `  Constraints — per-user budgets and limits`,
       hint: buildStatsHint(cpRouteCount, constraintStats),
     });
 
@@ -2051,7 +2796,7 @@ async function contextualPoliciesFlow(): Promise<void> {
     const ppRouteCount = (protocolRoutes["PreconditionPolicy"] || []).length;
     options.push({
       value: "protocol:PreconditionPolicy",
-      label: `  PreconditionPolicy`,
+      label: `  Preconditions — require a system flag before allowing`,
       hint: buildStatsHint(ppRouteCount, preconditionStats),
     });
 
@@ -2059,7 +2804,7 @@ async function contextualPoliciesFlow(): Promise<void> {
     const fpRouteCount = (protocolRoutes["FlowPolicy"] || []).length;
     options.push({
       value: "protocol:FlowPolicy",
-      label: `  FlowPolicy`,
+      label: `  Flow Control — block dangerous call sequences`,
       hint: buildStatsHint(fpRouteCount, flowStats),
     });
 
@@ -2067,7 +2812,7 @@ async function contextualPoliciesFlow(): Promise<void> {
     const ipRouteCount = (protocolRoutes["IdentityPolicy"] || []).length;
     options.push({
       value: "protocol:IdentityPolicy",
-      label: `  IdentityPolicy`,
+      label: `  Identity — segregation of duties, four-eyes`,
       hint: buildStatsHint(ipRouteCount, identityStats),
     });
 
@@ -2084,7 +2829,7 @@ async function contextualPoliciesFlow(): Promise<void> {
     }
 
     options.push({ value: "---sep", label: noumena.grayDim("  ──────────"), hint: "" });
-    options.push({ value: "routes", label: noumena.accent("  Manage routes"), hint: "Register/remove contextual routes" });
+    options.push({ value: "routes", label: noumena.accent("  Connect tools to rules"), hint: "Add or remove governance checks for tools" });
 
     const action = await p.select({ message: "Select protocol or action:", options });
     if (p.isCancel(action) || action === "back") return;
@@ -2132,7 +2877,7 @@ async function rateLimitPolicyFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  RateLimitPolicy"));
-    console.log(noumena.textDim("  Automated per-user rate limiting for tool calls"));
+    console.log(noumena.textDim("  Limit how many times each user can call a tool per time window"));
     console.log();
 
     if (error) {
@@ -2342,7 +3087,7 @@ async function constraintPolicyFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  ConstraintPolicy"));
-    console.log(noumena.textDim("  Tool-level budget constraints per caller"));
+    console.log(noumena.textDim("  Set per-user call budgets for specific tools (e.g., max 5 transfers)"));
     console.log();
 
     if (error) {
@@ -2453,7 +3198,7 @@ async function preconditionPolicyFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  PreconditionPolicy"));
-    console.log(noumena.textDim("  System state flags that gate tool calls"));
+    console.log(noumena.textDim("  Allow/block tools based on system flags (e.g., block during maintenance)"));
     console.log();
 
     if (error) {
@@ -2574,7 +3319,7 @@ async function flowPolicyFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  FlowPolicy"));
-    console.log(noumena.textDim("  Cross-call data flow governance within sessions"));
+    console.log(noumena.textDim("  Block dangerous sequences (e.g., don't allow send_email after get_account)"));
     console.log();
 
     if (error) {
@@ -2679,7 +3424,7 @@ async function identityPolicyFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  IdentityPolicy"));
-    console.log(noumena.textDim("  Identity governance — segregation of duties, four-eyes, exclusive actor"));
+    console.log(noumena.textDim("  Enforce who-does-what rules (e.g., the person who creates can't also approve)"));
     console.log();
 
     if (error) {
@@ -2796,8 +3541,9 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
     }
 
     console.log();
-    console.log(noumena.purple("  Contextual Routes"));
-    console.log(noumena.textDim("  Map service/tool combinations to policy protocols"));
+    console.log(noumena.purple("  Tool → Rule Routing"));
+    console.log(noumena.textDim("  Each row below shows which governance checks run when an AI calls a specific tool."));
+    console.log(noumena.textDim("  A single rule means one check. A group (AND/OR) combines multiple checks."));
     console.log();
 
     if (allRoutes.length > 0) {
@@ -2806,19 +3552,32 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
         const group = route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
         if (group.routes && group.routes.length > 0) {
           if (group.mode === "single" || group.routes.length === 1) {
-            const protocol = group.routes[0].policyProtocol || "Unknown";
-            console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocol)}`);
+            const proto = group.routes[0].policyProtocol || "Unknown";
+            const label = protocolLabel(proto);
+            const desc = proto === "ApprovalPolicy" ? " (calls require human sign-off)"
+              : proto === "RateLimitPolicy" ? " (calls are rate-limited)"
+              : proto === "ConstraintPolicy" ? " (per-user budget enforced)"
+              : proto === "PreconditionPolicy" ? " (system flag must be set)"
+              : proto === "FlowPolicy" ? " (dangerous sequences blocked)"
+              : proto === "IdentityPolicy" ? " (who-does-what enforced)"
+              : "";
+            console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(label)}${desc}`);
           } else {
-            const modeLabel = group.mode === "and" ? "AND" : group.mode === "or" ? "OR" : (group.mode || "").toUpperCase();
-            const protocols = group.routes.map(r => r.policyProtocol).join(", ");
+            const modeLabel = group.mode === "and" ? "AND: all must allow" : group.mode === "or" ? "OR: any can allow" : (group.mode || "").toUpperCase();
+            const protocols = group.routes.map(r => protocolLabel(r.policyProtocol)).join(", ");
             console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(`[${modeLabel}]`)} ${protocols}`);
           }
         } else {
           // Fallback for legacy flat routes
-          const protocol = route.policyProtocol || "Unknown";
-          console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocol)}`);
+          const proto = route.policyProtocol || "Unknown";
+          console.log(`  ${noumena.success("●")} ${serviceName} / ${toolLabel} → ${noumena.accent(protocolLabel(proto))}`);
         }
       }
+      console.log();
+    } else {
+      console.log(noumena.textDim("  No tools have governance rules yet."));
+      console.log(noumena.textDim('  Use "+ Add rule to a tool" to choose a tool and assign a check'));
+      console.log(noumena.textDim('  (e.g., require approval before "send_email" can be called).'));
       console.log();
     }
 
@@ -2837,11 +3596,11 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       message: "Action:",
       options: [
         { value: "back", label: noumena.textDim("← Back") },
-        { value: "register", label: noumena.success("  + Register route"), hint: "Connect a service/tool to a protocol" },
-        { value: "add-to-group", label: noumena.success("  + Add to group"), hint: "Add another protocol to an existing route" },
-        { value: "set-group-mode", label: "  Set group mode", hint: "Switch AND/OR for a route group" },
-        { value: "remove-from-group", label: noumena.warning("  Remove from group"), hint: "Remove a protocol from a group" },
-        { value: "remove", label: noumena.warning("  Remove route"), hint: "Disconnect an entire route" },
+        { value: "register", label: noumena.success("  + Add rule to a tool"), hint: "Choose a tool, then choose what check to apply" },
+        { value: "add-to-group", label: noumena.success("  + Stack another rule"), hint: "Add a second check to a tool that already has one" },
+        { value: "set-group-mode", label: "  Set AND / OR mode", hint: "AND = all checks must pass. OR = any check passing is enough" },
+        { value: "remove-from-group", label: noumena.warning("  Remove one rule from stack"), hint: "Take one check off a tool that has multiple" },
+        { value: "remove", label: noumena.warning("  Remove all rules from tool"), hint: "Remove all governance from a tool" },
         { value: "refresh", label: "  Refresh" },
       ],
     });
@@ -2858,7 +3617,7 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       }
 
       const serviceName = await p.select({
-        message: "Service:",
+        message: "Which service? (the MCP server that provides the tool)",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...serviceNames.map((s) => ({ value: s, label: `  ${s}` })),
@@ -2869,12 +3628,12 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       // Pick tool
       const serviceEntry = policyData.services[String(serviceName)];
       const toolOptions = [
-        { value: "*", label: "  * (all tools)", hint: "Service-wide route" },
+        { value: "*", label: "  * (all tools)", hint: "Applies to every tool on this service" },
         ...serviceEntry.enabledTools.map((t) => ({ value: t, label: `  ${t}` })),
       ];
 
       const toolName = await p.select({
-        message: "Tool:",
+        message: "Which tool should be governed? (* = all tools on this service)",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...toolOptions,
@@ -2884,15 +3643,15 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
 
       // Pick protocol
       const protocol = await p.select({
-        message: "Protocol:",
+        message: "What kind of check?",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
-          { value: "ApprovalPolicy", label: "  ApprovalPolicy", hint: "Human-in-the-loop approval" },
-          { value: "RateLimitPolicy", label: "  RateLimitPolicy", hint: "Automated rate limiting" },
-          { value: "ConstraintPolicy", label: "  ConstraintPolicy", hint: "Tool-level budget constraints" },
-          { value: "PreconditionPolicy", label: "  PreconditionPolicy", hint: "System state gates" },
-          { value: "FlowPolicy", label: "  FlowPolicy", hint: "Cross-call data flow governance" },
-          { value: "IdentityPolicy", label: "  IdentityPolicy", hint: "Identity governance (SoD, four-eyes)" },
+          { value: "ApprovalPolicy", label: "  Approval", hint: "A human must approve each call (via NPL Inspector or API)" },
+          { value: "RateLimitPolicy", label: "  Rate Limit", hint: "Block calls after N uses per time window" },
+          { value: "ConstraintPolicy", label: "  Constraint", hint: "Per-user call budgets (e.g., max 5 transfers per user)" },
+          { value: "PreconditionPolicy", label: "  Precondition", hint: "Only allow if a system flag is set (e.g., maintenance_mode=false)" },
+          { value: "FlowPolicy", label: "  Flow Control", hint: "Block if a forbidden prior tool was called in same session" },
+          { value: "IdentityPolicy", label: "  Identity", hint: "Require different people for different steps (e.g., creator ≠ approver)" },
         ],
       });
       if (p.isCancel(protocol) || protocol === "---cancel") continue;
@@ -2921,7 +3680,14 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
 
         const endpoint = `http://npl-engine:12000/npl/policies/${protocol}/${instanceId}/evaluate`;
         await registerContextualRoute(String(serviceName), String(toolName), String(protocol), instanceId, endpoint);
-        s.stop(noumena.success(`Route registered: ${serviceName}/${toolName} → ${protocol}`));
+        const ruleDesc = protocol === "ApprovalPolicy" ? "require human approval"
+          : protocol === "RateLimitPolicy" ? "enforce rate limits"
+          : protocol === "ConstraintPolicy" ? "enforce per-user budgets"
+          : protocol === "PreconditionPolicy" ? "check system preconditions"
+          : protocol === "FlowPolicy" ? "enforce flow control"
+          : protocol === "IdentityPolicy" ? "enforce identity rules"
+          : `apply ${protocolLabel(String(protocol))}`;
+        s.stop(noumena.success(`Done. When an AI calls ${serviceName}/${toolName}, it will now ${ruleDesc}.`));
       } catch (err) {
         s.stop(noumena.error("Failed"));
         p.log.error(`${err}`);
@@ -2933,7 +3699,7 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       }
 
       const selected = await p.select({
-        message: "Remove route:",
+        message: "Remove all rules from which tool:",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...allRoutes.map((r) => {
@@ -2941,13 +3707,13 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
             let hint = "";
             if (group.routes && group.routes.length > 0) {
               if (group.mode === "single" || group.routes.length === 1) {
-                hint = group.routes[0].policyProtocol || "";
+                hint = protocolLabel(group.routes[0].policyProtocol || "");
               } else {
                 const modeLabel = group.mode === "and" ? "AND" : group.mode === "or" ? "OR" : (group.mode || "").toUpperCase();
-                hint = `[${modeLabel}] ${group.routes.map(gr => gr.policyProtocol).join(", ")}`;
+                hint = `[${modeLabel}] ${group.routes.map(gr => protocolLabel(gr.policyProtocol)).join(", ")}`;
               }
             } else {
-              hint = r.route.policyProtocol || "";
+              hint = protocolLabel(r.route.policyProtocol || "");
             }
             return {
               value: `${r.serviceName}:${r.toolName}`,
@@ -2961,16 +3727,16 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
 
       const [svc, tool] = String(selected).split(":");
       const confirmed = await p.confirm({
-        message: `Remove route ${svc}/${tool}?`,
+        message: `Remove all governance rules from ${svc}/${tool}?`,
         initialValue: true,
       });
       if (p.isCancel(confirmed) || !confirmed) continue;
 
       const s = p.spinner();
-      s.start("Removing route...");
+      s.start("Removing rules...");
       try {
         await removeContextualRoute(svc, tool);
-        s.stop(noumena.success(`Route removed: ${svc}/${tool}`));
+        s.stop(noumena.success(`All governance rules removed from ${svc}/${tool}.`));
       } catch (err) {
         s.stop(noumena.error("Failed"));
         p.log.error(`${err}`);
@@ -2983,12 +3749,12 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       }
 
       const targetRoute = await p.select({
-        message: "Add protocol to which route:",
+        message: "Which tool should get an additional check? (currently governed tools below)",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...singleRoutes.map((r) => {
             const g = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
-            const protocols = g.routes ? g.routes.map(gr => gr.policyProtocol).join(", ") : "?";
+            const protocols = g.routes ? g.routes.map(gr => protocolLabel(gr.policyProtocol)).join(", ") : "?";
             return {
               value: `${r.serviceName}:${r.toolName}`,
               label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
@@ -3003,15 +3769,15 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
 
       // Pick protocol to add
       const addProtocol = await p.select({
-        message: "Protocol to add:",
+        message: "What kind of check to add?",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
-          { value: "ApprovalPolicy", label: "  ApprovalPolicy", hint: "Human-in-the-loop approval" },
-          { value: "RateLimitPolicy", label: "  RateLimitPolicy", hint: "Automated rate limiting" },
-          { value: "ConstraintPolicy", label: "  ConstraintPolicy", hint: "Tool-level budget constraints" },
-          { value: "PreconditionPolicy", label: "  PreconditionPolicy", hint: "System state gates" },
-          { value: "FlowPolicy", label: "  FlowPolicy", hint: "Cross-call data flow governance" },
-          { value: "IdentityPolicy", label: "  IdentityPolicy", hint: "Identity governance (SoD, four-eyes)" },
+          { value: "ApprovalPolicy", label: "  Approval", hint: "A human must approve each call (via NPL Inspector or API)" },
+          { value: "RateLimitPolicy", label: "  Rate Limit", hint: "Block calls after N uses per time window" },
+          { value: "ConstraintPolicy", label: "  Constraint", hint: "Per-user call budgets (e.g., max 5 transfers per user)" },
+          { value: "PreconditionPolicy", label: "  Precondition", hint: "Only allow if a system flag is set (e.g., maintenance_mode=false)" },
+          { value: "FlowPolicy", label: "  Flow Control", hint: "Block if a forbidden prior tool was called in same session" },
+          { value: "IdentityPolicy", label: "  Identity", hint: "Require different people for different steps (e.g., creator ≠ approver)" },
         ],
       });
       if (p.isCancel(addProtocol) || addProtocol === "---cancel") continue;
@@ -3039,7 +3805,16 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
 
         const endpoint = `http://npl-engine:12000/npl/policies/${addProtocol}/${instanceId}/evaluate`;
         await addRouteToGroup(grpSvc, grpTool, String(addProtocol), instanceId, endpoint);
-        s.stop(noumena.success(`Added ${addProtocol} to ${grpSvc}/${grpTool} group`));
+        // Refresh to get current group state for the confirmation
+        try {
+          const refreshed = await getPolicyData();
+          const updatedRoute = refreshed.contextualRoutes?.[grpSvc]?.[grpTool] as { mode?: string; routes?: Array<{ policyProtocol: string }> } | undefined;
+          const groupMode = updatedRoute?.mode === "or" ? "ANY" : "BOTH";
+          const allLabels = updatedRoute?.routes?.map(r => protocolLabel(r.policyProtocol)).join(" AND ") || protocolLabel(String(addProtocol));
+          s.stop(noumena.success(`Done. ${grpSvc}/${grpTool} now requires ${groupMode} ${allLabels} checks (${updatedRoute?.mode?.toUpperCase() || "AND"} mode).`));
+        } catch {
+          s.stop(noumena.success(`Added ${protocolLabel(String(addProtocol))} check to ${grpSvc}/${grpTool}.`));
+        }
       } catch (err) {
         s.stop(noumena.error("Failed"));
         p.log.error(`${err}`);
@@ -3052,13 +3827,13 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       }
 
       const targetGroup = await p.select({
-        message: "Set mode for which group:",
+        message: "Set AND/OR mode for which tool:",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...groupRoutes.map((r) => {
             const g = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
             const modeLabel = g.mode === "and" ? "AND" : g.mode === "or" ? "OR" : (g.mode || "").toUpperCase();
-            const protocols = g.routes ? g.routes.map(gr => gr.policyProtocol).join(", ") : "";
+            const protocols = g.routes ? g.routes.map(gr => protocolLabel(gr.policyProtocol)).join(", ") : "";
             return {
               value: `${r.serviceName}:${r.toolName}`,
               label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
@@ -3075,8 +3850,8 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
         message: "Group mode:",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
-          { value: "and", label: "  AND", hint: "All protocols must allow the call" },
-          { value: "or", label: "  OR", hint: "Any protocol can allow the call" },
+          { value: "and", label: "  AND (stricter)", hint: "ALL checks must pass — e.g., must be approved AND within rate limit" },
+          { value: "or", label: "  OR (lenient)", hint: "ANY check passing is enough — e.g., either approved OR within rate limit" },
         ],
       });
       if (p.isCancel(newMode) || newMode === "---cancel") continue;
@@ -3098,12 +3873,12 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       }
 
       const targetGroup = await p.select({
-        message: "Remove protocol from which group:",
+        message: "Remove a check from which tool:",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...groupRoutes.map((r) => {
             const g = r.route as { mode?: string; routes?: Array<{ policyProtocol: string }> };
-            const protocols = g.routes ? g.routes.map(gr => gr.policyProtocol).join(", ") : "";
+            const protocols = g.routes ? g.routes.map(gr => protocolLabel(gr.policyProtocol)).join(", ") : "";
             return {
               value: `${r.serviceName}:${r.toolName}`,
               label: `  ${r.serviceName} / ${r.toolName === "*" ? "(all tools)" : r.toolName}`,
@@ -3125,22 +3900,24 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
       }
 
       const rmProtocol = await p.select({
-        message: "Remove which protocol:",
+        message: "Remove which check:",
         options: [
           { value: "---cancel", label: noumena.textDim("← Cancel") },
           ...protocolsInGroup.map((proto) => ({
             value: proto,
-            label: `  ${proto}`,
+            label: `  ${protocolLabel(proto)}`,
           })),
         ],
       });
       if (p.isCancel(rmProtocol) || rmProtocol === "---cancel") continue;
 
       const s = p.spinner();
-      s.start(`Removing ${rmProtocol} from group...`);
+      s.start(`Removing ${protocolLabel(String(rmProtocol))} from group...`);
       try {
         await removeRouteFromGroup(rmSvc, rmTool, String(rmProtocol));
-        s.stop(noumena.success(`Removed ${rmProtocol} from ${rmSvc}/${rmTool} group`));
+        const remaining = protocolsInGroup.filter(p => p !== String(rmProtocol)).map(p => protocolLabel(p));
+        const remainingDesc = remaining.length > 0 ? `Remaining: ${remaining.join(", ")}.` : "No checks remain.";
+        s.stop(noumena.success(`Removed ${protocolLabel(String(rmProtocol))} check from ${rmSvc}/${rmTool}. ${remainingDesc}`));
       } catch (err) {
         s.stop(noumena.error("Failed"));
         p.log.error(`${err}`);
@@ -3165,7 +3942,7 @@ async function pendingApprovalsFlow(): Promise<void> {
 
     console.log();
     console.log(noumena.purple("  Pending Approvals"));
-    console.log(noumena.textDim("  Review and approve/deny tool call requests"));
+    console.log(noumena.textDim("  View tool calls waiting for human sign-off (approve/deny via NPL Inspector)"));
     console.log();
 
     if (error) {
