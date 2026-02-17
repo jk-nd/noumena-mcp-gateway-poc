@@ -17,6 +17,15 @@ const PORT = process.env.PORT || 8000;
 // ── Session store ──────────────────────────────────────────────────────────
 const sessions = new Map(); // sessionId -> { initialized, sseClients: Set }
 
+// ── Mock email data ──────────────────────────────────────────────────────
+const MOCK_INBOX = [
+  { id: 'msg-1', from: 'alice@acme.com', to: 'jarvis@acme.com', subject: 'Q1 Budget Review', body: 'Please prepare the Q1 budget summary for Monday.', date: '2026-02-13T08:30:00Z', read: true },
+  { id: 'msg-2', from: 'bob@acme.com', to: 'jarvis@acme.com', subject: 'Re: Sprint Planning', body: 'I updated the backlog, can you check?', date: '2026-02-13T09:15:00Z', read: false },
+  { id: 'msg-3', from: 'dave@external-vendor.com', to: 'jarvis@acme.com', subject: 'Invoice #4821', body: 'Attached is the invoice for February services.', date: '2026-02-13T10:00:00Z', read: false },
+];
+
+const SENT_EMAILS = [];
+
 // ── Mock calendar data ─────────────────────────────────────────────────────
 const MOCK_EVENTS = [
   { id: 'evt-1', title: 'Sprint Planning', start: '2026-02-13T09:00:00Z', end: '2026-02-13T10:00:00Z', attendees: ['alice@acme.com', 'bob@acme.com'] },
@@ -68,6 +77,29 @@ const TOOLS = [
         attendees: { type: 'array', items: { type: 'string' }, description: 'List of attendee emails' },
       },
       required: ['title', 'start', 'end'],
+    },
+  },
+  {
+    name: 'read_inbox',
+    description: 'Read email inbox. Returns unread messages by default.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        all: { type: 'boolean', description: 'If true, return all messages (not just unread)' },
+      },
+    },
+  },
+  {
+    name: 'send_email',
+    description: 'Send an email to one or more recipients',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address' },
+        subject: { type: 'string', description: 'Email subject line' },
+        body: { type: 'string', description: 'Email body text' },
+      },
+      required: ['to', 'subject', 'body'],
     },
   },
 ];
@@ -225,6 +257,44 @@ function handleToolCall(params) {
           {
             type: 'text',
             text: `Event created: ${JSON.stringify(newEvent, null, 2)}`,
+          },
+        ],
+      };
+    }
+
+    case 'read_inbox': {
+      const showAll = args?.all === true;
+      const messages = showAll ? MOCK_INBOX : MOCK_INBOX.filter((m) => !m.read);
+      // Mark returned messages as read
+      messages.forEach((m) => { m.read = true; });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: messages.length > 0
+              ? JSON.stringify(messages, null, 2)
+              : 'No unread messages',
+          },
+        ],
+      };
+    }
+
+    case 'send_email': {
+      const email = {
+        id: `sent-${uuidv4().slice(0, 8)}`,
+        from: 'jarvis@acme.com',
+        to: args.to,
+        subject: args.subject,
+        body: args.body,
+        date: new Date().toISOString(),
+      };
+      SENT_EMAILS.push(email);
+      console.log(`[email] sent to ${args.to}: "${args.subject}"`);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Email sent to ${args.to}: "${args.subject}"`,
           },
         ],
       };

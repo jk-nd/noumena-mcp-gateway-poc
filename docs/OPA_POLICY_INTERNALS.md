@@ -577,7 +577,7 @@ OPA communicates with Envoy via the gRPC ext_authz protocol. The `result` object
 opa test policies/ -v
 ```
 
-This runs all `*_test.rego` files in the `policies/` directory. The test suite covers 113+ cases.
+This runs all `*_test.rego` files in the `policies/` directory. The test suite covers 74 cases.
 
 ### Test File Structure
 

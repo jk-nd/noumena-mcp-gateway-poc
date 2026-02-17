@@ -547,7 +547,7 @@ async function configureGovernanceForTool(
     s.start(`Setting up ${protocolLabel(protocol)}...`);
     try {
       const instanceId = await ensureProtocolInstance(protocol);
-      const endpoint = `http://npl-engine:12000/npl/policies/${protocol}/${instanceId}/evaluate`;
+      const endpoint = `/npl/policies/${protocol}/${instanceId}/evaluate`;
 
       // If there are already routes for this tool, add to group; otherwise register new
       const currentGroup = policyData.contextualRoutes?.[serviceName]?.[toolName] as
@@ -3678,7 +3678,7 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
           continue;
         }
 
-        const endpoint = `http://npl-engine:12000/npl/policies/${protocol}/${instanceId}/evaluate`;
+        const endpoint = `/npl/policies/${protocol}/${instanceId}/evaluate`;
         await registerContextualRoute(String(serviceName), String(toolName), String(protocol), instanceId, endpoint);
         const ruleDesc = protocol === "ApprovalPolicy" ? "require human approval"
           : protocol === "RateLimitPolicy" ? "enforce rate limits"
@@ -3803,7 +3803,7 @@ async function manageRoutesFlow(policyData: PolicyData): Promise<void> {
           continue;
         }
 
-        const endpoint = `http://npl-engine:12000/npl/policies/${addProtocol}/${instanceId}/evaluate`;
+        const endpoint = `/npl/policies/${addProtocol}/${instanceId}/evaluate`;
         await addRouteToGroup(grpSvc, grpTool, String(addProtocol), instanceId, endpoint);
         // Refresh to get current group state for the confirmation
         try {

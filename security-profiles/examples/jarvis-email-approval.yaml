@@ -1,0 +1,106 @@
+# mcp-security.yaml — Jarvis email approval demo
+#
+# Use case: Jarvis (AI agent) can read email and send internal emails freely,
+# but sending email to anyone outside @acme.com requires Alice's approval.
+#
+# Usage:
+#   TUI → Security Policy → Import mcp-security.yaml
+#   Path: security-profiles/examples/jarvis-email-approval.yaml
+
+version: "1.0"
+
+tenant:
+  company_domain: acme.com
+
+profiles: []
+
+# Tool annotations for mock-calendar service (which now has email tools)
+tool_overrides:
+  mock-calendar:
+    send_email:
+      readOnlyHint: false
+      destructiveHint: false
+      openWorldHint: true          # sends data outside the system boundary
+      idempotentHint: false
+      verb: create
+      labels: [category:communication]
+    read_inbox:
+      readOnlyHint: true
+      destructiveHint: false
+      openWorldHint: false
+      idempotentHint: true
+      verb: get
+      labels: [category:communication]
+    list_events:
+      readOnlyHint: true
+      destructiveHint: false
+      openWorldHint: false
+      idempotentHint: true
+      verb: list
+    create_event:
+      readOnlyHint: false
+      destructiveHint: false
+      openWorldHint: false
+      idempotentHint: false
+      verb: create
+
+# Classifiers: inspect the "to" argument of send_email
+# to decide if the email is internal or external
+classifiers:
+  mock-calendar:
+    send_email:
+      - field: to
+        contains: "@{company_domain}"
+        set_labels: [scope:internal]
+      - field: to
+        not_contains: "@{company_domain}"
+        set_labels: [scope:external]
+
+policies:
+  # ── Priority 10: External email requires Alice's approval ──
+  - name: Approve external email
+    description: >
+      Sending email to recipients outside @acme.com requires approval
+      from alice@acme.com. This prevents unauthorized data exfiltration
+      by the AI agent.
+    when:
+      labels: [scope:external]
+      openWorldHint: true
+    match: all
+    action: npl_evaluate
+    approvers: [alice@acme.com]
+    timeout: 60m
+    priority: 10
+
+  # ── Priority 50: Internal email is auto-allowed ──
+  - name: Allow internal email
+    description: Emails to @acme.com addresses are auto-approved.
+    when:
+      labels: [scope:internal]
+    action: allow
+    priority: 50
+
+  # ── Priority 50: Read-only operations are always allowed ──
+  - name: Allow read-only operations
+    description: Reading inbox, listing events — always safe.
+    when:
+      readOnlyHint: true
+    action: allow
+    priority: 50
+
+  # ── Priority 60: Calendar operations are allowed ──
+  - name: Allow calendar operations
+    description: Creating events is allowed (not open-world).
+    when:
+      openWorldHint: false
+      verb: create
+    match: all
+    action: allow
+    priority: 60
+
+  # ── Fallback: deny everything else ──
+  - name: Default deny
+    description: Any tool call not explicitly allowed is denied.
+    when: {}
+    action: deny
+    priority: 999

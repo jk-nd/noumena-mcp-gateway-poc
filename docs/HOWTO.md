@@ -1357,7 +1357,7 @@ Look for `x-sp-action`, `x-sp-rule`, and `x-authz-reason` in the response header
 opa test policies/ -v
 ```
 
-This runs 113+ test cases covering authentication, authorization, security policies, and approval workflows. Tests use mock data and don't require the Docker stack.
+This runs 74 test cases covering authentication, authorization, security policies, contextual routing, and approval workflows. Tests use mock data and don't require the Docker stack.
 
 ### Integration tests
 
