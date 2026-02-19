@@ -104,3 +104,19 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V14: ServiceGovernance full protocol — evaluate, approve, deny, getPendingRequests
+  - name: mcp-14.0-governance-full
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V15: Make serviceName non-private for bundle server discovery
+  - name: mcp-15.0-governance-visible-name
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

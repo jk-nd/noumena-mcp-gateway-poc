@@ -171,6 +171,8 @@ class StoreAndForwardTest {
     @Test
     @Order(3)
     fun `verify pending request in ServiceGovernance`() = runBlocking {
+        assertNotNull(capturedRequestId, "capturedRequestId should be set from test 2")
+
         val response = client.post(
             "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/getPendingRequests"
         ) {
@@ -184,10 +186,14 @@ class StoreAndForwardTest {
         println("    Pending requests: ${pending.size}")
         assertTrue(pending.isNotEmpty(), "Should have at least one pending request")
 
-        val request = pending.first().jsonObject
-        assertEquals("pending", request["status"]?.jsonPrimitive?.content)
+        // Find our specific request by capturedRequestId (robust against stale state)
+        val request = pending.firstOrNull {
+            it.jsonObject["requestId"]?.jsonPrimitive?.content == capturedRequestId
+        }?.jsonObject
+        assertNotNull(request, "Should find pending request with ID $capturedRequestId")
+        assertEquals("pending", request!!["status"]?.jsonPrimitive?.content)
         assertEquals("create_event", request["toolName"]?.jsonPrimitive?.content)
-        println("    ✓ Pending request verified: tool=create_event, status=pending")
+        println("    ✓ Pending request verified: requestId=$capturedRequestId, tool=create_event, status=pending")
     }
 
     // ── Test 4: Approve → re-call → allowed ──────────────────────────────
@@ -195,16 +201,8 @@ class StoreAndForwardTest {
     @Test
     @Order(4)
     fun `approve then re-call returns allowed`() = runBlocking {
-        // Find the request ID from ServiceGovernance pending list
-        val pendingResp = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/getPendingRequests"
-        ) {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody("{}")
-        }
-        val pending = json.parseToJsonElement(pendingResp.bodyAsText()).jsonArray
-        val requestId = pending.first().jsonObject["requestId"]!!.jsonPrimitive.content
+        assertNotNull(capturedRequestId, "capturedRequestId should be set from test 2")
+        val requestId = capturedRequestId!!
         println("    Approving request: $requestId")
 
         // Approve

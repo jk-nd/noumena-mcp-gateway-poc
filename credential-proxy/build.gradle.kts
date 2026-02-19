@@ -5,6 +5,11 @@ plugins {
     id("com.gradleup.shadow") version "8.3.6"
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 group = "io.noumena.mcp"
 version = "1.0.0"
 

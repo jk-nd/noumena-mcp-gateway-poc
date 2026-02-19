@@ -239,7 +239,7 @@ class NplIntegrationTest {
             it.jsonObject["id"]?.jsonPrimitive?.content == "sales-calendar"
         }
         assertNotNull(salesRule, "Should have sales-calendar rule")
-        assertEquals("claims", salesRule!!.jsonObject["match"]?.jsonObject?.get("matchType")?.jsonPrimitive?.content)
+        assertEquals("claims", salesRule!!.jsonObject["matcher"]?.jsonObject?.get("matchType")?.jsonPrimitive?.content)
         println("    ✓ Added claim-based rule: sales-calendar")
     }
 
@@ -262,8 +262,8 @@ class NplIntegrationTest {
             it.jsonObject["id"]?.jsonPrimitive?.content == "alice-calendar"
         }
         assertNotNull(aliceRule, "Should have alice-calendar rule")
-        assertEquals("identity", aliceRule!!.jsonObject["match"]?.jsonObject?.get("matchType")?.jsonPrimitive?.content)
-        assertEquals("alice@acme.com", aliceRule.jsonObject["match"]?.jsonObject?.get("identity")?.jsonPrimitive?.content)
+        assertEquals("identity", aliceRule!!.jsonObject["matcher"]?.jsonObject?.get("matchType")?.jsonPrimitive?.content)
+        assertEquals("alice@acme.com", aliceRule.jsonObject["matcher"]?.jsonObject?.get("identity")?.jsonPrimitive?.content)
         println("    ✓ Added identity-based rule: alice-calendar")
     }
 

@@ -233,12 +233,25 @@ object NplBootstrap {
                     }
                 }
             }
+            // Create instance (parameterless constructor)
             val createResp = client.post("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
-                setBody("""{"@parties": {}, "serviceName": "$serviceName"}""")
+                setBody("""{"@parties": {}}""")
             }
-            return json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
+            val instanceId = json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
+
+            // Call setup() to set serviceName and transition created → active
+            val initResp = client.post("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$instanceId/setup") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"name": "$serviceName"}""")
+            }
+            if (!initResp.status.isSuccess()) {
+                throw RuntimeException("ServiceGovernance.setup() failed: ${initResp.status} - ${initResp.bodyAsText()}")
+            }
+
+            return instanceId
         } finally {
             client.close()
         }

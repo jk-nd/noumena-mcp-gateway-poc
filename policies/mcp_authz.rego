@@ -133,8 +133,8 @@ caller_authorized if {
 
 access_matches(rule) if {
 	# Claim-based match
-	rule.match.matchType == "claims"
-	every k, v in rule.match.claims {
+	rule.matcher.matchType == "claims"
+	every k, v in rule.matcher.claims {
 		jwt_payload[k] == v
 	}
 	service_match(rule.allow.services)
@@ -143,8 +143,8 @@ access_matches(rule) if {
 
 access_matches(rule) if {
 	# Identity-based match
-	rule.match.matchType == "identity"
-	rule.match.identity == user_id
+	rule.matcher.matchType == "identity"
+	rule.matcher.identity == user_id
 	service_match(rule.allow.services)
 	tool_match(rule.allow.tools)
 }
@@ -374,15 +374,15 @@ granted_service_names contains svc if {
 }
 
 access_rule_matches_caller(rule) if {
-	rule.match.matchType == "claims"
-	every k, v in rule.match.claims {
+	rule.matcher.matchType == "claims"
+	every k, v in rule.matcher.claims {
 		jwt_payload[k] == v
 	}
 }
 
 access_rule_matches_caller(rule) if {
-	rule.match.matchType == "identity"
-	rule.match.identity == user_id
+	rule.matcher.matchType == "identity"
+	rule.matcher.identity == user_id
 }
 
 # --- Structured decision for OPA envoy plugin ---

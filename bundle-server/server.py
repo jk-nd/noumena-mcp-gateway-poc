@@ -150,10 +150,10 @@ def fetch_npl_data() -> dict:
     for rule in bundle_data.get("accessRules", []):
         access_rules.append({
             "id": rule.get("id", ""),
-            "match": {
-                "matchType": rule.get("match", {}).get("matchType", "claims"),
-                "claims": rule.get("match", {}).get("claims", {}),
-                "identity": rule.get("match", {}).get("identity", ""),
+            "matcher": {
+                "matchType": rule.get("matcher", {}).get("matchType", "claims"),
+                "claims": rule.get("matcher", {}).get("claims", {}),
+                "identity": rule.get("matcher", {}).get("identity", ""),
             },
             "allow": {
                 "services": rule.get("allow", {}).get("services", []),

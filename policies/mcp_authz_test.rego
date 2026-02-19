@@ -94,17 +94,17 @@ mock_catalog := {
 mock_access_rules := [
 	{
 		"id": "sales-calendar",
-		"match": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales"}, "identity": ""},
+		"matcher": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales"}, "identity": ""},
 		"allow": {"services": ["mock-calendar"], "tools": ["*"]},
 	},
 	{
 		"id": "engineering-all",
-		"match": {"matchType": "claims", "claims": {"organization": "acme", "department": "engineering"}, "identity": ""},
+		"matcher": {"matchType": "claims", "claims": {"organization": "acme", "department": "engineering"}, "identity": ""},
 		"allow": {"services": ["mock-calendar", "duckduckgo"], "tools": ["*"]},
 	},
 	{
 		"id": "jarvis-duckduckgo",
-		"match": {"matchType": "identity", "claims": {}, "identity": "jarvis@acme.com"},
+		"matcher": {"matchType": "identity", "claims": {}, "identity": "jarvis@acme.com"},
 		"allow": {"services": ["duckduckgo"], "tools": ["search"]},
 	},
 ]
@@ -286,7 +286,7 @@ test_access_rule_identity_tool_mismatch if {
 	identity_only_rules := [
 		{
 			"id": "jarvis-duckduckgo",
-			"match": {"matchType": "identity", "claims": {}, "identity": "jarvis@acme.com"},
+			"matcher": {"matchType": "identity", "claims": {}, "identity": "jarvis@acme.com"},
 			"allow": {"services": ["duckduckgo"], "tools": ["search"]},
 		},
 	]
@@ -563,7 +563,7 @@ test_granted_services_excludes_disabled if {
 	wildcard_rules := [
 		{
 			"id": "all-access",
-			"match": {"matchType": "claims", "claims": {"organization": "acme"}, "identity": ""},
+			"matcher": {"matchType": "claims", "claims": {"organization": "acme"}, "identity": ""},
 			"allow": {"services": ["*"], "tools": ["*"]},
 		},
 	]
@@ -610,7 +610,7 @@ test_wildcard_service_access if {
 	wildcard_rules := [
 		{
 			"id": "admin-all",
-			"match": {"matchType": "claims", "claims": {"role": "user", "organization": "acme"}, "identity": ""},
+			"matcher": {"matchType": "claims", "claims": {"role": "user", "organization": "acme"}, "identity": ""},
 			"allow": {"services": ["*"], "tools": ["*"]},
 		},
 	]

@@ -41,7 +41,7 @@ struct AccessRuleAllow {
  */
 struct AccessRule {
     id: Text,
-    match: AccessRuleMatch,
+    matcher: AccessRuleMatch,
     allow: AccessRuleAllow
 };
 
@@ -209,7 +209,7 @@ protocol[pAdmin, pGateway] GatewayStore() {
 
         var rule = AccessRule(
             id = id,
-            match = AccessRuleMatch(matchType = matchType, claims = matchClaims, identity = matchIdentity),
+            matcher = AccessRuleMatch(matchType = matchType, claims = matchClaims, identity = matchIdentity),
             allow = AccessRuleAllow(services = allowServices, tools = allowTools)
         );
         accessRules = accessRules.with(rule);
