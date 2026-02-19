@@ -1,14 +1,9 @@
-# MCP Gateway Authorization Policy — OPA ext_authz for Envoy AI Gateway
+# MCP Gateway Authorization Policy — v4 Three-Layer Governance
 #
-# Policy data is loaded from OPA bundle (zero network I/O for Layer 1).
-# Bundle server subscribes to NPL SSE and rebuilds on every state change.
-#
-# Two-layer architecture:
-#   Layer 1 (99% of requests, ~1ms):
-#     OPA checks catalog + grants from bundle → allow/deny
-#   Layer 2 (1% of requests, ~60ms):
-#     Layer 1 passes + contextual route matches →
-#     OPA calls NPL evaluate() via http.send → allow/deny/pending
+# Three layers, each answers one question:
+#   Layer 1 — Catalog: Is this service/tool available?
+#   Layer 2 — Access Rules: Is this caller allowed?
+#   Layer 3 — NPL Governance: Does this gated call comply? (runtime NPL call)
 #
 # Fail-closed: default allow = false
 
@@ -21,85 +16,28 @@ import rego.v1
 
 default allow := false
 
-# --- Policy data from OPA bundle (loaded in background, zero network I/O) ---
+# --- Bundle data (loaded in background, zero network I/O) ---
 
 default catalog := {}
 
-default grants := {}
+default access_rules := []
 
-default contextual_routing := {}
+default revoked_subjects := []
 
-default security_policy := {}
+default governance_instances := {}
 
 catalog := data.catalog
 
-grants := data.grants
+access_rules := data.access_rules
 
-contextual_routing := data.contextual_routing
+revoked_subjects := data.revoked_subjects
 
-security_policy := data.security_policy
+governance_instances := data.governance_instances
 
-# --- NPL URL for Layer 2 contextual calls ---
-
-npl_url := opa.runtime().env.NPL_URL
-
-# --- Catalog checks (combined service + tool) ---
-
-service_available(service_name) if {
-	entry := catalog[service_name]
-	entry.enabled == true
-	entry.suspended == false
-}
-
-tool_enabled(service_name, tool_name) if {
-	entry := catalog[service_name]
-	some tool in entry.enabledTools
-	tool == tool_name
-}
-
-service_available_or_no_catalog(service_name) if {
-	catalog[service_name]
-	service_available(service_name)
-}
-
-service_available_or_no_catalog(service_name) if {
-	not catalog[service_name]
-}
-
-tool_enabled_or_no_catalog(service_name, tool_name) if {
-	catalog[service_name]
-	tool_enabled(service_name, tool_name)
-}
-
-tool_enabled_or_no_catalog(service_name, tool_name) if {
-	not catalog[service_name]
-}
-
-# --- Grant checks ---
-
-user_has_tool_access(subject_id, service_name, tool_name) if {
-	some grant in grants[subject_id]
-	grant.serviceName == service_name
-	some tool in grant.allowedTools
-	tool == "*"
-}
-
-user_has_tool_access(subject_id, service_name, tool_name) if {
-	some grant in grants[subject_id]
-	grant.serviceName == service_name
-	some tool in grant.allowedTools
-	tool == tool_name
-}
-
-# Check if user has ANY service access (for stream setup)
-user_has_any_access(subject_id) if {
-	grant_list := grants[subject_id]
-	count(grant_list) > 0
-}
+npl_url := data.npl_url
 
 # --- JWT decoding ---
 
-# Extract the Bearer token from Authorization header
 bearer_token := t if {
 	auth_header := http_request.headers.authorization
 	startswith(auth_header, "Bearer ")
@@ -112,7 +50,6 @@ bearer_token := t if {
 	t := substring(auth_header, 7, -1)
 }
 
-# Decode JWT payload (no signature verification — Envoy jwt_authn already validated)
 jwt_payload := payload if {
 	[_, payload, _] := io.jwt.decode(bearer_token)
 }
@@ -135,10 +72,13 @@ user_id := jwt_payload.sub if {
 
 # --- JSON-RPC body parsing ---
 
-# Parse the request body as JSON-RPC
 parsed_body := json.unmarshal(http_request.body) if {
 	http_request.body
 	http_request.body != ""
+}
+
+is_tool_call if {
+	parsed_body.method == "tools/call"
 }
 
 jsonrpc_method := parsed_body.method if {
@@ -146,58 +86,25 @@ jsonrpc_method := parsed_body.method if {
 	parsed_body.method
 }
 
-jsonrpc_tool_name := parsed_body.params.name if {
-	parsed_body
-	parsed_body.params
+qualified_name := parsed_body.params.name if {
+	is_tool_call
 	parsed_body.params.name
 }
 
-# --- Tool namespace parsing ---
-# "duckduckgo.search" → service=duckduckgo, tool=search
-# "search" → service=null, tool=search
-
-parsed_service_name := service if {
-	jsonrpc_tool_name
-	contains(jsonrpc_tool_name, ".")
-	parts := split(jsonrpc_tool_name, ".")
-	service := parts[0]
+name_parts := split(qualified_name, ".") if {
+	qualified_name
+	contains(qualified_name, ".")
 }
 
-parsed_tool_name := tool if {
-	jsonrpc_tool_name
-	contains(jsonrpc_tool_name, ".")
-	parts := split(jsonrpc_tool_name, ".")
-	tool := concat(".", array.slice(parts, 1, count(parts)))
+service_name := name_parts[0] if {
+	name_parts
 }
 
-parsed_tool_name := jsonrpc_tool_name if {
-	jsonrpc_tool_name
-	not contains(jsonrpc_tool_name, ".")
+tool_name := concat(".", array.slice(name_parts, 1, count(name_parts))) if {
+	name_parts
 }
 
-# For non-namespaced tools, find the service by searching user grant entries
-resolved_service_name := parsed_service_name if {
-	parsed_service_name
-}
-
-resolved_service_name := svc if {
-	not parsed_service_name
-	jsonrpc_tool_name
-	some grant in grants[user_id]
-	svc := grant.serviceName
-	some tool in grant.allowedTools
-	tool_matches(tool, parsed_tool_name)
-}
-
-tool_matches(allowed_tool, requested_tool) if {
-	allowed_tool == "*"
-}
-
-tool_matches(allowed_tool, requested_tool) if {
-	allowed_tool == requested_tool
-}
-
-# --- MCP Session ID extraction ---
+# --- MCP Session ID ---
 
 mcp_session_id := http_request.headers["mcp-session-id"] if {
 	http_request.headers["mcp-session-id"]
@@ -205,407 +112,76 @@ mcp_session_id := http_request.headers["mcp-session-id"] if {
 
 default mcp_session_id := ""
 
-# --- Contextual routing (Layer 2) ---
-# Find route group: specific tool > wildcard
-# Supports both legacy single-route shape and new RouteGroup shape.
+# --- Layer 1: Catalog check ---
 
-contextual_route_group := contextual_routing[resolved_service_name][parsed_tool_name]
-
-contextual_route_group := contextual_routing[resolved_service_name]["*"] if {
-	not contextual_routing[resolved_service_name][parsed_tool_name]
+service_enabled if {
+	catalog[service_name].enabled == true
 }
 
-# Legacy compatibility: detect if contextual_route_group is a single ContextualRoute (no "mode" field)
-is_legacy_route if {
-	contextual_route_group
-	contextual_route_group.policyProtocol
-	not contextual_route_group.mode
+tool_in_catalog if {
+	catalog[service_name].tools[tool_name]
 }
 
-# Normalize to a list of routes for evaluation
-route_group_mode := "single" if {
-	is_legacy_route
+tool_tag := catalog[service_name].tools[tool_name].tag
+
+# --- Layer 2: Access rules ---
+
+caller_authorized if {
+	some rule in access_rules
+	access_matches(rule)
 }
 
-route_group_mode := contextual_route_group.mode if {
-	not is_legacy_route
-	contextual_route_group.mode
-}
-
-route_group_routes := [contextual_route_group] if {
-	is_legacy_route
-}
-
-route_group_routes := contextual_route_group.routes if {
-	not is_legacy_route
-	contextual_route_group.routes
-}
-
-# For backward compat: contextual_route still used in guards to detect "has a route"
-contextual_route := contextual_route_group if {
-	contextual_route_group
-}
-
-# --- Security Policy Evaluation ---
-# Classifies tools/call requests into MCP annotations + verb + labels
-# and evaluates security policy rules to determine allow/deny/npl_evaluate.
-
-# Check if security policies are configured
-has_security_policies if {
-	security_policy.policies
-	count(security_policy.policies) > 0
-}
-
-# Lookup tool annotation from security policy bundle
-sp_tool_entry := security_policy.tool_annotations[resolved_service_name][parsed_tool_name] if {
-	security_policy.tool_annotations
-	security_policy.tool_annotations[resolved_service_name]
-	security_policy.tool_annotations[resolved_service_name][parsed_tool_name]
-}
-
-# --- Tool-name pattern fallback (when no explicit annotation exists) ---
-
-verb_prefix_map := {
-	"read_": "get",
-	"get_": "get",
-	"list_": "list",
-	"search_": "get",
-	"fetch_": "get",
-	"create_": "create",
-	"send_": "create",
-	"add_": "create",
-	"update_": "update",
-	"edit_": "update",
-	"modify_": "update",
-	"delete_": "delete",
-	"remove_": "delete",
-	"revoke_": "delete",
-}
-
-fallback_verb := v if {
-	some prefix, v in verb_prefix_map
-	startswith(parsed_tool_name, prefix)
-}
-
-# --- Resolved annotations ---
-
-# readOnlyHint: from security policy or fallback (get/list tools are read-only)
-resolved_read_only_hint if {
-	sp_tool_entry
-	sp_tool_entry.annotations.readOnlyHint == true
-}
-
-resolved_read_only_hint if {
-	not sp_tool_entry
-	fallback_verb in {"get", "list"}
-}
-
-default resolved_read_only_hint := false
-
-# destructiveHint: from security policy or fallback (delete tools are destructive)
-resolved_destructive_hint if {
-	sp_tool_entry
-	sp_tool_entry.annotations.destructiveHint == true
-}
-
-resolved_destructive_hint if {
-	not sp_tool_entry
-	fallback_verb == "delete"
-}
-
-default resolved_destructive_hint := false
-
-# idempotentHint: from security policy or fallback (get/list are idempotent)
-resolved_idempotent_hint if {
-	sp_tool_entry
-	sp_tool_entry.annotations.idempotentHint == true
-}
-
-resolved_idempotent_hint if {
-	not sp_tool_entry
-	fallback_verb in {"get", "list"}
-}
-
-default resolved_idempotent_hint := false
-
-# openWorldHint: from security policy only (no fallback)
-resolved_open_world_hint if {
-	sp_tool_entry
-	sp_tool_entry.annotations.openWorldHint == true
-}
-
-default resolved_open_world_hint := false
-
-# --- Resolved verb ---
-
-resolved_verb := sp_tool_entry.verb if {
-	sp_tool_entry
-	sp_tool_entry.verb
-}
-
-resolved_verb := fallback_verb if {
-	not sp_tool_entry
-	fallback_verb
-}
-
-# --- Argument classifiers ---
-
-# Classifier with "contains" condition
-classifier_rule_matches(rule) if {
-	rule.contains
-	arguments := parsed_body.params.arguments
-	field_value := arguments[rule.field]
-	contains(field_value, rule.contains)
-}
-
-# Classifier with "not_contains" condition
-classifier_rule_matches(rule) if {
-	rule.not_contains
-	arguments := parsed_body.params.arguments
-	field_value := arguments[rule.field]
-	not contains(field_value, rule.not_contains)
-}
-
-# Classifier with "present: true" condition
-classifier_rule_matches(rule) if {
-	rule.present == true
-	arguments := parsed_body.params.arguments
-	arguments[rule.field]
-}
-
-# Classifier with "present: false" condition
-classifier_rule_matches(rule) if {
-	rule.present == false
-	arguments := parsed_body.params.arguments
-	not arguments[rule.field]
-}
-
-# Classifier with "greater_than" condition (numeric comparison)
-classifier_rule_matches(rule) if {
-	rule.greater_than
-	arguments := parsed_body.params.arguments
-	field_value := arguments[rule.field]
-	to_number(field_value) > rule.greater_than
-}
-
-# Classifier with "less_than" condition (numeric comparison)
-classifier_rule_matches(rule) if {
-	rule.less_than
-	arguments := parsed_body.params.arguments
-	field_value := arguments[rule.field]
-	to_number(field_value) < rule.less_than
-}
-
-# Classifier with "equals_value" condition (string or numeric equality)
-classifier_rule_matches(rule) if {
-	rule.equals_value
-	arguments := parsed_body.params.arguments
-	field_value := arguments[rule.field]
-	sprintf("%v", [field_value]) == sprintf("%v", [rule.equals_value])
-}
-
-# --- Value extractors ---
-# Extract argument values into labels for Layer 2 NPL evaluation.
-# Format: arg:<field>:<value>
-
-extracted_value_labels contains label if {
-	security_policy.value_extractors
-	security_policy.value_extractors[resolved_service_name]
-	some extractor in security_policy.value_extractors[resolved_service_name][parsed_tool_name]
-	arguments := parsed_body.params.arguments
-	field_value := arguments[extractor.field]
-	label := sprintf("%s:%v", [extractor.label_prefix, field_value])
-}
-
-# --- Resolved labels ---
-
-# Static labels from security policy tool entry
-resolved_labels contains label if {
-	sp_tool_entry
-	some label in sp_tool_entry.labels
-}
-
-# Dynamic labels from argument classifiers
-resolved_labels contains label if {
-	security_policy.classifiers
-	security_policy.classifiers[resolved_service_name]
-	some rule in security_policy.classifiers[resolved_service_name][parsed_tool_name]
-	classifier_rule_matches(rule)
-	some label in rule.set_labels
-}
-
-# Labels from value extractors (for Layer 2 NPL protocols)
-resolved_labels contains label if {
-	some label in extracted_value_labels
-}
-
-# --- Policy condition matching ---
-
-condition_met("readOnlyHint", val) if {
-	val == resolved_read_only_hint
-}
-
-condition_met("destructiveHint", val) if {
-	val == resolved_destructive_hint
-}
-
-condition_met("idempotentHint", val) if {
-	val == resolved_idempotent_hint
-}
-
-condition_met("openWorldHint", val) if {
-	val == resolved_open_world_hint
-}
-
-condition_met("verb", val) if {
-	val == resolved_verb
-}
-
-condition_met("labels", required_labels) if {
-	every label in required_labels {
-		label in resolved_labels
+access_matches(rule) if {
+	# Claim-based match
+	rule.match.matchType == "claims"
+	every k, v in rule.match.claims {
+		jwt_payload[k] == v
 	}
+	service_match(rule.allow.services)
+	tool_match(rule.allow.tools)
 }
 
-# --- Policy rule matching ---
-
-# Default match semantics: "all" (every condition must be met)
-policy_matches(policy) if {
-	not policy.match
-	every key, val in policy.when {
-		condition_met(key, val)
-	}
+access_matches(rule) if {
+	# Identity-based match
+	rule.match.matchType == "identity"
+	rule.match.identity == user_id
+	service_match(rule.allow.services)
+	tool_match(rule.allow.tools)
 }
 
-policy_matches(policy) if {
-	policy.match == "all"
-	every key, val in policy.when {
-		condition_met(key, val)
-	}
+service_match(services) if {
+	some s in services
+	s == "*"
 }
 
-# Alternative match semantics: "any" (at least one condition must be met)
-policy_matches(policy) if {
-	policy.match == "any"
-	count(policy.when) > 0
-	some key, val in policy.when
-	condition_met(key, val)
+service_match(services) if {
+	some s in services
+	s == service_name
 }
 
-# Collect all matching policies
-matching_policies contains policy if {
-	some policy in security_policy.policies
-	policy_matches(policy)
+tool_match(tools) if {
+	some t in tools
+	t == "*"
 }
 
-# Winning priority: lowest number among matching policies
-sp_winning_priority := min({p.priority | some p in matching_policies})
-
-# Action from the highest-priority matching policy
-sp_action := p.action if {
-	some p in matching_policies
-	p.priority == sp_winning_priority
+tool_match(tools) if {
+	some t in tools
+	t == tool_name
 }
 
-# Fallback: no matching policy → default allow
-sp_action := "allow" if {
-	has_security_policies
-	count(matching_policies) == 0
+# --- Revocation check ---
+
+caller_not_revoked if {
+	not user_id in revoked_subjects
 }
 
-# Name of the matched rule (for debugging/tracing)
-sp_matched_rule := p.name if {
-	some p in matching_policies
-	p.priority == sp_winning_priority
-}
-
-sp_matched_rule := "no matching policy (default allow)" if {
-	has_security_policies
-	count(matching_policies) == 0
-}
-
-# Approvers from the winning security policy rule (for npl_evaluate)
-sp_approvers := p.approvers if {
-	some p in matching_policies
-	p.priority == sp_winning_priority
-	p.approvers
-}
-
-default sp_approvers := []
-
-# --- NPL body enrichment ---
-# Serialize resolved classification for contextual policy calls
-
-sp_verb_for_npl := resolved_verb if {
-	resolved_verb
-}
-
-default sp_verb_for_npl := ""
-
-active_annotation_hints contains "readOnlyHint" if {
-	resolved_read_only_hint
-}
-
-active_annotation_hints contains "destructiveHint" if {
-	resolved_destructive_hint
-}
-
-active_annotation_hints contains "idempotentHint" if {
-	resolved_idempotent_hint
-}
-
-active_annotation_hints contains "openWorldHint" if {
-	resolved_open_world_hint
-}
-
-sp_annotations_text := concat(",", sort(active_annotation_hints))
-
-sp_labels_text := concat(",", sort(resolved_labels))
-
-argument_digest := crypto.sha256(json.marshal(parsed_body.params.arguments)) if {
-	parsed_body.params
-	parsed_body.params.arguments
-}
-
-default argument_digest := ""
-
-# --- Security policy decision ---
-
-# Allow if no security policies are configured (backward compatible)
-security_policy_allows if {
-	not has_security_policies
-}
-
-# Allow if the winning policy action is "allow"
-security_policy_allows if {
-	has_security_policies
-	sp_action == "allow"
-}
-
-# Allow npl_evaluate to proceed to Layer 2 if a contextual route exists
-# (The registered NPL protocol will evaluate the request)
-security_policy_allows if {
-	has_security_policies
-	sp_action == "npl_evaluate"
-	contextual_route
-}
-
-# --- Allow rules ---
-
-# Rule 1: Stream setup (GET /mcp — empty body, SSE notification stream)
-# User must be authenticated and have at least some tool access
-allow if {
-	is_stream_setup
-	user_id
-	user_has_any_access(user_id)
-}
+# --- Stream setup detection ---
 
 is_stream_setup if {
 	http_request.method == "GET"
 	contains(http_request.path, "/mcp")
 }
 
-# Also allow stream setup if body is empty on POST (shouldn't happen but be safe)
 is_stream_setup if {
 	not parsed_body
 	not http_request.body
@@ -615,315 +191,201 @@ is_stream_setup if {
 	http_request.body == ""
 }
 
-# Rule 2: Non-tool-call methods — allow through
-# initialize, tools/list, ping, notifications/*, completion/complete
+# --- Allow: Stream setup (GET /mcp) ---
+
+allow if {
+	is_stream_setup
+	bearer_token
+	user_id
+}
+
+# --- Allow: Non-tool-call methods (initialize, tools/list, ping, etc.) ---
+
 allow if {
 	not is_stream_setup
 	jsonrpc_method
 	jsonrpc_method != "tools/call"
+	bearer_token
 }
 
-# Rule 3a: tools/call — fast path (no contextual route)
+# --- Allow: Open tools (catalog + access rules sufficient) ---
+
 allow if {
 	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+	is_tool_call
+	service_name
+	tool_name
 	user_id
-	resolved_service_name
-
-	# Catalog checks
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-
-	# Grant check
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-
-	# No contextual route — fast path
-	not contextual_route
-
-	# Security policy check
-	security_policy_allows
+	service_enabled
+	tool_in_catalog
+	tool_tag == "open"
+	caller_authorized
+	caller_not_revoked
 }
 
-# Rule 3a-sp: tools/call — security policy explicitly allows, skip contextual route
-# When the security policy says "allow", the decision is final — no need for Layer 2.
-# Contextual routes are only used for "npl_evaluate" (delegated to NPL protocols).
+# --- Allow: Gated tools (requires NPL allow) ---
+
 allow if {
 	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+	is_tool_call
+	service_name
+	tool_name
 	user_id
-	resolved_service_name
-
-	# Catalog checks
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-
-	# Grant check
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-
-	# Security policy explicitly allows — overrides contextual route
-	has_security_policies
-	sp_action == "allow"
+	service_enabled
+	tool_in_catalog
+	tool_tag == "gated"
+	caller_authorized
+	caller_not_revoked
+	npl_decision.decision == "allow"
 }
 
-# Rule 3b: tools/call — contextual route (Layer 2: call NPL evaluate())
-allow if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
-	user_id
-	resolved_service_name
+# --- NPL evaluate call (gated path only) ---
 
-	# Catalog checks
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-
-	# Grant check
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-
-	# Security policy check (before NPL call to avoid unnecessary network I/O)
-	security_policy_allows
-
-	# Contextual route exists — check NPL evaluate response
-	contextual_route
-	npl_evaluate_response == "allow"
+npl_instance_id := governance_instances[service_name] if {
+	governance_instances[service_name]
 }
 
-# --- NPL evaluate() helpers ---
+# Flatten JWT claims to simple key-value map for NPL
+caller_claims_flat[k] := v if {
+	some k, v in jwt_payload
+	is_string(v)
+}
 
-# Call a single NPL route and return its response body
-call_npl_evaluate(route) := http.send({
+npl_response := http.send({
 	"method": "POST",
-	"url": sprintf("%s%s", [npl_url, route.endpoint]),
+	"url": sprintf("%s/npl/governance/ServiceGovernance/%s/evaluate", [npl_url, npl_instance_id]),
 	"headers": {
 		"Authorization": sprintf("Bearer %s", [data.gateway_token]),
 		"Content-Type": "application/json",
 	},
 	"body": {
-		"toolName": parsed_tool_name,
+		"toolName": tool_name,
 		"callerIdentity": user_id,
+		"callerClaims": caller_claims_flat,
+		"arguments": json.marshal(object.get(parsed_body, ["params", "arguments"], {})),
 		"sessionId": mcp_session_id,
-		"verb": sp_verb_for_npl,
-		"labels": sp_labels_text,
-		"annotations": sp_annotations_text,
-		"argumentDigest": argument_digest,
-		"approvers": sp_approvers,
 		"requestPayload": json.marshal(parsed_body),
-		"serviceName": resolved_service_name,
 	},
 	"timeout": "5s",
-}).body
-
-# Collect all route evaluation results
-route_results := [call_npl_evaluate(route) | some route in route_group_routes]
-
-# Evaluate route group by mode
-# "single" mode: single route result
-npl_evaluate_response := route_results[0] if {
-	contextual_route
-	route_group_mode == "single"
-	count(route_results) > 0
+}) if {
+	npl_instance_id
 }
 
-# "and" mode: all must return "allow". Short-circuit: any non-allow returns that result.
-npl_evaluate_response := "allow" if {
-	contextual_route
-	route_group_mode == "and"
-	count(route_results) > 0
-	every r in route_results {
-		r == "allow"
-	}
+npl_decision := npl_response.body if {
+	npl_response
+	npl_response.status_code == 200
 }
 
-npl_evaluate_response := first_non_allow if {
-	contextual_route
-	route_group_mode == "and"
-	count(route_results) > 0
-	some r in route_results
-	r != "allow"
-	first_non_allow := r
+# --- Response headers ---
+
+# Reason for denial
+reason := "No authentication" if {
+	not bearer_token
 }
 
-# "or" mode: first "allow" wins. If none allow, return last result.
-npl_evaluate_response := "allow" if {
-	contextual_route
-	route_group_mode == "or"
-	count(route_results) > 0
-	some r in route_results
-	r == "allow"
-}
-
-npl_evaluate_response := route_results[minus(count(route_results), 1)] if {
-	contextual_route
-	route_group_mode == "or"
-	count(route_results) > 0
-	not "allow" in {r | some r in route_results}
-}
-
-# Fallback: direct http.send for backward compat when routes come through unrecognized shapes
-npl_evaluate_response := resp if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
-	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-	security_policy_allows
-	contextual_route
-	is_legacy_route
-	resp := call_npl_evaluate(contextual_route)
-}
-
-# Extract approval ID from "pending:<id>" response
-pending_approval_id := substring(npl_evaluate_response, 8, -1) if {
-	npl_evaluate_response
-	startswith(npl_evaluate_response, "pending:")
-}
-
-# --- Response headers for debugging ---
-
-# Provide reason in response headers when denying
-reason := "Stream setup: user has no service access" if {
-	is_stream_setup
-	user_id
-	not user_has_any_access(user_id)
-}
-
-reason := "Stream setup: no user identity" if {
-	is_stream_setup
+reason := "No user identity" if {
+	bearer_token
 	not user_id
 }
 
-reason := "tools/call: missing tool name" if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	not jsonrpc_tool_name
-}
-
-reason := "tools/call: no user identity" if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
-	not user_id
-}
-
-reason := sprintf("tools/call: service '%s' not available", [resolved_service_name]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+reason := sprintf("Service '%s' not in catalog or disabled", [service_name]) if {
+	is_tool_call
+	service_name
 	user_id
-	resolved_service_name
-	not service_available_or_no_catalog(resolved_service_name)
+	not service_enabled
 }
 
-reason := sprintf("tools/call: tool '%s' not enabled for service '%s'", [parsed_tool_name, resolved_service_name]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+reason := sprintf("Tool '%s' not in catalog for service '%s'", [tool_name, service_name]) if {
+	is_tool_call
+	service_name
 	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	catalog[resolved_service_name]
-	not tool_enabled(resolved_service_name, parsed_tool_name)
+	service_enabled
+	not tool_in_catalog
 }
 
-reason := sprintf("tools/call: user '%s' has no access to %s.%s", [user_id, resolved_service_name, parsed_tool_name]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+reason := sprintf("User '%s' not authorized by any access rule", [user_id]) if {
+	is_tool_call
+	service_name
 	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-	not user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
+	service_enabled
+	tool_in_catalog
+	not caller_authorized
 }
 
-reason := sprintf("tools/call: denied by security policy '%s'", [sp_matched_rule]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+reason := sprintf("User '%s' is revoked", [user_id]) if {
+	is_tool_call
+	service_name
 	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-	has_security_policies
-	not security_policy_allows
-	sp_action != "npl_evaluate"
+	service_enabled
+	tool_in_catalog
+	caller_authorized
+	not caller_not_revoked
 }
 
-reason := sprintf("tools/call: npl_evaluate by '%s' but no contextual route configured", [sp_matched_rule]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+reason := sprintf("Gated tool pending: %s", [npl_decision.requestId]) if {
+	is_tool_call
+	service_name
 	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-	has_security_policies
-	sp_action == "npl_evaluate"
-	not contextual_route
+	service_enabled
+	tool_in_catalog
+	tool_tag == "gated"
+	caller_authorized
+	caller_not_revoked
+	npl_decision
+	npl_decision.decision == "pending"
 }
 
-reason := sprintf("tools/call: contextual route pending %s (policy '%s')", [pending_approval_id, sp_matched_rule]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
+reason := sprintf("Gated tool denied: %s", [npl_decision.message]) if {
+	is_tool_call
+	service_name
 	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-	has_security_policies
-	sp_action == "npl_evaluate"
-	contextual_route
-	pending_approval_id
-}
-
-reason := sprintf("tools/call: contextual route denied (policy '%s')", [sp_matched_rule]) if {
-	not is_stream_setup
-	jsonrpc_method == "tools/call"
-	jsonrpc_tool_name
-	user_id
-	resolved_service_name
-	service_available_or_no_catalog(resolved_service_name)
-	tool_enabled_or_no_catalog(resolved_service_name, parsed_tool_name)
-	user_has_tool_access(user_id, resolved_service_name, parsed_tool_name)
-	has_security_policies
-	sp_action == "npl_evaluate"
-	contextual_route
-	npl_evaluate_response
-	npl_evaluate_response != "allow"
-	not startswith(npl_evaluate_response, "pending:")
+	service_enabled
+	tool_in_catalog
+	tool_tag == "gated"
+	caller_authorized
+	caller_not_revoked
+	npl_decision
+	npl_decision.decision == "deny"
 }
 
 reason := "Authorized" if {
 	allow
 }
 
-# --- Granted service names (for tools/list filtering) ---
+# --- Granted services computation (for tools/list filtering) ---
 
-# Compute the set of service names the user has grants for,
-# filtered by catalog availability (suspended/disabled services excluded)
 granted_service_names contains svc if {
 	user_id
-	some grant in grants[user_id]
-	svc := grant.serviceName
-	service_available_or_no_catalog(svc)
+	some rule in access_rules
+	access_rule_matches_caller(rule)
+	some svc in rule.allow.services
+	svc != "*"
+	catalog[svc].enabled == true
+}
+
+granted_service_names contains svc if {
+	user_id
+	some rule in access_rules
+	access_rule_matches_caller(rule)
+	some s in rule.allow.services
+	s == "*"
+	some svc, entry in catalog
+	entry.enabled == true
+}
+
+access_rule_matches_caller(rule) if {
+	rule.match.matchType == "claims"
+	every k, v in rule.match.claims {
+		jwt_payload[k] == v
+	}
+}
+
+access_rule_matches_caller(rule) if {
+	rule.match.matchType == "identity"
+	rule.match.identity == user_id
 }
 
 # --- Structured decision for OPA envoy plugin ---
-# The envoy plugin only processes headers when the result is an object.
-# Boolean results (allow = true/false) bypass header injection.
-#
-# gRPC ext_authz behavior:
-#   allowed=true  → "headers" sent upstream, "response_headers_to_add" sent downstream
-#   allowed=false → "headers" included in denial response, "response_headers_to_add" IGNORED
-# So for denied requests, we merge response_headers into headers.
 
 result := {"allowed": true, "headers": headers, "response_headers_to_add": response_headers} if {
 	allow
@@ -951,58 +413,30 @@ response_headers["x-authz-reason"] := reason if {
 
 # --- Upstream request headers ---
 
-# Pass user identity to upstream (for aggregator filtering and traceability)
 headers["x-user-id"] := user_id if {
 	user_id
 }
 
-# Pass granted services for tools/list filtering — aggregator only fans out to these
 headers["x-granted-services"] := concat(",", sort(granted_service_names)) if {
 	jsonrpc_method == "tools/list"
 	user_id
 }
 
-# Pass resolved service name as upstream header (useful for aggregator debugging)
-headers["x-mcp-service"] := resolved_service_name if {
-	resolved_service_name
+headers["x-mcp-service"] := service_name if {
+	service_name
 }
 
-# Pass bundle revision for decision traceability
 headers["x-bundle-revision"] := data._bundle_metadata.revision if {
 	data._bundle_metadata.revision
 }
 
-# Security policy evaluation headers (for debugging/tracing)
-response_headers["x-sp-action"] := sp_action if {
-	has_security_policies
-	sp_action
-}
-
-response_headers["x-sp-rule"] := sp_matched_rule if {
-	has_security_policies
-	sp_matched_rule
-}
-
-response_headers["x-sp-verb"] := resolved_verb if {
-	has_security_policies
-	resolved_verb
-}
-
-response_headers["x-sp-labels"] := concat(",", sort(resolved_labels)) if {
-	has_security_policies
-	count(resolved_labels) > 0
-}
-
-# Approval pending: return approval ID and retry hint
-response_headers["x-approval-id"] := pending_approval_id if {
-	pending_approval_id
+# Pending: return request ID and retry hint
+response_headers["x-request-id"] := npl_decision.requestId if {
+	npl_decision
+	npl_decision.decision == "pending"
 }
 
 response_headers["retry-after"] := "30" if {
-	pending_approval_id
-}
-
-# Security policy version for traceability
-response_headers["x-sp-version"] := data._bundle_metadata.security_policy_version if {
-	data._bundle_metadata.security_policy_version != null
+	npl_decision
+	npl_decision.decision == "pending"
 }

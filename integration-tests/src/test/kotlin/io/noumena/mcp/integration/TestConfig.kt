@@ -29,6 +29,8 @@ object TestConfig {
     // Named users for OPA/NPL tests
     val jarvisUsername = "jarvis"
     val aliceUsername = "alice"
+    val bobUsername = "bob"
+    val carolUsername = "carol"
     val gatewayUsername = "gateway"
     val defaultPassword = "Welcome123"
 }
@@ -111,23 +113,24 @@ fun buildJsonRpc(id: Int, method: String, params: String = "{}"): String {
 }
 
 /**
- * Idempotent NPL bootstrap helpers for PolicyStore singleton (find-or-create pattern).
- * Used by EndToEndTest to set up OPA-required NPL state.
+ * Idempotent NPL bootstrap helpers for v4 GatewayStore singleton (find-or-create pattern).
  *
- * PolicyStore is a unified singleton that replaces ServiceRegistry, ToolPolicy,
- * UserToolAccess, and UserRegistry. Bundle server reads everything in 2 HTTP calls.
+ * GatewayStore holds:
+ *   - Catalog: services + tools with open/gated tags
+ *   - Access rules: claim-based and identity-based
+ *   - Emergency revocation
  */
 object NplBootstrap {
 
     private val json = TestClient.json
 
-    /** Find or create the PolicyStore singleton. Returns the instance ID. */
-    suspend fun ensurePolicyStore(adminToken: String): String {
+    /** Find or create the GatewayStore singleton. Returns the instance ID. */
+    suspend fun ensureGatewayStore(adminToken: String): String {
         val client = HttpClient(CIO) {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            val listResp = client.get("${TestConfig.nplUrl}/npl/store/PolicyStore/") {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/store/GatewayStore/") {
                 header("Authorization", "Bearer $adminToken")
             }
             if (listResp.status.isSuccess()) {
@@ -136,7 +139,7 @@ object NplBootstrap {
                     return items[0].jsonObject["@id"]!!.jsonPrimitive.content
                 }
             }
-            val createResp = client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/") {
+            val createResp = client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"@parties": {}}""")
@@ -147,56 +150,95 @@ object NplBootstrap {
         }
     }
 
-    /** Register and enable a service in the catalog (idempotent — ignores already-registered errors). */
-    suspend fun ensureCatalogService(storeId: String, serviceName: String, adminToken: String) {
+    /** Register a service with tools and tags in one go (idempotent). */
+    suspend fun registerServiceWithTools(
+        storeId: String,
+        serviceName: String,
+        tools: Map<String, String>,  // toolName -> tag (open/gated)
+        adminToken: String
+    ) {
         val client = HttpClient(CIO) {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            // Register (ignore if already exists)
-            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/registerService") {
+            // Register service (ignore if already exists)
+            client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/registerService") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"serviceName": "$serviceName"}""")
             }
-            // Enable
-            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/enableService") {
+            // Enable service
+            client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/enableService") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"serviceName": "$serviceName"}""")
+            }
+            // Register tools with tags
+            for ((toolName, tag) in tools) {
+                client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/registerTool") {
+                    header("Authorization", "Bearer $adminToken")
+                    contentType(ContentType.Application.Json)
+                    setBody("""{"serviceName": "$serviceName", "toolName": "$toolName", "tag": "$tag"}""")
+                }
             }
         } finally {
             client.close()
         }
     }
 
-    /** Enable a tool for a service in the catalog (idempotent). */
-    suspend fun ensureCatalogToolEnabled(storeId: String, serviceName: String, toolName: String, adminToken: String) {
+    /** Add an access rule to GatewayStore. */
+    suspend fun addAccessRule(
+        storeId: String,
+        id: String,
+        matchType: String,
+        matchClaims: Map<String, String> = emptyMap(),
+        matchIdentity: String = "",
+        allowServices: List<String>,
+        allowTools: List<String>,
+        adminToken: String
+    ) {
         val client = HttpClient(CIO) {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/enableTool") {
+            val claimsJson = matchClaims.entries.joinToString(",") { (k, v) -> "\"$k\":\"$v\"" }
+            val servicesJson = allowServices.joinToString(",") { "\"$it\"" }
+            val toolsJson = allowTools.joinToString(",") { "\"$it\"" }
+            client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/addAccessRule") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
-                setBody("""{"serviceName": "$serviceName", "toolName": "$toolName"}""")
+                setBody("""{"id":"$id","matchType":"$matchType","matchClaims":{$claimsJson},"matchIdentity":"$matchIdentity","allowServices":[$servicesJson],"allowTools":[$toolsJson]}""")
             }
         } finally {
             client.close()
         }
     }
 
-    /** Grant wildcard (*) access to all tools on a service for a user (idempotent). */
-    suspend fun ensureGrantAll(storeId: String, subjectId: String, serviceName: String, adminToken: String) {
+    /** Find or create a ServiceGovernance instance for a service. Returns the instance ID. */
+    suspend fun ensureServiceGovernance(serviceName: String, adminToken: String): String {
         val client = HttpClient(CIO) {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            client.post("${TestConfig.nplUrl}/npl/store/PolicyStore/$storeId/grantAllToolsForService") {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/") {
+                header("Authorization", "Bearer $adminToken")
+            }
+            if (listResp.status.isSuccess()) {
+                val items = json.parseToJsonElement(listResp.bodyAsText()).jsonObject["items"]?.jsonArray
+                if (items != null) {
+                    for (item in items) {
+                        if (item.jsonObject["serviceName"]?.jsonPrimitive?.content == serviceName) {
+                            return item.jsonObject["@id"]!!.jsonPrimitive.content
+                        }
+                    }
+                }
+            }
+            val createResp = client.post("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
-                setBody("""{"subjectId": "$subjectId", "serviceName": "$serviceName"}""")
+                setBody("""{"@parties": {}, "serviceName": "$serviceName"}""")
             }
+            return json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
         } finally {
             client.close()
         }

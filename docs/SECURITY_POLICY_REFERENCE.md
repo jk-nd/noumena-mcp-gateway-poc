@@ -1,3 +1,5 @@
+> **DEPRECATED**: The security policy YAML DSL (`mcp-security.yaml`) has been removed in v4. Tool governance is now managed via open/gated tags in the GatewayStore catalog. See [DESIGN_V4_SIMPLIFIED_GOVERNANCE.md](DESIGN_V4_SIMPLIFIED_GOVERNANCE.md).
+
 # Security Policy Schema Reference
 
 Complete reference for the `mcp-security.yaml` file format, tool annotations, classifiers, and policy rules.

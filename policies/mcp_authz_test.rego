@@ -1,9 +1,11 @@
-# Unit tests for MCP Gateway authorization policy
+# Unit tests for MCP Gateway v4 authorization policy
 #
 # Run with: opa test policies/ -v
 #
-# These tests use mock input (simulating Envoy ext_authz requests)
-# and mock policy data (catalog + grants from OPA bundle).
+# Tests the three-layer governance model:
+#   Layer 1 — Catalog (open/gated tags)
+#   Layer 2 — Access Rules (claim-based + identity-based)
+#   Layer 3 — NPL Governance (gated tool evaluation)
 
 package envoy.authz
 
@@ -25,9 +27,7 @@ mock_input_no_auth(method, path, body) := {"attributes": {"request": {"http": {
 	"body": body,
 }}}}
 
-# A valid JWT payload for jarvis@acme.com (base64url-encoded, not signed — OPA only decodes)
-# {"sub":"04c28d5a-7ac3-4ce8-b51e-04b4a36ba4d2","email":"jarvis@acme.com","preferred_username":"jarvis"}
-# We use io.jwt.encode_sign with a dummy key for test tokens.
+# Test JWTs (HS256 with dummy key — Envoy already validated signature)
 
 mock_jwt_jarvis := token if {
 	header := {"alg": "HS256", "typ": "JWT"}
@@ -35,6 +35,9 @@ mock_jwt_jarvis := token if {
 		"sub": "04c28d5a-7ac3-4ce8-b51e-04b4a36ba4d2",
 		"email": "jarvis@acme.com",
 		"preferred_username": "jarvis",
+		"organization": "acme",
+		"department": "sales",
+		"role": "user",
 	}
 	token := io.jwt.encode_sign(header, payload, {"kty": "oct", "k": "dGVzdC1zZWNyZXQta2V5LWZvci1vcGEtdW5pdC10ZXN0cw"})
 }
@@ -45,6 +48,9 @@ mock_jwt_alice := token if {
 		"sub": "64d75a3e-25b1-4455-ab7c-21aee1259ed3",
 		"email": "alice@acme.com",
 		"preferred_username": "alice",
+		"organization": "acme",
+		"department": "engineering",
+		"role": "user",
 	}
 	token := io.jwt.encode_sign(header, payload, {"kty": "oct", "k": "dGVzdC1zZWNyZXQta2V5LWZvci1vcGEtdW5pdC10ZXN0cw"})
 }
@@ -53,52 +59,62 @@ mock_jwt_unknown := token if {
 	header := {"alg": "HS256", "typ": "JWT"}
 	payload := {
 		"sub": "unknown-user-id",
-		"email": "unknown@acme.com",
+		"email": "unknown@external.com",
 		"preferred_username": "unknown",
+		"organization": "external",
+		"department": "none",
+		"role": "user",
 	}
 	token := io.jwt.encode_sign(header, payload, {"kty": "oct", "k": "dGVzdC1zZWNyZXQta2V5LWZvci1vcGEtdW5pdC10ZXN0cw"})
 }
 
 mock_bearer(jwt) := sprintf("Bearer %s", [jwt])
 
-# --- Mock policy data (catalog + grants) ---
+# --- Mock v4 catalog (services + tools with tags) ---
 
 mock_catalog := {
-	"duckduckgo": {
-		"enabled": true,
-		"enabledTools": ["search", "fetch_content"],
-		"suspended": false,
-		"metadata": {},
-	},
 	"mock-calendar": {
 		"enabled": true,
-		"enabledTools": ["list_events", "create_event"],
-		"suspended": false,
-		"metadata": {},
+		"tools": {
+			"list_events": {"tag": "open"},
+			"create_event": {"tag": "gated"},
+		},
 	},
-}
-
-mock_suspended_catalog := {
 	"duckduckgo": {
 		"enabled": true,
-		"enabledTools": ["search"],
-		"suspended": true,
-		"metadata": {},
+		"tools": {
+			"search": {"tag": "open"},
+			"fetch_page": {"tag": "open"},
+		},
 	},
 }
 
-mock_grants := {
-	"jarvis@acme.com": [
-		{"serviceName": "duckduckgo", "allowedTools": ["*"]},
-		{"serviceName": "mock-calendar", "allowedTools": ["*"]},
-	],
-	"alice@acme.com": [],
-}
+# --- Mock v4 access rules ---
 
-mock_contextual_routing := {}
+mock_access_rules := [
+	{
+		"id": "sales-calendar",
+		"match": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales"}, "identity": ""},
+		"allow": {"services": ["mock-calendar"], "tools": ["*"]},
+	},
+	{
+		"id": "engineering-all",
+		"match": {"matchType": "claims", "claims": {"organization": "acme", "department": "engineering"}, "identity": ""},
+		"allow": {"services": ["mock-calendar", "duckduckgo"], "tools": ["*"]},
+	},
+	{
+		"id": "jarvis-duckduckgo",
+		"match": {"matchType": "identity", "claims": {}, "identity": "jarvis@acme.com"},
+		"allow": {"services": ["duckduckgo"], "tools": ["search"]},
+	},
+]
+
+mock_revoked := []
+
+mock_governance_instances := {}
 
 # ============================================================================
-# Test: Non-tool-call methods are always allowed
+# 1. Non-tool-call methods (allow if authenticated)
 # ============================================================================
 
 test_allow_initialize if {
@@ -108,8 +124,9 @@ test_allow_initialize if {
 		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
 test_allow_tools_list if {
@@ -119,8 +136,9 @@ test_allow_tools_list if {
 		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
 test_allow_ping if {
@@ -130,8 +148,9 @@ test_allow_ping if {
 		"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
 test_allow_notifications if {
@@ -141,1040 +160,474 @@ test_allow_notifications if {
 		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
 # ============================================================================
-# Test: Stream setup (GET /mcp)
+# 2. Catalog checks: missing service/tool, disabled service
 # ============================================================================
 
-test_allow_stream_setup_for_granted_user if {
-	allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_jarvis), "")
+test_deny_tool_call_missing_service if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"github.create_issue\",\"arguments\":{}}}",
+	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-test_deny_stream_setup_for_user_without_access if {
-	not allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_alice), "")
+test_deny_tool_call_missing_tool if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.delete_event\",\"arguments\":{}}}",
+	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-test_deny_stream_setup_for_unknown_user if {
-	not allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_unknown), "")
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+test_deny_tool_call_disabled_service if {
+	disabled_catalog := {
+		"mock-calendar": {
+			"enabled": false,
+			"tools": {"list_events": {"tag": "open"}},
+		},
+	}
+
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as disabled_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+}
+
+test_deny_tool_call_empty_catalog if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as {}
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
 # ============================================================================
-# Test: tools/call — namespaced tool (service.tool format)
+# 3. Access rules: claim match, identity match, wildcard, no match, OR, revoked
 # ============================================================================
 
-test_allow_namespaced_tool_call if {
+# Jarvis (sales) matches "sales-calendar" rule → allowed on mock-calendar open tools
+test_access_rule_claim_match if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-test_allow_calendar_tool_call if {
+# Jarvis matches identity rule for duckduckgo.search
+test_access_rule_identity_match if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-13\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-# ============================================================================
-# Test: tools/call — denied cases
-# ============================================================================
-
-test_deny_tool_call_service_not_available if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"github.create_issue\",\"arguments\":{}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-test_deny_tool_call_service_suspended if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_suspended_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-test_deny_tool_call_tool_not_enabled if {
-	# Catalog for duckduckgo only has "search" enabled, not "fetch_content"
-	limited_catalog := {"duckduckgo": {
-		"enabled": true,
-		"enabledTools": ["search"],
-		"suspended": false,
-		"metadata": {},
-	}}
-
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_content\",\"arguments\":{\"url\":\"http://example.com\"}}}",
-	)
-		with catalog as limited_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-test_deny_tool_call_user_no_access if {
-	not allow with input as mock_input(
+# Alice (engineering) matches "engineering-all" → allowed on duckduckgo open tools
+test_access_rule_wildcard_tool if {
+	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_alice),
-		"{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-test_deny_tool_call_unknown_user if {
+# Unknown user (external org) → no matching rule → denied
+test_access_rule_no_match if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
-		"{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-test_deny_tool_call_missing_tool_name if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-test_deny_tool_call_no_auth if {
-	not allow with input as mock_input_no_auth(
-		"POST", "/mcp",
-		"{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-# ============================================================================
-# Test: Fail-closed — empty policy data denies everything
-# ============================================================================
-
-test_deny_tools_call_when_policy_data_empty if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as {}
-		with contextual_routing as {}
-}
-
-# ============================================================================
-# Test: Wildcard access ("*") grants all tools in a service
-# ============================================================================
-
-test_wildcard_grants_any_tool if {
-	# jarvis has "*" for duckduckgo — should allow any tool name
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_content\",\"arguments\":{\"url\":\"http://example.com\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-# ============================================================================
-# Test: Specific tool access (non-wildcard)
-# ============================================================================
-
-test_specific_tool_access_allowed if {
-	specific_grants := {
-		"jarvis@acme.com": [
-			{"serviceName": "duckduckgo", "allowedTools": ["search"]},
-		],
-	}
-
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as specific_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-test_specific_tool_access_denied_for_other_tool if {
-	specific_grants := {
-		"jarvis@acme.com": [
-			{"serviceName": "duckduckgo", "allowedTools": ["search"]},
-		],
-	}
-
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_content\",\"arguments\":{\"url\":\"http://example.com\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as specific_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-# ============================================================================
-# Test: No catalog entry for service — allow if user has grant
-# ============================================================================
-
-test_allow_when_no_catalog_entry_exists if {
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-13\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-# ============================================================================
-# Test: Default deny — completely empty input
-# ============================================================================
-
-test_default_deny_empty_body_post if {
-	not allow with input as mock_input("POST", "/mcp", "", "")
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-}
-
-# ============================================================================
-# Test: Contextual routing — Layer 2 (route lookup only, no http.send in unit tests)
-# ============================================================================
-
-test_fast_path_no_contextual_route if {
-	# No contextual routes configured — should take fast path (Rule 3a)
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as {}
-}
-
-test_contextual_route_lookup_specific_tool if {
-	# Verify contextual_route resolves for specific tool
-	routes := {"duckduckgo": {"search": {
-		"policyProtocol": "PiiGuardPolicy",
-		"instanceId": "pii-001",
-		"endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate",
-	}}}
-
-	# With a contextual route, Rule 3a (fast path) should NOT match
-	# Rule 3b would match but requires http.send — so allow should be false
-	# (http.send will fail in unit tests since there's no server)
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as routes
-}
-
-test_contextual_route_lookup_wildcard if {
-	# Verify contextual_route resolves for wildcard
-	routes := {"duckduckgo": {"*": {
-		"policyProtocol": "PiiGuardPolicy",
-		"instanceId": "pii-001",
-		"endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate",
-	}}}
-
-	# Wildcard route should block fast path too
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as routes
-}
-
-test_contextual_route_no_match_other_service if {
-	# Route for slack, not duckduckgo — should take fast path
-	routes := {"slack": {"*": {
-		"policyProtocol": "PiiGuardPolicy",
-		"instanceId": "pii-001",
-		"endpoint": "/npl/policies/PiiGuardPolicy/pii-001/evaluate",
-	}}}
-
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":73,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as routes
-}
-
-# ============================================================================
-# Test: x-granted-services header for tools/list filtering
-# ============================================================================
-
-test_granted_services_header_on_tools_list if {
-	# jarvis has grants for duckduckgo and mock-calendar — both available
-	result := headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/list\",\"params\":{}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-
-	result["x-granted-services"] == "duckduckgo,mock-calendar"
-}
-
-test_granted_services_header_excludes_suspended if {
-	# duckduckgo is suspended — should not appear in granted services
-	result := headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/list\",\"params\":{}}",
-	)
-		with catalog as mock_suspended_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-
-	# mock-calendar has no catalog entry (allowed) but duckduckgo is suspended (excluded)
-	result["x-granted-services"] == "mock-calendar"
-}
-
-test_granted_services_header_empty_for_no_grants if {
-	# alice has empty grants — header should be empty string
-	result := headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_alice),
-		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/list\",\"params\":{}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-
-	result["x-granted-services"] == ""
-}
-
-test_granted_services_not_emitted_for_tools_call if {
-	# x-granted-services should only appear for tools/list, not tools/call
-	result := headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":83,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-
-	not result["x-granted-services"]
-}
-
-# ============================================================================
-# Test: x-user-id header
-# ============================================================================
-
-test_user_id_header_emitted if {
-	result := headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":84,\"method\":\"tools/list\",\"params\":{}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-
-	result["x-user-id"] == "jarvis@acme.com"
-}
-
-test_user_id_header_not_emitted_without_auth if {
-	result := headers with input as mock_input_no_auth(
-		"POST", "/mcp",
-		"{\"jsonrpc\":\"2.0\",\"id\":85,\"method\":\"tools/list\",\"params\":{}}",
-	)
-		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-
-	not result["x-user-id"]
-}
-
-# ============================================================================
-# Test: security_policy data accessible from bundle
-# ============================================================================
-
-mock_security_policy := {
-	"version": "1.0",
-	"tool_annotations": {
-		"gmail": {
-			"send_email": {
-				"annotations": {
-					"readOnlyHint": false,
-					"destructiveHint": false,
-					"openWorldHint": true,
-				},
-				"verb": "create",
-				"labels": ["category:communication"],
-			},
-			"read_email": {
-				"annotations": {"readOnlyHint": true},
-				"verb": "get",
-				"labels": ["category:communication"],
-			},
+# Jarvis identity-rule only allows search, not fetch_page → denied
+test_access_rule_identity_tool_mismatch if {
+	# Only identity rule matches for duckduckgo, and it allows only "search"
+	identity_only_rules := [
+		{
+			"id": "jarvis-duckduckgo",
+			"match": {"matchType": "identity", "claims": {}, "identity": "jarvis@acme.com"},
+			"allow": {"services": ["duckduckgo"], "tools": ["search"]},
 		},
-	},
-	"classifiers": {
-		"gmail": {
-			"send_email": [
-				{"field": "to", "contains": "@acme.com", "set_labels": ["scope:internal"]},
-				{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
-			],
-		},
-	},
-	"policies": [
-		{"name": "Block BCC", "when": {"labels": ["data:bcc-used"]}, "action": "deny", "priority": 0},
-		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
-		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
-	],
+	]
+
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_page\",\"arguments\":{\"url\":\"http://example.com\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as identity_only_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-test_security_policy_accessible if {
-	# Verify security_policy data is loaded from bundle and accessible
-	sp := security_policy with security_policy as mock_security_policy
-	sp.version == "1.0"
-	sp.tool_annotations.gmail.send_email.verb == "create"
-	sp.tool_annotations.gmail.read_email.annotations.readOnlyHint == true
-}
-
-test_security_policy_has_classifiers if {
-	sp := security_policy with security_policy as mock_security_policy
-	some rule in sp.classifiers.gmail.send_email
-	rule.field == "to"
-	rule.contains == "@acme.com"
-}
-
-test_security_policy_has_policies if {
-	sp := security_policy with security_policy as mock_security_policy
-	count(sp.policies) == 3
-	sp.policies[0].name == "Block BCC"
-	sp.policies[0].action == "deny"
-	sp.policies[0].priority == 0
-}
-
-test_security_policy_default_empty if {
-	# When no security policy is loaded, should be empty object
-	sp := security_policy with security_policy as {}
-	count(sp) == 0
-}
-
-test_allow_still_works_with_security_policy if {
-	# Ensure existing allow rules work when security_policy is present
+# Multiple rules OR semantics — any match allows
+test_access_rule_or_semantics if {
+	# Jarvis matches both "sales-calendar" (claims) AND "jarvis-duckduckgo" (identity)
+	# Either should work independently
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as mock_contextual_routing
-		with security_policy as mock_security_policy
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+}
+
+# Revoked subject → denied even with matching access rule
+test_revoked_subject_denied if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as ["jarvis@acme.com"]
+		with governance_instances as mock_governance_instances
 }
 
 # ============================================================================
-# Test: Security policy evaluation — tag classification and policy matching
+# 4. Open tool path: allowed, denied by access rules
 # ============================================================================
 
-mock_grants_with_gmail := {
-	"jarvis@acme.com": [
-		{"serviceName": "duckduckgo", "allowedTools": ["*"]},
-		{"serviceName": "mock-calendar", "allowedTools": ["*"]},
-		{"serviceName": "gmail", "allowedTools": ["*"]},
-	],
-	"alice@acme.com": [],
-}
-
-mock_sp_evaluation := {
-	"version": "1.0",
-	"tool_annotations": {
-		"gmail": {
-			"send_email": {
-				"annotations": {
-					"readOnlyHint": false,
-					"destructiveHint": false,
-					"openWorldHint": true,
-				},
-				"verb": "create",
-				"labels": ["category:communication"],
-			},
-			"read_email": {
-				"annotations": {"readOnlyHint": true},
-				"verb": "get",
-				"labels": ["category:communication"],
-			},
-			"delete_email": {
-				"annotations": {"destructiveHint": true},
-				"verb": "delete",
-				"labels": ["category:communication"],
-			},
-		},
-	},
-	"classifiers": {
-		"gmail": {
-			"send_email": [
-				{"field": "to", "contains": "@acme.com", "set_labels": ["scope:internal"]},
-				{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
-			],
-		},
-	},
-	"policies": [
-		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
-		{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
-		{"name": "Deny external", "when": {"labels": ["scope:external"]}, "action": "deny", "priority": 20},
-		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
-	],
-}
-
-# Test: read_email with readOnlyHint=true → "Allow read-only" → allowed
-test_sp_read_only_tool_allowed if {
+test_open_tool_allowed if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":200,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.read_email\",\"arguments\":{\"id\":\"123\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
-}
-
-# Test: delete_email with destructiveHint=true → "Deny destructive" → denied
-test_sp_destructive_tool_denied if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.delete_email\",\"arguments\":{\"id\":\"123\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
-}
-
-# Test: send_email to external address → classifier adds scope:external → "Deny external" → denied
-test_sp_external_send_denied if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":202,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
-}
-
-# Test: send_email to internal address → classifier adds scope:internal (no scope:external) → "Default allow" → allowed
-test_sp_internal_send_allowed if {
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"colleague@acme.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
-}
-
-# Test: unclassified tool (not in security policy) → "Default allow" → allowed
-test_sp_unclassified_tool_default_allow if {
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":204,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-14\"}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-# Test: no security policies configured → existing allow rules work (backward compatible)
-test_sp_empty_policy_allows if {
-	allow with input as mock_input(
+test_open_tool_denied_no_rule if {
+	not allow with input as mock_input(
 		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":205,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		mock_bearer(mock_jwt_unknown),
+		"{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as {}
-		with security_policy as {}
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-# Test: tool-name fallback — "list_events" inferred as readOnlyHint=true → "Allow read-only"
-test_sp_tool_name_fallback_read_only if {
-	sp_with_policies_only := {
-		"version": "1.0",
-		"tool_annotations": {},
-		"classifiers": {},
-		"policies": [
-			{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
-			{"name": "Default deny", "when": {}, "action": "deny", "priority": 999},
-		],
-	}
+# ============================================================================
+# 5. Gated tool path: NPL allow, NPL deny, NPL pending, NPL unreachable
+# ============================================================================
 
+# Gated tool + NPL returns allow → allowed
+test_gated_tool_npl_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":206,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-13\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants
-		with contextual_routing as {}
-		with security_policy as sp_with_policies_only
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
 }
 
-# Test: tool-name fallback — "delete_event" inferred as destructiveHint=true → denied
-test_sp_tool_name_fallback_destructive if {
-	sp_with_policies_only := {
-		"version": "1.0",
-		"tool_annotations": {},
-		"classifiers": {},
-		"policies": [
-			{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
-			{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
-		],
-	}
-
+# Gated tool + NPL returns deny → denied
+test_gated_tool_npl_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":207,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.delete_event\",\"arguments\":{\"id\":\"evt-123\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants
-		with contextual_routing as {}
-		with security_policy as sp_with_policies_only
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+		with npl_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
 }
 
-# Test: verb-based policy — only allow "get" verb, deny "create"
-test_sp_verb_based_policy if {
-	sp_verb := {
-		"version": "1.0",
-		"tool_annotations": {
-			"gmail": {
-				"send_email": {
-					"annotations": {},
-					"verb": "create",
-					"labels": [],
-				},
-			},
-		},
-		"classifiers": {},
-		"policies": [
-			{"name": "Allow get only", "when": {"verb": "get"}, "action": "allow", "priority": 50},
-			{"name": "Default deny", "when": {}, "action": "deny", "priority": 999},
-		],
-	}
-
-	# send_email has verb "create" → doesn't match "Allow get only" → "Default deny" → denied
+# Gated tool + NPL returns pending → denied (with pending headers)
+test_gated_tool_npl_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":208,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"test@test.com\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as sp_verb
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+		with npl_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
 }
 
-# Test: security policy denial surfaces in reason header
-test_sp_deny_reason_header if {
-	r := reason with input as mock_input(
+# Gated tool + NPL unreachable (no governance instance) → denied
+test_gated_tool_npl_unreachable if {
+	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":209,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.delete_email\",\"arguments\":{\"id\":\"123\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
-
-	contains(r, "Deny destructive")
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as {}
 }
 
-# Test: security policy tracing headers emitted
-test_sp_tracing_headers if {
+# ============================================================================
+# 6. Response headers
+# ============================================================================
+
+test_user_id_header if {
+	h := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+
+	h["x-user-id"] == "jarvis@acme.com"
+}
+
+test_granted_services_header if {
+	h := headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+
+	# Jarvis matches sales-calendar (mock-calendar) and jarvis-duckduckgo (duckduckgo)
+	contains(h["x-granted-services"], "mock-calendar")
+	contains(h["x-granted-services"], "duckduckgo")
+}
+
+test_pending_headers if {
 	rh := response_headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":210,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.read_email\",\"arguments\":{\"id\":\"123\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_evaluation
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+		with npl_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
 
-	rh["x-sp-action"] == "allow"
-	rh["x-sp-rule"] == "Allow read-only"
-	rh["x-sp-verb"] == "get"
-	contains(rh["x-sp-labels"], "category:communication")
-}
-
-# ============================================================================
-# Test: npl_evaluate flow (Step 3 — contextual routing integration)
-# ============================================================================
-
-mock_sp_with_approval := {
-	"version": "1.0",
-	"tool_annotations": {
-		"gmail": {
-			"send_email": {
-				"annotations": {
-					"readOnlyHint": false,
-					"destructiveHint": false,
-					"openWorldHint": true,
-				},
-				"verb": "create",
-				"labels": ["category:communication"],
-			},
-			"read_email": {
-				"annotations": {"readOnlyHint": true},
-				"verb": "get",
-				"labels": ["category:communication"],
-			},
-			"delete_email": {
-				"annotations": {"destructiveHint": true},
-				"verb": "delete",
-				"labels": ["category:communication"],
-			},
-		},
-	},
-	"classifiers": {
-		"gmail": {
-			"send_email": [
-				{"field": "to", "contains": "@acme.com", "set_labels": ["scope:internal"]},
-				{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
-			],
-		},
-	},
-	"policies": [
-		{"name": "Allow read-only", "when": {"readOnlyHint": true}, "action": "allow", "priority": 50},
-		{"name": "Deny destructive", "when": {"destructiveHint": true}, "action": "deny", "priority": 10},
-		{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "npl_evaluate", "priority": 20, "approvers": ["compliance", "legal"]},
-		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
-	],
-}
-
-mock_approval_route := {"gmail": {"*": {
-	"policyProtocol": "ApprovalPolicy",
-	"instanceId": "apr-001",
-	"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
-}}}
-
-# Test: npl_evaluate with contextual route → denied (NPL unreachable in unit tests)
-# In production: the NPL protocol would return "pending:<id>", "allow", or "deny"
-test_sp_npl_evaluate_with_route if {
-	# send_email to external → scope:external → "Approve external" → npl_evaluate
-	# Contextual route to ApprovalPolicy exists → security_policy_allows passes
-	# But http.send fails in unit tests → Rule 3b fails → denied
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":300,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-}
-
-# Test: npl_evaluate without contextual route → denied (no route configured)
-test_sp_npl_evaluate_without_route if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":301,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_with_approval
-}
-
-# Test: npl_evaluate without route → reason includes "no contextual route"
-test_sp_npl_evaluate_no_route_reason if {
-	r := reason with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":302,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as {}
-		with security_policy as mock_sp_with_approval
-
-	contains(r, "npl_evaluate")
-	contains(r, "Approve external")
-	contains(r, "no contextual route")
-}
-
-# Test: deny action still works even with contextual route configured
-test_sp_deny_not_bypassed_by_contextual_route if {
-	# delete_email → destructiveHint=true → "Deny destructive" → deny
-	# Even though approval route exists, deny takes precedence (lower priority)
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":303,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.delete_email\",\"arguments\":{\"id\":\"123\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-}
-
-# Test: allow action still works with contextual route configured
-test_sp_allow_bypasses_contextual_route if {
-	# read_email → readOnlyHint=true → "Allow read-only" → allow
-	# Contextual route exists but sp_action is "allow", not "npl_evaluate"
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":304,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.read_email\",\"arguments\":{\"id\":\"123\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-}
-
-# Test: internal send → scope:internal (no scope:external) → "Default allow" even with contextual route
-test_sp_internal_send_allowed_with_contextual_route if {
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":305,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"colleague@acme.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-}
-
-# Test: contextual route pending reason header when NPL returns pending
-test_sp_contextual_route_pending_reason if {
-	r := reason with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":306,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-		with npl_evaluate_response as "pending:APR-42"
-
-	contains(r, "contextual route pending")
-	contains(r, "APR-42")
-	contains(r, "Approve external")
-}
-
-# Test: pending_approval_id extraction from npl_evaluate_response
-test_pending_approval_id_extracted if {
-	id := pending_approval_id with npl_evaluate_response as "pending:APR-7"
-	id == "APR-7"
-}
-
-# Test: x-approval-id response header emitted when pending
-test_approval_id_header_emitted if {
-	rh := response_headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":400,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-		with npl_evaluate_response as "pending:APR-99"
-
-	rh["x-approval-id"] == "APR-99"
+	rh["x-request-id"] == "REQ-42"
 	rh["retry-after"] == "30"
 }
 
-# Test: no approval headers when npl_evaluate_response is "allow"
-test_no_approval_headers_when_allowed if {
-	rh := response_headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":401,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-		with npl_evaluate_response as "allow"
-
-	not rh["x-approval-id"]
-	not rh["retry-after"]
-}
-
-# Test: denial by contextual route (npl returns "deny")
-test_contextual_route_deny_reason if {
+test_reason_header_authorized if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":402,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
-		with npl_evaluate_response as "deny"
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 
-	contains(r, "contextual route denied")
+	r == "Authorized"
 }
 
-# Test: sp_approvers extracted from winning npl_evaluate policy
-test_sp_approvers_extracted if {
-	result := sp_approvers with input as mock_input(
+test_reason_header_no_access_rule if {
+	r := reason with input as mock_input(
 		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":403,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
+		mock_bearer(mock_jwt_unknown),
+		"{\"jsonrpc\":\"2.0\",\"id\":54,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as mock_sp_with_approval
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 
-	result == ["compliance", "legal"]
+	contains(r, "not authorized")
 }
 
 # ============================================================================
-# Test: Multi-route AND/OR composition
+# 7. Edge cases
 # ============================================================================
 
-# Test: RouteGroup with mode "single" backward compat
-test_route_group_single_mode if {
-	routes := {"duckduckgo": {"search": {
-		"mode": "single",
-		"routes": [{
-			"policyProtocol": "ApprovalPolicy",
-			"instanceId": "apr-001",
-			"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
-		}],
-	}}}
-
-	# Route group exists → blocks fast path (same as legacy)
+test_deny_empty_bundle if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":500,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as {}
+		with access_rules as []
+		with revoked_subjects as []
+		with governance_instances as {}
+}
+
+test_deny_no_auth if {
+	not allow with input as mock_input_no_auth(
+		"POST", "/mcp",
+		"{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
-		with grants as mock_grants
-		with contextual_routing as routes
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
-# Test: AND mode — both allow → allow
-test_route_group_and_both_allow if {
-	result := npl_evaluate_response
-		with route_group_mode as "and"
-		with route_results as ["allow", "allow"]
-		with contextual_route as true
-
-	result == "allow"
-}
-
-# Test: AND mode — one deny → deny
-test_route_group_and_one_deny if {
-	result := npl_evaluate_response
-		with route_group_mode as "and"
-		with route_results as ["allow", "deny"]
-		with contextual_route as true
-
-	result == "deny"
-}
-
-# Test: AND mode — one pending → pending
-test_route_group_and_one_pending if {
-	result := npl_evaluate_response
-		with route_group_mode as "and"
-		with route_results as ["allow", "pending:APR-1"]
-		with contextual_route as true
-
-	result == "pending:APR-1"
-}
-
-# Test: OR mode — one allow → allow
-test_route_group_or_one_allow if {
-	result := npl_evaluate_response
-		with route_group_mode as "or"
-		with route_results as ["deny", "allow"]
-		with contextual_route as true
-
-	result == "allow"
-}
-
-# Test: OR mode — both deny → last deny
-test_route_group_or_both_deny if {
-	result := npl_evaluate_response
-		with route_group_mode as "or"
-		with route_results as ["deny", "deny"]
-		with contextual_route as true
-
-	result == "deny"
+test_deny_missing_body if {
+	not allow with input as mock_input("POST", "/mcp", "", "")
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
 }
 
 # ============================================================================
-# Test: MCP Session ID extraction
+# 8. Service name resolution and granted services
+# ============================================================================
+
+test_service_name_from_qualified_tool if {
+	result := service_name with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+
+	result == "mock-calendar"
+}
+
+test_tool_name_from_qualified_tool if {
+	result := tool_name with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+
+	result == "list_events"
+}
+
+test_granted_services_excludes_disabled if {
+	disabled_catalog := {
+		"mock-calendar": {"enabled": true, "tools": {"list_events": {"tag": "open"}}},
+		"duckduckgo": {"enabled": false, "tools": {"search": {"tag": "open"}}},
+	}
+
+	wildcard_rules := [
+		{
+			"id": "all-access",
+			"match": {"matchType": "claims", "claims": {"organization": "acme"}, "identity": ""},
+			"allow": {"services": ["*"], "tools": ["*"]},
+		},
+	]
+
+	result := granted_service_names with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as disabled_catalog
+		with access_rules as wildcard_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+
+	"mock-calendar" in result
+	not "duckduckgo" in result
+}
+
+# ============================================================================
+# 9. Stream setup
+# ============================================================================
+
+test_allow_stream_setup if {
+	allow with input as mock_input("GET", "/mcp", mock_bearer(mock_jwt_jarvis), "")
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+}
+
+test_deny_stream_setup_no_auth if {
+	not allow with input as mock_input_no_auth("GET", "/mcp", "")
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+}
+
+# ============================================================================
+# 10. Wildcard service access rule
+# ============================================================================
+
+test_wildcard_service_access if {
+	wildcard_rules := [
+		{
+			"id": "admin-all",
+			"match": {"matchType": "claims", "claims": {"role": "user", "organization": "acme"}, "identity": ""},
+			"allow": {"services": ["*"], "tools": ["*"]},
+		},
+	]
+
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as wildcard_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+}
+
+# ============================================================================
+# 11. MCP Session ID extraction
 # ============================================================================
 
 test_mcp_session_id_extracted if {
@@ -1202,162 +655,21 @@ test_mcp_session_id_default_empty if {
 }
 
 # ============================================================================
-# Test: Numeric classifier conditions + value extraction
+# 12. No pending headers when not pending
 # ============================================================================
 
-mock_sp_with_numeric := {
-	"version": "1.0",
-	"tool_annotations": {
-		"banking": {
-			"transfer": {
-				"annotations": {},
-				"verb": "create",
-				"labels": ["category:banking"],
-			},
-		},
-	},
-	"classifiers": {
-		"banking": {
-			"transfer": [
-				{"field": "amount", "greater_than": 1000, "set_labels": ["constraint:high-value"]},
-				{"field": "amount", "less_than": 10, "set_labels": ["constraint:micro-payment"]},
-				{"field": "currency", "equals_value": "BTC", "set_labels": ["constraint:crypto"]},
-			],
-		},
-	},
-	"value_extractors": {
-		"banking": {
-			"transfer": [
-				{"field": "amount", "label_prefix": "arg:amount"},
-				{"field": "currency", "label_prefix": "arg:currency"},
-			],
-		},
-	},
-	"policies": [
-		{"name": "Block high value", "when": {"labels": ["constraint:high-value"]}, "action": "deny", "priority": 10},
-		{"name": "Default allow", "when": {}, "action": "allow", "priority": 999},
-	],
-}
-
-mock_grants_with_banking := {
-	"jarvis@acme.com": [
-		{"serviceName": "banking", "allowedTools": ["*"]},
-	],
-}
-
-# Test: amount > 1000 → constraint:high-value → deny
-test_numeric_greater_than_deny if {
-	not allow with input as mock_input(
+test_no_pending_headers_when_allowed if {
+	rh := response_headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":600,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":1500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
-		with catalog as {}
-		with grants as mock_grants_with_banking
-		with contextual_routing as {}
-		with security_policy as mock_sp_with_numeric
-}
-
-# Test: amount < 1000 → no constraint:high-value → allow
-test_numeric_under_threshold_allow if {
-	allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":601,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_banking
-		with contextual_routing as {}
-		with security_policy as mock_sp_with_numeric
-}
-
-# Test: value extractor generates arg:amount:500 label
-test_value_extractor_labels if {
-	labels := resolved_labels with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":602,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":500,\"currency\":\"USD\",\"to\":\"bob\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_banking
-		with contextual_routing as {}
-		with security_policy as mock_sp_with_numeric
-
-	"arg:amount:500" in labels
-	"arg:currency:USD" in labels
-	"category:banking" in labels
-}
-
-# Test: equals_value classifier matches
-test_equals_value_classifier if {
-	labels := resolved_labels with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":603,\"method\":\"tools/call\",\"params\":{\"name\":\"banking.transfer\",\"arguments\":{\"amount\":100,\"currency\":\"BTC\",\"to\":\"bob\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_banking
-		with contextual_routing as {}
-		with security_policy as mock_sp_with_numeric
-
-	"constraint:crypto" in labels
-}
-
-# Test: Legacy route (no mode field) still works
-test_legacy_route_backward_compat if {
-	routes := {"duckduckgo": {"search": {
-		"policyProtocol": "ApprovalPolicy",
-		"instanceId": "apr-001",
-		"endpoint": "/npl/policies/ApprovalPolicy/apr-001/evaluate",
-	}}}
-
-	# Legacy route should be detected
-	result := is_legacy_route with contextual_routing as routes
-		with input as mock_input(
-			"POST", "/mcp",
-			mock_bearer(mock_jwt_jarvis),
-			"{\"jsonrpc\":\"2.0\",\"id\":510,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"hello\"}}}",
-		)
 		with catalog as mock_catalog
-		with grants as mock_grants
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_instances as mock_governance_instances
+		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "OK"}
 
-	result == true
-}
-
-# Test: sp_approvers defaults to empty when no approvers specified
-test_sp_approvers_empty_when_not_specified if {
-	sp_no_approvers := {
-		"version": "1.0",
-		"tool_annotations": {
-			"gmail": {
-				"send_email": {
-					"annotations": {"openWorldHint": true},
-					"verb": "create",
-					"labels": ["category:communication"],
-				},
-			},
-		},
-		"classifiers": {
-			"gmail": {
-				"send_email": [
-					{"field": "to", "not_contains": "@acme.com", "set_labels": ["scope:external"]},
-				],
-			},
-		},
-		"policies": [
-			{"name": "Approve external", "when": {"labels": ["scope:external"]}, "action": "npl_evaluate", "priority": 20},
-		],
-	}
-
-	result := sp_approvers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":404,\"method\":\"tools/call\",\"params\":{\"name\":\"gmail.send_email\",\"arguments\":{\"to\":\"external@other.com\",\"subject\":\"test\",\"body\":\"hello\"}}}",
-	)
-		with catalog as {}
-		with grants as mock_grants_with_gmail
-		with contextual_routing as mock_approval_route
-		with security_policy as sp_no_approvers
-
-	result == []
+	not rh["x-request-id"]
+	not rh["retry-after"]
 }

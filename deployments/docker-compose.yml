@@ -110,8 +110,8 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 11000
       KC_HOSTNAME_STRICT: "false"
-      # Token issuer uses the Docker hostname so NPL Engine can fetch JWKS
-      KC_HOSTNAME: keycloak
+      # Token issuer uses localhost so browser OAuth redirects work
+      KC_HOSTNAME: localhost
       KC_HOSTNAME_PORT: 11000
     depends_on:
       keycloak-db:

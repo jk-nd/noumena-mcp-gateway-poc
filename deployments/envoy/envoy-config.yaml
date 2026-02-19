@@ -138,7 +138,7 @@ static_resources:
                         - match:
                             path: "/authorize"
                           redirect:
-                            host_redirect: "keycloak:11000"
+                            host_redirect: "localhost:11000"
                             path_redirect: "/realms/mcpgateway/protocol/openid-connect/auth"
                             response_code: "FOUND"
                           typed_per_filter_config:
@@ -222,7 +222,7 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
                       providers:
                         keycloak:
-                          issuer: "http://keycloak:11000/realms/mcpgateway"
+                          issuer: "http://localhost:11000/realms/mcpgateway"
                           audiences:
                             - "account"
                             - "mcpgateway"

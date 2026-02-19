@@ -1,8 +1,10 @@
+> **DEPRECATED**: This document describes the v3 policy architecture which has been replaced by v4 Three-Layer Governance. See [DESIGN_V4_SIMPLIFIED_GOVERNANCE.md](DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) for the current architecture.
+
 # Policy Architecture v3 — NPL + OPA Redesign
 
 ## Status
 
-**Implemented** (Phases 1-3) — Design captured 2026-02-14, implemented through 2026-02-16.
+**Deprecated** — Replaced by v4 Three-Layer Governance. Originally implemented (Phases 1-3) 2026-02-14 through 2026-02-16.
 
 Phases 1-3 are complete: bundle server with SSE push + PolicyStore singleton replacing the old 3-layer model + six contextual evaluation protocols (ApprovalPolicy, RateLimitPolicy, ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy) with route group AND/OR composition. Phase 4 (decision audit trail) is not yet started.
 

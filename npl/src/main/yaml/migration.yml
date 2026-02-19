@@ -96,3 +96,11 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V13: v4 governance — GatewayStore + ServiceGovernance (three-layer model)
+  - name: mcp-13.0-v4-governance
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

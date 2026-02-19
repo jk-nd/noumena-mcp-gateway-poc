@@ -1,3 +1,5 @@
+> **DEPRECATED**: This document describes the v3 OPA policy internals. The v4 policy is significantly simpler (~240 lines vs ~1000 lines). See [DESIGN_V4_SIMPLIFIED_GOVERNANCE.md](DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) for the current architecture.
+
    # OPA Rego Policy Internals
 
 Technical reference for the OPA authorization policy (`policies/mcp_authz.rego`), bundle structure, and testing.

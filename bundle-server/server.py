@@ -1,5 +1,5 @@
 """
-OPA Bundle Server — serves NPL policy data as an OPA bundle.
+OPA Bundle Server — serves NPL policy data as an OPA bundle (v4 governance).
 
 Subscribes to NPL Engine's SSE Streams API for push notifications of protocol
 state changes. Rebuilds the OPA bundle on every mutation and serves it via the
@@ -41,13 +41,6 @@ PORT = int(os.environ.get("PORT", "8282"))
 RECONCILIATION_INTERVAL = int(os.environ.get("RECONCILIATION_INTERVAL", "30"))
 STALENESS_THRESHOLD = int(os.environ.get("STALENESS_THRESHOLD", "60"))
 
-# Replay worker configuration
-# REPLAY_ENABLED: opt-in to store-and-forward replay (default: false)
-# BACKENDS: JSON mapping of service name → backend URL, e.g. {"gmail":"http://gmail-mcp:8080/mcp"}
-REPLAY_ENABLED = os.environ.get("REPLAY_ENABLED", "false").lower() in ("true", "1", "yes")
-BACKENDS = json.loads(os.environ.get("BACKENDS", "{}"))
-REPLAY_POLL_INTERVAL = int(os.environ.get("REPLAY_POLL_INTERVAL", "5"))
-
 # --- Shared state ---
 bundle_lock = threading.Lock()
 current_bundle: bytes | None = None
@@ -61,7 +54,6 @@ rebuild_count: int = 0
 rebuild_error_count: int = 0
 data_ready = threading.Event()
 rebuild_signal = threading.Event()
-replay_signal = threading.Event()
 
 
 # --- Keycloak token management ---
@@ -108,71 +100,94 @@ def auth_header() -> dict:
     return {"Authorization": f"Bearer {token_manager.get_token()}"}
 
 
-# --- NPL data fetching (2 HTTP calls: list singleton + getPolicyData) ---
+# --- NPL data fetching (v4: GatewayStore + ServiceGovernance discovery) ---
 def fetch_npl_data() -> dict:
-    """Fetch all policy data from NPL PolicyStore singleton."""
+    """Fetch all policy data from NPL GatewayStore singleton + discover ServiceGovernance instances."""
     headers = auth_header()
 
-    # 1. Find the PolicyStore singleton
+    # 1. Find the GatewayStore singleton
     resp = requests.get(
-        f"{NPL_URL}/npl/store/PolicyStore/", headers=headers, timeout=10
+        f"{NPL_URL}/npl/store/GatewayStore/", headers=headers, timeout=10
     )
     resp.raise_for_status()
     items = resp.json().get("items", [])
     if not items:
-        log.warning("No PolicyStore singleton found — returning empty policy data")
+        log.warning("No GatewayStore singleton found — returning empty policy data")
         return {
             "catalog": {},
-            "grants": {},
-            "contextual_routing": {},
+            "access_rules": [],
+            "revoked_subjects": [],
+            "governance_instances": {},
+            "npl_url": NPL_URL,
             "gateway_token": token_manager.get_token(),
         }
 
     store_id = items[0]["@id"]
 
-    # 2. Get everything in one call
+    # 2. Get bundle data in one call
     data_resp = requests.post(
-        f"{NPL_URL}/npl/store/PolicyStore/{store_id}/getPolicyData",
+        f"{NPL_URL}/npl/store/GatewayStore/{store_id}/getBundleData",
         headers={**headers, "Content-Type": "application/json"},
         json={},
         timeout=10,
     )
     data_resp.raise_for_status()
-    policy_data = data_resp.json()
+    bundle_data = data_resp.json()
 
-    # Transform into OPA bundle shape
+    # Transform catalog: CatalogEntry → {enabled, tools: {name: {tag}}}
     catalog = {}
-    for svc_name, entry in policy_data.get("services", {}).items():
+    for svc_name, entry in bundle_data.get("catalog", {}).items():
+        tools = {}
+        for tool_name, tool_entry in entry.get("tools", {}).items():
+            tools[tool_name] = {"tag": tool_entry.get("tag", "open")}
         catalog[svc_name] = {
             "enabled": entry.get("enabled", False),
-            "enabledTools": entry.get("enabledTools", []),
-            "suspended": entry.get("suspended", False),
-            "metadata": entry.get("metadata", {}),
+            "tools": tools,
         }
 
-    grants = {}
-    revoked = policy_data.get("revokedSubjects", [])
-    for subject_id, grant_list in policy_data.get("grants", {}).items():
-        if subject_id not in revoked:
-            grants[subject_id] = grant_list
-        # Revoked subjects get empty grants (fail-closed)
+    # Transform access rules: flatten match struct
+    access_rules = []
+    for rule in bundle_data.get("accessRules", []):
+        access_rules.append({
+            "id": rule.get("id", ""),
+            "match": {
+                "matchType": rule.get("match", {}).get("matchType", "claims"),
+                "claims": rule.get("match", {}).get("claims", {}),
+                "identity": rule.get("match", {}).get("identity", ""),
+            },
+            "allow": {
+                "services": rule.get("allow", {}).get("services", []),
+                "tools": rule.get("allow", {}).get("tools", []),
+            },
+        })
 
-    contextual_routing = policy_data.get("contextualRoutes", {})
+    revoked_subjects = list(bundle_data.get("revokedSubjects", []))
 
-    # Parse security policy JSON (stored as Text in NPL)
-    security_policy = {}
-    raw_security_policy = policy_data.get("securityPolicy", "")
-    if raw_security_policy:
-        try:
-            security_policy = json.loads(raw_security_policy)
-        except (json.JSONDecodeError, TypeError):
-            log.warning("Failed to parse securityPolicy JSON — using empty policy")
+    # 3. Discover ServiceGovernance instances
+    governance_instances = {}
+    try:
+        gov_resp = requests.get(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/",
+            headers=headers,
+            timeout=10,
+        )
+        gov_resp.raise_for_status()
+        gov_items = gov_resp.json().get("items", [])
+        for item in gov_items:
+            instance_id = item.get("@id", "")
+            # ServiceGovernance has a constructor param 'serviceName'
+            svc_name = item.get("serviceName", "")
+            if svc_name and instance_id:
+                governance_instances[svc_name] = instance_id
+    except Exception as e:
+        log.warning("Failed to discover ServiceGovernance instances: %s", e)
 
     return {
         "catalog": catalog,
-        "grants": grants,
-        "contextual_routing": contextual_routing,
-        "security_policy": security_policy,
+        "access_rules": access_rules,
+        "revoked_subjects": revoked_subjects,
+        "governance_instances": governance_instances,
+        "npl_url": NPL_URL,
         "gateway_token": token_manager.get_token(),
     }
 
@@ -189,20 +204,12 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
 
     built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Compute security policy version hash
-    sp_data = policy_data.get("security_policy", {})
-    if sp_data:
-        sp_json = json.dumps(sp_data, separators=(",", ":"), sort_keys=True)
-        security_policy_version = hashlib.sha256(sp_json.encode("utf-8")).hexdigest()[:16]
-    else:
-        security_policy_version = None
-
     # Enrich data with bundle metadata (available to OPA as data._bundle_metadata)
     policy_data["_bundle_metadata"] = {
+        "version": "4.0",
         "built_at": built_at,
         "revision": revision,
         "sse_event_id": current_sse_event_id,
-        "security_policy_version": security_policy_version,
     }
 
     data_json = json.dumps(policy_data, separators=(",", ":"), sort_keys=True)
@@ -213,9 +220,10 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
             "revision": revision,
             "roots": [
                 "catalog",
-                "grants",
-                "contextual_routing",
-                "security_policy",
+                "access_rules",
+                "revoked_subjects",
+                "governance_instances",
+                "npl_url",
                 "gateway_token",
                 "_bundle_metadata",
             ],
@@ -267,8 +275,8 @@ def rebuild():
                 "built_at": built_at_iso,
                 "sse_event_id": current_sse_event_id,
                 "catalog_count": len(policy_data["catalog"]),
-                "grants_count": len(policy_data["grants"]),
-                "routes_count": len(policy_data["contextual_routing"]),
+                "access_rules_count": len(policy_data["access_rules"]),
+                "governance_instances_count": len(policy_data["governance_instances"]),
                 "changed": revision != prev_revision,
             })
         )
@@ -322,8 +330,6 @@ def sse_listener():
                         current_sse_event_id = event.id
                     log.info("SSE state event received (id=%s), signalling rebuild", event.id)
                     rebuild_signal.set()
-                    if REPLAY_ENABLED:
-                        replay_signal.set()
                 elif event.event == "tick":
                     pass  # Heartbeat, ignore
 
@@ -432,165 +438,6 @@ class BundleHandler(BaseHTTPRequestHandler):
         pass
 
 
-# --- Replay worker (store-and-forward) ---
-
-def find_approval_policy_instance() -> str | None:
-    """Find the ApprovalPolicy singleton instance ID."""
-    try:
-        headers = auth_header()
-        resp = requests.get(
-            f"{NPL_URL}/npl/policies/ApprovalPolicy/",
-            headers=headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
-        if items:
-            return items[0]["@id"]
-    except Exception as e:
-        log.warning("Failed to find ApprovalPolicy instance: %s", e)
-    return None
-
-
-def get_queued_approvals(instance_id: str) -> list:
-    """Call getQueuedForExecution on the ApprovalPolicy instance."""
-    headers = {**auth_header(), "Content-Type": "application/json"}
-    resp = requests.post(
-        f"{NPL_URL}/npl/policies/ApprovalPolicy/{instance_id}/getQueuedForExecution",
-        headers=headers,
-        json={},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def record_execution(instance_id: str, approval_id: str, exec_status: str, exec_result: str):
-    """Call recordExecution on the ApprovalPolicy instance."""
-    headers = {**auth_header(), "Content-Type": "application/json"}
-    resp = requests.post(
-        f"{NPL_URL}/npl/policies/ApprovalPolicy/{instance_id}/recordExecution",
-        headers=headers,
-        json={
-            "approvalId": approval_id,
-            "execStatus": exec_status,
-            "execResult": exec_result,
-        },
-        timeout=10,
-    )
-    resp.raise_for_status()
-
-
-def execute_replay(approval: dict) -> tuple[str, str]:
-    """Execute a stored request against the backend MCP server.
-
-    Returns (status, result) — ("completed", response_json) or ("failed", error_msg).
-    """
-    approval_id = approval.get("approvalId", "?")
-    service_name = approval.get("serviceName", "")
-    request_payload = approval.get("requestPayload", "")
-
-    if not service_name:
-        return "failed", "No serviceName on approval record"
-
-    if service_name not in BACKENDS:
-        return "failed", f"No backend configured for service '{service_name}'"
-
-    if not request_payload:
-        return "failed", "No requestPayload on approval record"
-
-    backend_url = BACKENDS[service_name]
-
-    try:
-        payload = json.loads(request_payload)
-    except (json.JSONDecodeError, TypeError) as e:
-        return "failed", f"Malformed requestPayload: {e}"
-
-    # Initialize MCP session with backend
-    try:
-        init_payload = {
-            "jsonrpc": "2.0",
-            "id": 0,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "mcp-gateway-replay", "version": "1.0.0"},
-            },
-        }
-        init_resp = requests.post(
-            backend_url,
-            json=init_payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        init_resp.raise_for_status()
-
-        # Send the actual tools/call request
-        resp = requests.post(
-            backend_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        result_text = resp.text
-        log.info(
-            json.dumps({
-                "event": "replay_executed",
-                "approval_id": approval_id,
-                "service": service_name,
-                "status": "completed",
-            })
-        )
-        return "completed", result_text
-
-    except Exception as e:
-        log.error(
-            json.dumps({
-                "event": "replay_failed",
-                "approval_id": approval_id,
-                "service": service_name,
-                "error": str(e),
-            })
-        )
-        return "failed", str(e)
-
-
-def replay_worker():
-    """Process queued approvals: replay stored requests to backend MCP servers."""
-    log.info("Replay worker started (REPLAY_ENABLED=true, backends=%s)", list(BACKENDS.keys()))
-
-    while True:
-        # Wait for SSE state change signal or periodic poll
-        replay_signal.wait(timeout=REPLAY_POLL_INTERVAL)
-        replay_signal.clear()
-
-        instance_id = find_approval_policy_instance()
-        if not instance_id:
-            continue
-
-        try:
-            queued = get_queued_approvals(instance_id)
-        except Exception as e:
-            log.warning("Failed to fetch queued approvals: %s", e)
-            continue
-
-        if not queued:
-            continue
-
-        log.info("Replay worker found %d queued approval(s)", len(queued))
-
-        for approval in queued:
-            approval_id = approval.get("approvalId", "?")
-            exec_status, exec_result = execute_replay(approval)
-
-            try:
-                record_execution(instance_id, approval_id, exec_status, exec_result)
-            except Exception as e:
-                log.error("Failed to record execution for %s: %s", approval_id, e)
-
-
 # --- Main ---
 def main():
     log.info("OPA Bundle Server starting on port %d", PORT)
@@ -616,13 +463,6 @@ def main():
         target=reconciliation_loop, daemon=True, name="reconciliation-loop"
     )
     recon_thread.start()
-
-    # Start replay worker thread (store-and-forward, opt-in)
-    if REPLAY_ENABLED:
-        replay_thread = threading.Thread(target=replay_worker, daemon=True, name="replay-worker")
-        replay_thread.start()
-    else:
-        log.info("Replay worker disabled (set REPLAY_ENABLED=true to enable)")
 
     # Start HTTP server (blocks main thread)
     server = HTTPServer(("0.0.0.0", PORT), BundleHandler)

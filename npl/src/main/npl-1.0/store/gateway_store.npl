@@ -1,0 +1,268 @@
+package store
+
+/**
+ * Tool entry with a governance tag.
+ * tag: "open" (Layer 2 sufficient) or "gated" (requires NPL evaluation)
+ */
+struct ToolEntry {
+    tag: Text
+};
+
+/**
+ * Catalog entry for a registered MCP service.
+ */
+struct CatalogEntry {
+    enabled: Boolean,
+    tools: Map<Text, ToolEntry>
+};
+
+/**
+ * Match criteria for an access rule.
+ * matchType: "claims" (group-based) or "identity" (individual)
+ */
+struct AccessRuleMatch {
+    matchType: Text,
+    claims: Map<Text, Text>,
+    identity: Text
+};
+
+/**
+ * What an access rule allows.
+ * services/tools may contain "*" for wildcard.
+ */
+struct AccessRuleAllow {
+    services: List<Text>,
+    tools: List<Text>
+};
+
+/**
+ * An access rule: matches callers by claims or identity,
+ * grants access to specified services and tools.
+ */
+struct AccessRule {
+    id: Text,
+    match: AccessRuleMatch,
+    allow: AccessRuleAllow
+};
+
+/**
+ * Complete bundle data returned by getBundleData().
+ * Bundle server reads everything in one call.
+ */
+struct BundleData {
+    catalog: Map<Text, CatalogEntry>,
+    accessRules: List<AccessRule>,
+    revokedSubjects: Set<Text>
+};
+
+/**
+ * GatewayStore — unified singleton for v4 three-layer governance.
+ *
+ * Replaces PolicyStore with a simpler model:
+ *   - Catalog: services + tools with open/gated tags
+ *   - Access rules: claim-based and identity-based (replaces per-user grants)
+ *   - Emergency revocation: fail-closed subject blocking
+ *
+ * No grants map, no contextual routes, no security policy YAML.
+ *
+ * @party pAdmin   Organization administrator
+ * @party pGateway Gateway system service (reads bundle data at runtime)
+ */
+@api
+protocol[pAdmin, pGateway] GatewayStore() {
+    initial state active;
+
+    // --- Catalog: services + tools with tags ---
+    private var catalog: Map<Text, CatalogEntry> = mapOf<Text, CatalogEntry>();
+
+    // --- Access rules ---
+    private var accessRules: List<AccessRule> = listOf<AccessRule>();
+
+    // --- Emergency revocation ---
+    private var revokedSubjects: Set<Text> = setOf<Text>();
+
+    // ========================================================================
+    // Service CRUD
+    // ========================================================================
+
+    /**
+     * Register a new service in the catalog (disabled by default, no tools).
+     */
+    @api
+    permission[pAdmin] registerService(serviceName: Text) | active {
+        require(!catalog.getOrNone(serviceName).isPresent(), "Service already registered");
+        var entry = CatalogEntry(
+            enabled = false,
+            tools = mapOf<Text, ToolEntry>()
+        );
+        catalog = catalog.with(serviceName, entry);
+        info("[GatewayStore] Registered service: " + serviceName);
+    };
+
+    /**
+     * Enable a service (makes it available for tool calls).
+     */
+    @api
+    permission[pAdmin] enableService(serviceName: Text) | active {
+        var maybeEntry = catalog.getOrNone(serviceName);
+        require(maybeEntry.isPresent(), "Service not found");
+        var entry = maybeEntry.getOrFail();
+        var updated = CatalogEntry(enabled = true, tools = entry.tools);
+        catalog = catalog.with(serviceName, updated);
+        info("[GatewayStore] Enabled service: " + serviceName);
+    };
+
+    /**
+     * Disable a service (blocks all tool calls).
+     */
+    @api
+    permission[pAdmin] disableService(serviceName: Text) | active {
+        var maybeEntry = catalog.getOrNone(serviceName);
+        require(maybeEntry.isPresent(), "Service not found");
+        var entry = maybeEntry.getOrFail();
+        var updated = CatalogEntry(enabled = false, tools = entry.tools);
+        catalog = catalog.with(serviceName, updated);
+        info("[GatewayStore] Disabled service: " + serviceName);
+    };
+
+    /**
+     * Remove a service entirely from the catalog.
+     */
+    @api
+    permission[pAdmin] removeService(serviceName: Text) | active {
+        require(catalog.getOrNone(serviceName).isPresent(), "Service not found");
+        catalog = catalog.without(serviceName);
+        info("[GatewayStore] Removed service: " + serviceName);
+    };
+
+    // ========================================================================
+    // Tool management with tags
+    // ========================================================================
+
+    /**
+     * Register a tool on a service with a tag (open or gated).
+     */
+    @api
+    permission[pAdmin] registerTool(serviceName: Text, toolName: Text, tag: Text) | active {
+        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        var maybeEntry = catalog.getOrNone(serviceName);
+        require(maybeEntry.isPresent(), "Service not found");
+        var entry = maybeEntry.getOrFail();
+        var updatedTools = entry.tools.with(toolName, ToolEntry(tag = tag));
+        var updated = CatalogEntry(enabled = entry.enabled, tools = updatedTools);
+        catalog = catalog.with(serviceName, updated);
+        info("[GatewayStore] Registered tool: " + serviceName + "." + toolName + " [" + tag + "]");
+    };
+
+    /**
+     * Change the tag of an existing tool (open <-> gated).
+     */
+    @api
+    permission[pAdmin] setTag(serviceName: Text, toolName: Text, tag: Text) | active {
+        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        var maybeEntry = catalog.getOrNone(serviceName);
+        require(maybeEntry.isPresent(), "Service not found");
+        var entry = maybeEntry.getOrFail();
+        require(entry.tools.getOrNone(toolName).isPresent(), "Tool not found");
+        var updatedTools = entry.tools.with(toolName, ToolEntry(tag = tag));
+        var updated = CatalogEntry(enabled = entry.enabled, tools = updatedTools);
+        catalog = catalog.with(serviceName, updated);
+        info("[GatewayStore] Set tag: " + serviceName + "." + toolName + " -> " + tag);
+    };
+
+    /**
+     * Remove a tool from a service.
+     */
+    @api
+    permission[pAdmin] removeTool(serviceName: Text, toolName: Text) | active {
+        var maybeEntry = catalog.getOrNone(serviceName);
+        require(maybeEntry.isPresent(), "Service not found");
+        var entry = maybeEntry.getOrFail();
+        require(entry.tools.getOrNone(toolName).isPresent(), "Tool not found");
+        var updatedTools = entry.tools.without(toolName);
+        var updated = CatalogEntry(enabled = entry.enabled, tools = updatedTools);
+        catalog = catalog.with(serviceName, updated);
+        info("[GatewayStore] Removed tool: " + serviceName + "." + toolName);
+    };
+
+    // ========================================================================
+    // Access rules
+    // ========================================================================
+
+    /**
+     * Add an access rule (claim-based or identity-based).
+     * matchType: "claims" or "identity"
+     */
+    @api
+    permission[pAdmin] addAccessRule(
+        id: Text,
+        matchType: Text,
+        matchClaims: Map<Text, Text>,
+        matchIdentity: Text,
+        allowServices: List<Text>,
+        allowTools: List<Text>
+    ) | active {
+        require(matchType == "claims" || matchType == "identity", "matchType must be 'claims' or 'identity'");
+        // Ensure no duplicate ID
+        var existing = accessRules.findFirstOrNone(function(r: AccessRule) -> r.id == id);
+        require(!existing.isPresent(), "Access rule with this ID already exists");
+
+        var rule = AccessRule(
+            id = id,
+            match = AccessRuleMatch(matchType = matchType, claims = matchClaims, identity = matchIdentity),
+            allow = AccessRuleAllow(services = allowServices, tools = allowTools)
+        );
+        accessRules = accessRules.with(rule);
+        info("[GatewayStore] Added access rule: " + id + " (" + matchType + ")");
+    };
+
+    /**
+     * Remove an access rule by ID.
+     */
+    @api
+    permission[pAdmin] removeAccessRule(id: Text) | active {
+        var maybeRule = accessRules.findFirstOrNone(function(r: AccessRule) -> r.id == id);
+        require(maybeRule.isPresent(), "Access rule not found");
+        accessRules = accessRules.without(maybeRule.getOrFail());
+        info("[GatewayStore] Removed access rule: " + id);
+    };
+
+    // ========================================================================
+    // Emergency revocation
+    // ========================================================================
+
+    /**
+     * Emergency: revoke ALL access for a subject (fail-closed).
+     */
+    @api
+    permission[pAdmin] revokeSubject(subjectId: Text) | active {
+        revokedSubjects = revokedSubjects.with(subjectId);
+        info("[GatewayStore] REVOKED subject: " + subjectId);
+    };
+
+    /**
+     * Reinstate a previously revoked subject.
+     */
+    @api
+    permission[pAdmin] reinstateSubject(subjectId: Text) | active {
+        revokedSubjects = revokedSubjects.without(subjectId);
+        info("[GatewayStore] Reinstated subject: " + subjectId);
+    };
+
+    // ========================================================================
+    // Bundle export (one call)
+    // ========================================================================
+
+    /**
+     * Get all bundle data in a single call.
+     * Bundle server calls this once per rebuild.
+     */
+    @api
+    permission[pAdmin | pGateway] getBundleData() returns BundleData | active {
+        return BundleData(
+            catalog = catalog,
+            accessRules = accessRules,
+            revokedSubjects = revokedSubjects
+        );
+    };
+}

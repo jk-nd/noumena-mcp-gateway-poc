@@ -1,0 +1,280 @@
+package governance
+
+/**
+ * Tool registration with governance tag.
+ */
+struct ToolRegistration {
+    toolName: Text,
+    tag: Text
+};
+
+/**
+ * A pending request for a gated tool call.
+ */
+struct PendingRequest {
+    requestId: Text,
+    toolName: Text,
+    callerIdentity: Text,
+    callerClaims: Map<Text, Text>,
+    arguments: Text,
+    sessionId: Text,
+    requestPayload: Text,
+    status: Text,
+    reason: Text,
+    decidedBy: Text,
+    executionStatus: Text,
+    executionResult: Text
+};
+
+/**
+ * Result of evaluate() — returned to OPA.
+ */
+struct EvaluationResult {
+    decision: Text,
+    requestId: Text,
+    message: Text
+};
+
+/**
+ * ServiceGovernance — one instance per MCP service.
+ *
+ * Manages tool registrations and stateful governance workflows for gated tools.
+ * OPA calls evaluate() for gated tools; the protocol decides allow/deny/pending.
+ *
+ * Replaces all six contextual policy protocols (ApprovalPolicy, RateLimitPolicy,
+ * ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy) with a
+ * single generic protocol that can implement any workflow pattern.
+ *
+ * @param serviceName  The MCP service this instance governs
+ * @party pAdmin       Organization administrator
+ * @party pGateway     Gateway system service (calls evaluate at request time)
+ */
+@api
+protocol[pAdmin, pGateway] ServiceGovernance(serviceName: Text) {
+    initial state active;
+
+    // --- Tool registry ---
+    private var tools: Map<Text, ToolRegistration> = mapOf<Text, ToolRegistration>();
+
+    // --- Pending requests for gated tools ---
+    private var pendingRequests: Map<Text, PendingRequest> = mapOf<Text, PendingRequest>();
+    private var requestCounter: Number = 0;
+
+    // ========================================================================
+    // Tool management
+    // ========================================================================
+
+    /**
+     * Register a tool with a governance tag.
+     */
+    @api
+    permission[pAdmin] registerTool(toolName: Text, tag: Text) | active {
+        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        var reg = ToolRegistration(toolName = toolName, tag = tag);
+        tools = tools.with(toolName, reg);
+        info("[ServiceGovernance:" + serviceName + "] Registered tool: " + toolName + " [" + tag + "]");
+    };
+
+    /**
+     * Change the tag of an existing tool.
+     */
+    @api
+    permission[pAdmin] setTag(toolName: Text, tag: Text) | active {
+        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        require(tools.getOrNone(toolName).isPresent(), "Tool not found");
+        var reg = ToolRegistration(toolName = toolName, tag = tag);
+        tools = tools.with(toolName, reg);
+        info("[ServiceGovernance:" + serviceName + "] Set tag: " + toolName + " -> " + tag);
+    };
+
+    // ========================================================================
+    // Gateway evaluation (called by OPA for gated tools)
+    // ========================================================================
+
+    /**
+     * Evaluate a gated tool call.
+     *
+     * Returns EvaluationResult:
+     *   decision="allow"   — previously approved (consumed)
+     *   decision="deny"    — previously denied (consumed)
+     *   decision="pending" — awaiting human decision, requestId included
+     *
+     * Retry detection: same callerIdentity:toolName:arguments returns same pending request.
+     *
+     * @param toolName         Tool being called
+     * @param callerIdentity   Authenticated user identity (email)
+     * @param callerClaims     JWT claims as key-value pairs
+     * @param arguments        Serialized tool arguments (JSON string)
+     * @param sessionId        MCP session ID
+     * @param requestPayload   Full JSON-RPC body (for store-and-forward)
+     */
+    @api
+    permission[pGateway] evaluate(
+        toolName: Text,
+        callerIdentity: Text,
+        callerClaims: Map<Text, Text>,
+        arguments: Text,
+        sessionId: Text,
+        requestPayload: Text
+    ) returns EvaluationResult | active {
+        var lookupKey = callerIdentity + ":" + toolName + ":" + arguments;
+
+        // Check for existing pending/decided request
+        var maybeExisting = pendingRequests.getOrNone(lookupKey);
+
+        if (maybeExisting.isPresent()) {
+            var existing = maybeExisting.getOrFail();
+
+            if (existing.status == "approved") {
+                // Consume approval
+                pendingRequests = pendingRequests.without(lookupKey);
+                info("[ServiceGovernance:" + serviceName + "] Consumed approval " + existing.requestId);
+                return EvaluationResult(decision = "allow", requestId = existing.requestId, message = "Approved");
+            };
+
+            if (existing.status == "denied") {
+                // Consume denial
+                var reason = existing.reason;
+                pendingRequests = pendingRequests.without(lookupKey);
+                info("[ServiceGovernance:" + serviceName + "] Consumed denial " + existing.requestId);
+                return EvaluationResult(decision = "deny", requestId = existing.requestId, message = reason);
+            };
+
+            // Still pending
+            return EvaluationResult(
+                decision = "pending",
+                requestId = existing.requestId,
+                message = "Awaiting approval"
+            );
+        };
+
+        // Create new pending request
+        requestCounter = requestCounter + 1;
+        var requestId = "REQ-" + requestCounter.toText();
+
+        var pending = PendingRequest(
+            requestId = requestId,
+            toolName = toolName,
+            callerIdentity = callerIdentity,
+            callerClaims = callerClaims,
+            arguments = arguments,
+            sessionId = sessionId,
+            requestPayload = requestPayload,
+            status = "pending",
+            reason = "",
+            decidedBy = "",
+            executionStatus = "none",
+            executionResult = ""
+        );
+
+        pendingRequests = pendingRequests.with(lookupKey, pending);
+
+        info("[ServiceGovernance:" + serviceName + "] Pending request " + requestId + " for " + callerIdentity + " -> " + toolName);
+
+        return EvaluationResult(
+            decision = "pending",
+            requestId = requestId,
+            message = "Awaiting approval"
+        );
+    };
+
+    // ========================================================================
+    // Approval/denial actions
+    // ========================================================================
+
+    /**
+     * Approve a pending request.
+     */
+    @api
+    permission[pAdmin] approve(requestId: Text) | active {
+        var found = false;
+        var foundKey = "";
+
+        pendingRequests.forEach(function(key: Text, req: PendingRequest) -> {
+            if (req.requestId == requestId) {
+                found = true;
+                foundKey = key;
+            };
+        });
+
+        require(found, "Request not found");
+
+        var existing = pendingRequests.getOrNone(foundKey).getOrFail();
+        require(existing.status == "pending", "Request is not pending");
+
+        var updated = PendingRequest(
+            requestId = existing.requestId,
+            toolName = existing.toolName,
+            callerIdentity = existing.callerIdentity,
+            callerClaims = existing.callerClaims,
+            arguments = existing.arguments,
+            sessionId = existing.sessionId,
+            requestPayload = existing.requestPayload,
+            status = "approved",
+            reason = "",
+            decidedBy = "admin",
+            executionStatus = "queued",
+            executionResult = existing.executionResult
+        );
+
+        pendingRequests = pendingRequests.with(foundKey, updated);
+        info("[ServiceGovernance:" + serviceName + "] Approved " + requestId);
+    };
+
+    /**
+     * Deny a pending request.
+     */
+    @api
+    permission[pAdmin] deny(requestId: Text, reason: Text) | active {
+        var found = false;
+        var foundKey = "";
+
+        pendingRequests.forEach(function(key: Text, req: PendingRequest) -> {
+            if (req.requestId == requestId) {
+                found = true;
+                foundKey = key;
+            };
+        });
+
+        require(found, "Request not found");
+
+        var existing = pendingRequests.getOrNone(foundKey).getOrFail();
+        require(existing.status == "pending", "Request is not pending");
+
+        var updated = PendingRequest(
+            requestId = existing.requestId,
+            toolName = existing.toolName,
+            callerIdentity = existing.callerIdentity,
+            callerClaims = existing.callerClaims,
+            arguments = existing.arguments,
+            sessionId = existing.sessionId,
+            requestPayload = existing.requestPayload,
+            status = "denied",
+            reason = reason,
+            decidedBy = "admin",
+            executionStatus = "none",
+            executionResult = existing.executionResult
+        );
+
+        pendingRequests = pendingRequests.with(foundKey, updated);
+        info("[ServiceGovernance:" + serviceName + "] Denied " + requestId + ": " + reason);
+    };
+
+    // ========================================================================
+    // Admin queries
+    // ========================================================================
+
+    /**
+     * Get all pending requests.
+     */
+    @api
+    permission[pAdmin] getPendingRequests() returns List<PendingRequest> | active {
+        var result = listOf<PendingRequest>();
+        pendingRequests.forEach(function(key: Text, req: PendingRequest) -> {
+            if (req.status == "pending") {
+                result = result.with(req);
+            };
+        });
+        return result;
+    };
+}

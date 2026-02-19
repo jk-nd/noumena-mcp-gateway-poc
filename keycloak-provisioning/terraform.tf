@@ -126,6 +126,17 @@ resource "keycloak_realm_user_profile" "mcpgateway_user_profile" {
     }
   }
 
+  # Custom attribute for department
+  attribute {
+    name         = "department"
+    display_name = "Department"
+
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin"]
+    }
+  }
+
   group {
     name                = "user-metadata"
     display_header      = "User metadata"
@@ -193,6 +204,21 @@ resource "keycloak_openid_user_attribute_protocol_mapper" "organization_mapper" 
   add_to_userinfo     = true
 }
 
+# Protocol mapper for department claim
+resource "keycloak_openid_user_attribute_protocol_mapper" "department_mapper" {
+  realm_id  = keycloak_realm.mcpgateway.id
+  client_id = keycloak_openid_client.mcpgateway_client.id
+  name      = "department-mapper"
+
+  user_attribute   = "department"
+  claim_name       = "department"
+  claim_value_type = "String"
+
+  add_to_id_token     = true
+  add_to_access_token = true
+  add_to_userinfo     = true
+}
+
 # ============================================================================
 # Users
 # ============================================================================
@@ -209,6 +235,7 @@ resource "keycloak_user" "admin" {
   attributes = {
     "role"         = "admin"
     "organization" = "acme"
+    "department"   = "management"
   }
 
   initial_password {
@@ -288,6 +315,7 @@ resource "keycloak_user" "jarvis" {
   attributes = {
     "role"         = "user"  # Tool user (humans and AI agents use same role)
     "organization" = "acme"
+    "department"   = "sales"
   }
 
   initial_password {
@@ -314,6 +342,7 @@ resource "keycloak_user" "alice" {
   attributes = {
     "role"         = "user"
     "organization" = "acme"
+    "department"   = "engineering"
   }
 
   initial_password {
@@ -336,6 +365,30 @@ resource "keycloak_user" "bob" {
   attributes = {
     "role"         = "user"
     "organization" = "acme"
+    "department"   = "engineering"
+  }
+
+  initial_password {
+    value     = var.default_password
+    temporary = false
+  }
+
+  depends_on = [keycloak_realm_user_profile.mcpgateway_user_profile]
+}
+
+# Carol - Compliance Officer
+resource "keycloak_user" "carol" {
+  realm_id   = keycloak_realm.mcpgateway.id
+  username   = "carol"
+  email      = "carol@acme.com"
+  first_name = "Carol"
+  last_name  = "Davis"
+  enabled    = true
+
+  attributes = {
+    "role"         = "user"
+    "organization" = "acme"
+    "department"   = "compliance"
   }
 
   initial_password {
