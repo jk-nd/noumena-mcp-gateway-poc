@@ -36,6 +36,8 @@ governance_instances := data.governance_instances
 
 npl_url := data.npl_url
 
+governance_evaluator_url := data.governance_evaluator_url
+
 # --- JWT decoding ---
 
 bearer_token := t if {
@@ -126,6 +128,18 @@ tool_tag := catalog[service_name].tools[tool_name].tag
 
 # --- Layer 2: Access rules ---
 
+# Match a JWT claim value against a rule's expected value.
+# Handles both scalar ("acme") and array (["acme"]) JWT claims,
+# since Keycloak encodes multi-valued attributes as arrays.
+claim_value_matches(jwt_val, expected) if {
+	jwt_val == expected
+}
+
+claim_value_matches(jwt_val, expected) if {
+	is_array(jwt_val)
+	expected in jwt_val
+}
+
 caller_authorized if {
 	some rule in access_rules
 	access_matches(rule)
@@ -135,7 +149,7 @@ access_matches(rule) if {
 	# Claim-based match
 	rule.matcher.matchType == "claims"
 	every k, v in rule.matcher.claims {
-		jwt_payload[k] == v
+		claim_value_matches(jwt_payload[k], v)
 	}
 	service_match(rule.allow.services)
 	tool_match(rule.allow.tools)
@@ -239,26 +253,33 @@ allow if {
 	npl_decision.decision == "allow"
 }
 
-# --- NPL evaluate call (gated path only) ---
+# --- Governance evaluate call (gated path only) ---
+# Calls the governance-evaluator sidecar, which handles constraint
+# evaluation and routes to NPL for approval workflows when needed.
 
-npl_instance_id := governance_instances[service_name] if {
-	governance_instances[service_name]
-}
-
-# Flatten JWT claims to simple key-value map for NPL
+# Flatten JWT claims to simple key-value map.
+# Handles both scalar strings and single-element arrays from Keycloak.
 caller_claims_flat[k] := v if {
 	some k, v in jwt_payload
 	is_string(v)
 }
 
-npl_response := http.send({
+caller_claims_flat[k] := v if {
+	some k, arr in jwt_payload
+	is_array(arr)
+	count(arr) > 0
+	v := arr[0]
+	is_string(v)
+}
+
+governance_response := http.send({
 	"method": "POST",
-	"url": sprintf("%s/npl/governance/ServiceGovernance/%s/evaluate", [npl_url, npl_instance_id]),
+	"url": sprintf("%s/evaluate", [governance_evaluator_url]),
 	"headers": {
-		"Authorization": sprintf("Bearer %s", [data.gateway_token]),
 		"Content-Type": "application/json",
 	},
 	"body": {
+		"serviceName": service_name,
 		"toolName": tool_name,
 		"callerIdentity": user_id,
 		"callerClaims": caller_claims_flat,
@@ -268,12 +289,13 @@ npl_response := http.send({
 	},
 	"timeout": "5s",
 }) if {
-	npl_instance_id
+	governance_evaluator_url
+	service_name
 }
 
-npl_decision := npl_response.body if {
-	npl_response
-	npl_response.status_code == 200
+npl_decision := governance_response.body if {
+	governance_response
+	governance_response.status_code == 200
 }
 
 # --- Response headers ---
@@ -376,7 +398,7 @@ granted_service_names contains svc if {
 access_rule_matches_caller(rule) if {
 	rule.matcher.matchType == "claims"
 	every k, v in rule.matcher.claims {
-		jwt_payload[k] == v
+		claim_value_matches(jwt_payload[k], v)
 	}
 }
 

@@ -35,8 +35,7 @@ services:
       - ../npl/src/main/npl-1.0:/npl/npl-1.0:ro
     environment:
       ENGINE_DEV_MODE: "false"
-      # Keycloak issues tokens with iss=http://keycloak:11000/realms/mcpgateway
-      # (KC_HOSTNAME=keycloak), which the engine can resolve on the Docker network
+      # Accept tokens from both the Docker hostname and localhost issuer
       ENGINE_ALLOWED_ISSUERS: "http://keycloak:11000/realms/mcpgateway,http://localhost:11000/realms/mcpgateway"
       ENGINE_DB_URL: "jdbc:postgresql://engine-db:5432/engine"
       ENGINE_DB_USER: engine
@@ -110,7 +109,9 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 11000
       KC_HOSTNAME_STRICT: "false"
-      # Token issuer uses Docker hostname so engine + OPA can fetch JWKS
+      # Token issuer uses Docker hostname so engine + OPA can fetch JWKS.
+      # Browser-based OAuth flows (MCP Inspector) require a hosts entry:
+      #   127.0.0.1 keycloak
       KC_HOSTNAME: keycloak
       KC_HOSTNAME_PORT: 11000
     depends_on:
@@ -216,6 +217,36 @@ services:
         condition: service_started
       npl-engine:
         condition: service_healthy
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Governance Evaluator (policy-net — constraint evaluation sidecar)
+  #
+  # Sits between OPA and NPL ServiceGovernance. Evaluates argument-level
+  # constraints (regex, contains, in/not_in, max_length) then routes to
+  # NPL for approval workflows when needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  governance-evaluator:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.governance-evaluator
+    ports:
+      - "8090:8090"
+    environment:
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      GATEWAY_USERNAME: "gateway"
+      GATEWAY_PASSWORD: "Welcome123"
+      CACHE_REFRESH_SECONDS: "30"
+      PORT: "8090"
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - policy-net
+      - public-net  # For Keycloak token requests
 
   # ─────────────────────────────────────────────────────────────────────────
   # OPA Bundle Server (policy-net — serves NPL policy data as OPA bundle)

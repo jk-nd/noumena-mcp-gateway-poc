@@ -135,10 +135,13 @@ static_resources:
                         # OAuth Authorization endpoint — redirect to Keycloak
                         # Preserves query params (client_id, redirect_uri, etc.)
                         # Must be 302 (not 301) — browsers cache 301 and break Keycloak sessions
+                        # Uses keycloak:11000 (not localhost) so cookies match the form action
+                        # hostname that Keycloak generates from KC_HOSTNAME. Requires
+                        # 127.0.0.1 keycloak in /etc/hosts for browser resolution.
                         - match:
                             path: "/authorize"
                           redirect:
-                            host_redirect: "localhost:11000"
+                            host_redirect: "keycloak:11000"
                             path_redirect: "/realms/mcpgateway/protocol/openid-connect/auth"
                             response_code: "FOUND"
                           typed_per_filter_config:

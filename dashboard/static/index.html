@@ -105,9 +105,35 @@ td:first-child { color: var(--text); }
 
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 200; }
-.modal { background: var(--bg2); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 24px; width: 520px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
+.modal { background: var(--bg2); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 24px; width: 640px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
 .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+/* Claims table */
+.claims-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.claims-table th { text-align: left; padding: 6px 8px; font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--glass-border); }
+.claims-table td { padding: 4px 6px; border-bottom: 1px solid var(--glass-border); }
+.claims-table select, .claims-table input { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 6px 10px; color: var(--text); font-size: 13px; outline: none; width: 100%; }
+.claims-table select:focus, .claims-table input:focus { border-color: var(--accent); }
+.claims-table .btn-remove { background: none; border: none; color: var(--red); cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 4px; }
+.claims-table .btn-remove:hover { background: var(--red-dim); }
+.btn-add-claim { background: none; border: 1px dashed var(--glass-border); color: var(--text3); cursor: pointer; font-size: 12px; padding: 6px 12px; border-radius: var(--radius-sm); transition: all 0.15s; }
+.btn-add-claim:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Tool checkboxes */
+.tool-checks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.tool-check { display: flex; align-items: center; gap: 6px; background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 6px 12px; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.tool-check:hover { border-color: var(--accent); }
+.tool-check input[type="checkbox"] { accent-color: var(--accent); }
+.tool-check-group { margin-top: 8px; }
+.tool-check-group-label { font-size: 11px; color: var(--text3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+
+/* Tag pills in rules table */
+.tag-pill { display: inline-block; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 10px; margin: 1px 2px; white-space: nowrap; }
+.tag-pill-claim { background: var(--accent-dim); color: var(--accent); }
+.tag-pill-service { background: var(--green-dim); color: var(--green); }
+.tag-pill-tool { background: var(--purple-dim); color: var(--purple); }
+.tag-pill-wildcard { background: var(--amber-dim); color: var(--amber); }
 
 /* Service card */
 .svc-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -161,6 +187,40 @@ td:first-child { color: var(--text); }
 .wire-step.fail { color: var(--red); }
 .wire-step.fail::before { content: "\2717 "; }
 
+/* Wizard */
+.wizard-steps { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 1px solid var(--glass-border); }
+.wizard-step { flex: 1; text-align: center; padding: 10px 8px; font-size: 12px; color: var(--text3); border-bottom: 2px solid transparent; transition: all 0.15s; }
+.wizard-step.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.wizard-step.done { color: var(--green); }
+.wizard-step .step-num { display: inline-block; width: 22px; height: 22px; line-height: 22px; border-radius: 50%; background: var(--glass); font-size: 11px; font-weight: 700; margin-right: 6px; }
+.wizard-step.active .step-num { background: var(--accent); color: white; }
+.wizard-step.done .step-num { background: var(--green-dim); color: var(--green); }
+.wizard-body { min-height: 200px; }
+.wizard-actions { display: flex; justify-content: space-between; margin-top: 20px; }
+.selectable-card { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 14px 16px; cursor: pointer; transition: all 0.15s; margin-bottom: 8px; }
+.selectable-card:hover { border-color: var(--accent); background: var(--accent-dim); }
+.selectable-card.selected { border-color: var(--accent); background: var(--accent-dim); }
+.selectable-card .sc-title { font-size: 14px; font-weight: 600; }
+.selectable-card .sc-desc { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.selectable-card .sc-meta { font-size: 11px; color: var(--text3); margin-top: 4px; }
+
+/* Constraint cards */
+.constraint-card { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 8px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.constraint-info { flex: 1; }
+.constraint-desc { font-size: 13px; color: var(--text); margin-bottom: 4px; }
+.constraint-detail { font-size: 12px; color: var(--text3); font-family: 'SF Mono', 'Fira Code', monospace; }
+.constraint-badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 3px; background: var(--purple-dim); color: var(--purple); margin-right: 4px; }
+
+/* Review panel */
+.review-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.review-col h4 { font-size: 12px; color: var(--text3); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+.review-col pre { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 12px; font-size: 12px; color: var(--text2); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+.review-human { font-size: 14px; line-height: 1.6; }
+
+/* Form textarea */
+.form-group textarea { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 8px 12px; color: var(--text); font-size: 13px; outline: none; width: 100%; resize: vertical; font-family: 'SF Mono', 'Fira Code', monospace; }
+.form-group textarea:focus { border-color: var(--accent); }
+
 ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--text3); border-radius: 3px; }
 </style>
 </head>
@@ -212,6 +272,7 @@ td:first-child { color: var(--text); }
     <div class="nav-section">Governance</div>
     <div class="nav-item" data-panel="catalog" onclick="switchPanel('catalog')"><span class="nav-icon">&#9881;</span> Catalog</div>
     <div class="nav-item" data-panel="rules" onclick="switchPanel('rules')"><span class="nav-icon">&#9733;</span> Access Rules</div>
+    <div class="nav-item" data-panel="gov-rules" onclick="switchPanel('gov-rules')"><span class="nav-icon">&#9881;</span> Gov Rules <span class="nav-badge" id="constraintBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="approvals" onclick="switchPanel('approvals')"><span class="nav-icon">&#9998;</span> Approvals <span class="nav-badge" id="approvalBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="revoked" onclick="switchPanel('revoked')"><span class="nav-icon">&#10007;</span> Revoked</div>
 
@@ -245,6 +306,14 @@ td:first-child { color: var(--text); }
         <button class="btn btn-primary" onclick="showAddServiceModal()">+ Add Service</button>
       </div>
       <div class="card-grid" id="catalogGrid"></div>
+    </div>
+
+    <!-- Governance Rules -->
+    <div class="panel" id="panel-gov-rules">
+      <div class="panel-header"><div><div class="panel-title">Governance Rules</div><div class="panel-desc">Argument-level constraints for gated tools. Define rules like "only search these domains" or "max 500 character queries."</div></div>
+        <button class="btn btn-primary" onclick="openRuleWizard()">+ New Rule</button>
+      </div>
+      <div id="constraintsList"></div>
     </div>
 
     <!-- Access Rules -->
@@ -305,7 +374,7 @@ td:first-child { color: var(--text); }
 
 <script>
 /* === State === */
-let state = { status: {}, bundle: {}, approvals: [], users: [], governance: {}, backends: {}, suggestions: {} };
+let state = { status: {}, bundle: {}, approvals: [], users: [], governance: {}, backends: {}, suggestions: {}, constraints: {} };
 let currentUser = null;
 let countdown = 30;
 let discoverTab = 'docker';
@@ -380,15 +449,16 @@ async function fetchUsers() { try { state.users = (await api('GET', '/api/users'
 async function fetchGovernance() { try { state.governance = (await api('GET', '/api/governance')).instances || {}; } catch(e) { state.governance = {}; } }
 async function fetchBackends() { try { state.backends = (await api('GET', '/api/backends')).backends || {}; } catch(e) { state.backends = {}; } }
 async function fetchSuggestions() { try { state.suggestions = await api('GET', '/api/suggestions'); } catch(e) {} }
+async function fetchConstraints() { try { state.constraints = (await api('GET', '/api/constraints')).configs || {}; } catch(e) { state.constraints = {}; } }
 
 async function refreshAll() {
   countdown = 30;
-  await Promise.all([fetchStatus(), fetchBundle(), fetchApprovals(), fetchUsers(), fetchGovernance(), fetchBackends(), fetchSuggestions()]);
+  await Promise.all([fetchStatus(), fetchBundle(), fetchApprovals(), fetchUsers(), fetchGovernance(), fetchBackends(), fetchSuggestions(), fetchConstraints()]);
   renderAll();
 }
 
 /* === Rendering === */
-function renderAll() { renderStatus(); renderStats(); renderCatalog(); renderRules(); renderApprovals(); renderRevoked(); renderUsers(); renderBackends(); }
+function renderAll() { renderStatus(); renderStats(); renderCatalog(); renderRules(); renderApprovals(); renderRevoked(); renderUsers(); renderBackends(); renderConstraints(); }
 
 function renderStatus() {
   const svcs = ['npl_engine','keycloak','opa','gateway','bundle_server'];
@@ -429,11 +499,16 @@ function renderCatalog() {
       <button class="btn btn-sm btn-danger" onclick="removeService('${esc(name)}')">Remove</button>
     </div></div>
     <div>${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
-    ${tools.map(([t,info]) => `<div class="tool-row"><span class="tool-name">${esc(t)}</span><div class="tool-actions">
+    ${tools.map(([t,info]) => {
+      const svcConstraints = state.constraints[name] || [];
+      const toolCfg = svcConstraints.find(c => c.toolName === t);
+      const cCount = toolCfg ? (toolCfg.constraints||[]).length : 0;
+      return `<div class="tool-row"><span class="tool-name"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3)">${esc(t)}</a>${cCount?` <span class="constraint-badge">${cCount} rule${cCount>1?'s':''}</span>`:''}</span><div class="tool-actions">
       <span class="tag ${info.tag==='gated'?'tag-gated':'tag-open'}">${info.tag||'open'}</span>
       <button class="btn btn-sm btn-ghost" onclick="toggleTag('${esc(name)}','${esc(t)}','${info.tag==='gated'?'open':'gated'}')" title="${info.tag==='gated'?'Make this tool open (no approval needed)':'Require approval for this tool'}">${info.tag==='gated'?'Set Open':'Set Gated'}</button>
       <button class="btn btn-sm btn-danger" onclick="removeTool('${esc(name)}','${esc(t)}')">&#10005;</button>
-    </div></div>`).join('')}</div>
+    </div></div>`;
+    }).join('')}</div>
     ${!hasGov && tools.some(([_,i])=>i.tag==='gated')?'<div style="font-size:12px;color:var(--amber);padding:4px 0">Gated tools need a Governance instance to process approval requests</div>':''}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-sm btn-ghost" onclick="showAddToolModal('${esc(name)}')">+ Tool</button>
@@ -445,13 +520,18 @@ function renderCatalog() {
 function renderRules() {
   const rules = state.bundle.accessRules || [];
   if (!rules.length) { document.getElementById('rulesTable').innerHTML = '<div class="empty"><div class="empty-icon">&#9733;</div><div class="empty-text">No access rules. Click "Add Rule" to create one.</div></div>'; return; }
-  // Store rules in state for edit modal access
   state._rules = rules;
   document.getElementById('rulesTable').innerHTML = `<table><tr><th>ID</th><th>Type</th><th>Match</th><th>Services</th><th>Tools</th><th></th></tr>
     ${rules.map((r, idx) => { const m=r.matcher||{}, mt=m.matchType||'claims';
-      let ms=mt==='claims'?Object.entries(m.claims||{}).map(([k,v])=>`${k}=${v}`).join(', '):(m.identity||'');
+      const matchPills = mt==='claims'
+        ? Object.entries(m.claims||{}).map(([k,v])=>`<span class="tag-pill tag-pill-claim">${esc(k)}=${esc(v)}</span>`).join(' ')
+        : `<span class="tag-pill tag-pill-claim">${esc(m.identity||'')}</span>`;
+      const svcPills = (r.allow?.services||[]).map(s =>
+        `<span class="tag-pill ${s==='*'?'tag-pill-wildcard':'tag-pill-service'}">${esc(s)}</span>`).join(' ');
+      const toolPills = (r.allow?.tools||[]).map(t =>
+        `<span class="tag-pill ${t==='*'?'tag-pill-wildcard':'tag-pill-tool'}">${esc(t)}</span>`).join(' ');
       return `<tr><td><strong>${esc(r.id||'')}</strong></td><td><span class="tag ${mt==='claims'?'tag-claims':'tag-identity'}">${mt}</span></td>
-        <td>${esc(ms)}</td><td>${esc((r.allow?.services||[]).join(', '))}</td><td>${esc((r.allow?.tools||[]).join(', '))}</td>
+        <td>${matchPills}</td><td>${svcPills}</td><td>${toolPills}</td>
         <td style="white-space:nowrap"><button class="btn btn-sm btn-ghost" onclick="showEditRuleModal(${idx})">Edit</button> <button class="btn btn-sm btn-danger" onclick="removeRule('${esc(r.id)}')">Remove</button></td></tr>`;
     }).join('')}</table>`;
 }
@@ -487,6 +567,7 @@ function renderUsers() {
       <td>${esc(u.organization)}</td><td>${esc(u.department)}</td>
       <td><span class="tag ${u.enabled?'tag-enabled':'tag-disabled'}">${u.enabled?'active':'disabled'}</span></td>
       <td style="white-space:nowrap">
+        <button class="btn btn-sm btn-ghost" onclick="showUserAccessModal('${esc(u.id)}')">View Access</button>
         <button class="btn btn-sm btn-ghost" onclick="showEditUserModal('${esc(u.id)}')">Edit</button>
         ${u.username!=='admin'&&u.username!=='gateway'?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.id)}','${esc(u.username)}')">Del</button>`:''}
       </td></tr>`).join('')}</table>`;
@@ -502,15 +583,15 @@ function renderBackends() {
 
 /* === Actions (all wrapped in try/catch) === */
 async function act(fn, successMsg) { try { await fn(); toast(successMsg,'success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); console.error(e); } }
-async function enableService(n) { await act(()=>api('POST','/api/services/enable',{serviceName:n}), 'Service enabled'); }
+async function enableService(n) { if(!confirm(`Enable service "${n}"? Its tools will become available to authorized users.`))return; await act(()=>api('POST','/api/services/enable',{serviceName:n}), 'Service enabled'); }
 async function disableService(n) { await act(()=>api('POST','/api/services/disable',{serviceName:n}), 'Service disabled'); }
 async function removeService(n) { if(!confirm(`Remove "${n}" and all its tools?`))return; await act(()=>api('POST','/api/services/remove',{serviceName:n}), 'Service removed'); }
-async function toggleTag(s,t,tag) { await act(()=>api('POST','/api/tools/set-tag',{serviceName:s,toolName:t,tag}), `${t} set to ${tag}`); }
+async function toggleTag(s,t,tag) { if(tag==='open'&&!confirm(`Set "${t}" to open? It will no longer require approval.`))return; await act(()=>api('POST','/api/tools/set-tag',{serviceName:s,toolName:t,tag}), `${t} set to ${tag}`); }
 async function removeTool(s,t) { await act(()=>api('POST','/api/tools/remove',{serviceName:s,toolName:t}), 'Tool removed'); }
 async function removeRule(id) { await act(()=>api('POST','/api/access-rules/remove',{id}), 'Rule removed'); }
 async function approveRequest(iid,rid) { await act(()=>api('POST','/api/approvals/approve',{instanceId:iid,requestId:rid}), `Approved ${rid}`); }
 async function reinstateSubject(id) { await act(()=>api('POST','/api/revoked/remove',{subjectId:id}), 'Reinstated'); }
-async function createGovernance(svc) { await act(()=>api('POST','/api/governance/create',{serviceName:svc}), `Governance created for ${svc}`); }
+async function createGovernance(svc) { if(!confirm(`Enable governance for "${svc}"?`))return; await act(()=>api('POST','/api/governance/create',{serviceName:svc}), `Governance created for ${svc}`); }
 async function deleteUser(id, name) { if(!confirm(`Delete user "${name}"?`))return; await act(()=>api('POST','/api/users/delete',{userId:id}), 'User deleted'); }
 
 /* === Modals === */
@@ -534,107 +615,208 @@ async function submitAddService() { const n=document.getElementById('newSvcName'
 function showAddToolModal(svc) {
   showModal(`<h3>Add Tool to ${esc(svc)}</h3>
     <div class="form-group" style="margin-bottom:12px"><label>Tool Name</label><input id="newToolName" placeholder="e.g. list_items" /></div>
-    <div class="form-group" style="margin-bottom:16px"><label>Tag</label><select id="newToolTag"><option value="open">open</option><option value="gated">gated</option></select></div>
+    <div class="form-group" style="margin-bottom:16px"><label>Tag</label><select id="newToolTag"><option value="gated">gated</option><option value="open">open</option></select></div>
     <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddTool('${esc(svc)}')">Add</button></div>`);
   document.getElementById('newToolName').focus();
 }
 async function submitAddTool(svc) { const n=document.getElementById('newToolName').value.trim(), tag=document.getElementById('newToolTag').value; if(!n)return; try { await api('POST','/api/tools/register',{serviceName:svc,toolName:n,tag}); closeModal(); toast('Tool added','success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); } }
 
-function showAddRuleModal() {
-  const sg = state.suggestions;
-  const svcOpts = (sg.services||[]).map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
-  const deptOpts = (sg.departments||[]).map(d => `<option value="${esc(d)}">`).join('');
-  const orgOpts = (sg.organizations||[]).map(o => `<option value="${esc(o)}">`).join('');
+// === Shared Rule Form Builder ===
+function getClaimSuggestions(key) {
+  const sg = state.suggestions || {};
+  if (key === 'role') return sg.roles || [];
+  if (key === 'department') return sg.departments || [];
+  if (key === 'organization') return sg.organizations || [];
+  return [];
+}
+
+function addClaimRow(key, value) {
+  const tbody = document.getElementById('claimsTableBody');
+  if (!tbody) return;
+  const tr = document.createElement('tr');
+  const knownKeys = ['role', 'department', 'organization'];
+  const isCustom = key && !knownKeys.includes(key);
+  const keySelectVal = isCustom ? '_other' : (key || '');
+  const suggestions = key ? getClaimSuggestions(key) : [];
+  const dlId = 'claimDl_' + Math.random().toString(36).slice(2, 8);
+
+  tr.innerHTML = `<td style="width:40%">
+      <select class="claim-key-select" onchange="onClaimKeyChange(this)">
+        <option value="" disabled ${!key?'selected':''}>Select...</option>
+        <option value="role" ${keySelectVal==='role'?'selected':''}>role</option>
+        <option value="department" ${keySelectVal==='department'?'selected':''}>department</option>
+        <option value="organization" ${keySelectVal==='organization'?'selected':''}>organization</option>
+        <option value="_other" ${keySelectVal==='_other'?'selected':''}>other...</option>
+      </select>
+      <input class="claim-key-custom" placeholder="custom key" value="${isCustom ? esc(key) : ''}" style="display:${isCustom ? 'block' : 'none'};margin-top:4px" />
+    </td>
+    <td style="width:50%">
+      <input class="claim-value-input" list="${dlId}" value="${esc(value || '')}" placeholder="value" />
+      <datalist id="${dlId}">${suggestions.map(s => `<option value="${esc(s)}">`).join('')}</datalist>
+    </td>
+    <td style="width:10%;text-align:center"><button type="button" class="btn-remove" onclick="removeClaimRow(this)" title="Remove">&times;</button></td>`;
+  tbody.appendChild(tr);
+}
+
+function removeClaimRow(btn) {
+  btn.closest('tr').remove();
+}
+
+function onClaimKeyChange(sel) {
+  const tr = sel.closest('tr');
+  const customInput = tr.querySelector('.claim-key-custom');
+  const valueInput = tr.querySelector('.claim-value-input');
+  const dl = tr.querySelector('datalist');
+  if (sel.value === '_other') {
+    customInput.style.display = 'block';
+    customInput.focus();
+    dl.innerHTML = '';
+  } else {
+    customInput.style.display = 'none';
+    customInput.value = '';
+    const suggestions = getClaimSuggestions(sel.value);
+    dl.innerHTML = suggestions.map(s => `<option value="${esc(s)}">`).join('');
+  }
+  valueInput.value = '';
+}
+
+function collectClaims() {
+  const claims = {};
+  const rows = document.querySelectorAll('#claimsTableBody tr');
+  rows.forEach(tr => {
+    const sel = tr.querySelector('.claim-key-select');
+    const customInput = tr.querySelector('.claim-key-custom');
+    const valueInput = tr.querySelector('.claim-value-input');
+    let key = sel.value === '_other' ? customInput.value.trim() : sel.value;
+    const value = valueInput.value.trim();
+    if (key && value) claims[key] = value;
+  });
+  return claims;
+}
+
+function collectTools() {
+  const allCheck = document.getElementById('toolsAllCheck');
+  if (allCheck && allCheck.checked) return ['*'];
+  const checked = document.querySelectorAll('#toolCheckboxes input[type="checkbox"]:checked');
+  return [...checked].map(cb => cb.value);
+}
+
+function updateToolOptions() {
+  const allCheck = document.getElementById('toolsAllCheck');
+  const container = document.getElementById('toolCheckboxes');
+  if (!container) return;
+  if (allCheck && allCheck.checked) { container.style.display = 'none'; return; }
+  container.style.display = 'block';
+  const sg = state.suggestions || {};
+  const selectedSvcs = [...document.getElementById('ruleServices').selectedOptions].map(o => o.value);
+  const allTools = sg.tools || {};
+  let html = '';
+  const showAll = selectedSvcs.includes('*');
+  const svcsToShow = showAll ? Object.keys(allTools) : selectedSvcs.filter(s => s !== '*');
+  svcsToShow.forEach(svc => {
+    const tools = allTools[svc] || [];
+    if (!tools.length) return;
+    html += `<div class="tool-check-group"><div class="tool-check-group-label">${esc(svc)}</div><div class="tool-checks">`;
+    tools.forEach(t => {
+      const checked = (state._editTools || []).includes(t) ? 'checked' : '';
+      html += `<label class="tool-check"><input type="checkbox" value="${esc(t)}" ${checked} />${esc(t)}</label>`;
+    });
+    html += `</div></div>`;
+  });
+  container.innerHTML = html || '<div style="color:var(--text3);font-size:12px;padding:4px">No tools available for selected services</div>';
+}
+
+function buildRuleFormHTML(opts) {
+  const sg = state.suggestions || {};
+  const svcOpts = (sg.services||[]).map(s =>
+    `<option value="${esc(s)}" ${(opts.services||[]).includes(s)?'selected':''}>${esc(s)}</option>`).join('');
+  const wildSvcSelected = (opts.services||[]).includes('*');
   const userOpts = (sg.users||[]).map(u => `<option value="${esc(u)}">`).join('');
+  const mt = opts.matchType || 'claims';
+  const hasAllTools = (opts.tools||[]).includes('*') || (opts.tools||[]).length === 0;
+
+  return `
+    <div class="form-group" style="margin-bottom:12px"><label>Rule ID</label><input id="ruleId" value="${esc(opts.id||'')}" ${opts.idReadonly?'readonly style="opacity:0.5"':`placeholder="e.g. sales-calendar"`} /></div>
+    <div class="form-group" style="margin-bottom:12px"><label>Match Type</label><select id="ruleType" onchange="toggleRuleFields()"><option value="claims" ${mt==='claims'?'selected':''}>Claims-based</option><option value="identity" ${mt==='identity'?'selected':''}>Identity-based</option></select></div>
+    <div id="claimsFields" style="${mt==='claims'?'':'display:none'}">
+      <label style="font-size:12px;color:var(--text3);font-weight:500;margin-bottom:4px;display:block">Claims</label>
+      <table class="claims-table"><thead><tr><th>Key</th><th>Value</th><th></th></tr></thead><tbody id="claimsTableBody"></tbody></table>
+      <button type="button" class="btn-add-claim" onclick="addClaimRow()">+ Add Claim</button>
+    </div>
+    <div id="identityFields" style="${mt==='identity'?'':'display:none'}">
+      <div class="form-group" style="margin-bottom:12px"><label>Identity (email)</label><input id="ruleIdentity" list="userList" value="${esc(opts.identity||'')}" placeholder="e.g. alice@acme.com" /><datalist id="userList">${userOpts}</datalist></div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px;margin-top:12px"><label>Allow Services</label><select id="ruleServices" multiple style="min-height:60px" onchange="updateToolOptions()">${svcOpts}<option value="*" ${wildSvcSelected?'selected':''}>* (all services)</option></select></div>
+    <div class="form-group" style="margin-bottom:16px"><label>Allow Tools</label>
+      <label class="tool-check" style="margin-top:4px"><input type="checkbox" id="toolsAllCheck" ${hasAllTools?'checked':''} onchange="updateToolOptions()" /> * (all tools)</label>
+      <div id="toolCheckboxes" style="display:${hasAllTools?'none':'block'}"></div>
+    </div>`;
+}
+
+function initRuleForm(claims, tools) {
+  // Populate initial claim rows
+  if (claims && Object.keys(claims).length) {
+    Object.entries(claims).forEach(([k, v]) => addClaimRow(k, v));
+  }
+  // Store tools for checkbox pre-selection
+  state._editTools = tools || [];
+  updateToolOptions();
+}
+
+function showAddRuleModal() {
   showModal(`<h3>Add Access Rule</h3>
-    <div class="form-group" style="margin-bottom:12px"><label>Rule ID</label><input id="ruleId" placeholder="e.g. sales-calendar" /></div>
-    <div class="form-group" style="margin-bottom:12px"><label>Match Type</label><select id="ruleType" onchange="toggleRuleFields()"><option value="claims">Claims-based</option><option value="identity">Identity-based</option></select></div>
-    <div id="claimsFields">
-      <div class="form-row">
-        <div class="form-group"><label>Department</label><input id="ruleDept" list="deptList" placeholder="e.g. sales" /><datalist id="deptList">${deptOpts}</datalist></div>
-        <div class="form-group"><label>Organization</label><input id="ruleOrg" list="orgList" placeholder="e.g. acme" /><datalist id="orgList">${orgOpts}</datalist></div>
-      </div>
-      <div class="form-group" style="margin-bottom:12px"><label>Extra claims (key=value, comma-separated)</label><input id="ruleExtraClaims" placeholder="e.g. role=manager" /></div>
-    </div>
-    <div id="identityFields" style="display:none">
-      <div class="form-group" style="margin-bottom:12px"><label>Identity (email)</label><input id="ruleIdentity" list="userList" placeholder="e.g. alice@acme.com" /><datalist id="userList">${userOpts}</datalist></div>
-    </div>
-    <div class="form-group" style="margin-bottom:12px"><label>Allow Services</label><select id="ruleServices" multiple style="min-height:60px">${svcOpts}<option value="*">* (all services)</option></select></div>
-    <div class="form-group" style="margin-bottom:16px"><label>Allow Tools (comma-separated, * for all)</label><input id="ruleTools" value="*" /></div>
+    ${buildRuleFormHTML({ matchType: 'claims', services: ['*'], tools: ['*'] })}
     <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddRule()">Add Rule</button></div>`);
+  initRuleForm({}, ['*']);
   document.getElementById('ruleId').focus();
 }
+
 function toggleRuleFields() { const t=document.getElementById('ruleType').value; document.getElementById('claimsFields').style.display=t==='claims'?'block':'none'; document.getElementById('identityFields').style.display=t==='identity'?'block':'none'; }
+
 async function submitAddRule() {
-  const id=document.getElementById('ruleId').value.trim(); if(!id)return;
+  const id = document.getElementById('ruleId').value.trim(); if (!id) return;
+  const selSvcsCheck = [...document.getElementById('ruleServices').selectedOptions].map(o=>o.value);
+  if (!selSvcsCheck.length) { toast('Select at least one service','error'); return; }
   try {
-  const type=document.getElementById('ruleType').value;
-  const claims={};
-  if(type==='claims') {
-    const dept=document.getElementById('ruleDept').value.trim(); if(dept)claims.department=dept;
-    const org=document.getElementById('ruleOrg').value.trim(); if(org)claims.organization=org;
-    const extra=document.getElementById('ruleExtraClaims').value.split(',').map(s=>s.trim()).filter(Boolean);
-    extra.forEach(p=>{const[k,v]=p.split('=');if(k&&v)claims[k.trim()]=v.trim();});
-  }
-  const selSvcs = [...document.getElementById('ruleServices').selectedOptions].map(o=>o.value);
-  await api('POST','/api/access-rules/add',{
-    id, matchType:type, matchClaims:claims, matchIdentity:type==='identity'?document.getElementById('ruleIdentity').value.trim():'',
-    allowServices:selSvcs, allowTools:document.getElementById('ruleTools').value.split(',').map(s=>s.trim()).filter(Boolean),
-  });
-  closeModal(); toast('Rule added','success'); await refreshAll();
+    const type = document.getElementById('ruleType').value;
+    const claims = type === 'claims' ? collectClaims() : {};
+    const tools = collectTools();
+    if (!tools.length) { toast('Select at least one tool','error'); return; }
+    await api('POST','/api/access-rules/add',{
+      id, matchType: type, matchClaims: claims,
+      matchIdentity: type === 'identity' ? document.getElementById('ruleIdentity').value.trim() : '',
+      allowServices: selSvcsCheck, allowTools: tools,
+    });
+    closeModal(); toast('Rule added','success'); await refreshAll();
   } catch(e) { toast('Error: '+(e.message||e),'error'); }
 }
 
 function showEditRuleModal(idx) {
-  const r = (state._rules||[])[idx]; if(!r) return;
+  const r = (state._rules||[])[idx]; if (!r) return;
   const m = r.matcher||{}, mt = m.matchType||'claims';
   const claims = m.claims||{};
-  const sg = state.suggestions;
-  const svcOpts = (sg.services||[]).map(s => `<option value="${esc(s)}" ${(r.allow?.services||[]).includes(s)?'selected':''}>${esc(s)}</option>`).join('');
-  const wildSelected = (r.allow?.services||[]).includes('*');
-  const deptOpts = (sg.departments||[]).map(d => `<option value="${esc(d)}">`).join('');
-  const orgOpts = (sg.organizations||[]).map(o => `<option value="${esc(o)}">`).join('');
-  const userOpts = (sg.users||[]).map(u => `<option value="${esc(u)}">`).join('');
-  // Separate well-known claims from extra claims
-  const dept = claims.department||'', org = claims.organization||'';
-  const extraClaims = Object.entries(claims).filter(([k])=>k!=='department'&&k!=='organization').map(([k,v])=>`${k}=${v}`).join(', ');
-  const toolsStr = (r.allow?.tools||[]).join(', ');
+  const tools = r.allow?.tools||[];
+  const services = r.allow?.services||[];
 
   showModal(`<h3>Edit Rule: ${esc(r.id)}</h3>
-    <div class="form-group" style="margin-bottom:12px"><label>Rule ID</label><input id="ruleId" value="${esc(r.id)}" readonly style="opacity:0.5" /></div>
-    <div class="form-group" style="margin-bottom:12px"><label>Match Type</label><select id="ruleType" onchange="toggleRuleFields()"><option value="claims" ${mt==='claims'?'selected':''}>Claims-based</option><option value="identity" ${mt==='identity'?'selected':''}>Identity-based</option></select></div>
-    <div id="claimsFields" style="${mt==='claims'?'':'display:none'}">
-      <div class="form-row">
-        <div class="form-group"><label>Department</label><input id="ruleDept" list="deptList" value="${esc(dept)}" /><datalist id="deptList">${deptOpts}</datalist></div>
-        <div class="form-group"><label>Organization</label><input id="ruleOrg" list="orgList" value="${esc(org)}" /><datalist id="orgList">${orgOpts}</datalist></div>
-      </div>
-      <div class="form-group" style="margin-bottom:12px"><label>Extra claims (key=value, comma-separated)</label><input id="ruleExtraClaims" value="${esc(extraClaims)}" /></div>
-    </div>
-    <div id="identityFields" style="${mt==='identity'?'':'display:none'}">
-      <div class="form-group" style="margin-bottom:12px"><label>Identity (email)</label><input id="ruleIdentity" list="userList" value="${esc(m.identity||'')}" /><datalist id="userList">${userOpts}</datalist></div>
-    </div>
-    <div class="form-group" style="margin-bottom:12px"><label>Allow Services</label><select id="ruleServices" multiple style="min-height:60px">${svcOpts}<option value="*" ${wildSelected?'selected':''}>* (all services)</option></select></div>
-    <div class="form-group" style="margin-bottom:16px"><label>Allow Tools (comma-separated, * for all)</label><input id="ruleTools" value="${esc(toolsStr)}" /></div>
+    ${buildRuleFormHTML({ id: r.id, idReadonly: true, matchType: mt, identity: m.identity||'', services, tools })}
     <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitEditRule('${esc(r.id)}')">Save Changes</button></div>`);
+  initRuleForm(claims, tools);
 }
+
 async function submitEditRule(oldId) {
   try {
-    // Remove old rule first
     await api('POST','/api/access-rules/remove',{id:oldId});
-    // Build updated rule from form
-    const id = document.getElementById('ruleId').value.trim(); if(!id) return;
+    const id = document.getElementById('ruleId').value.trim(); if (!id) return;
     const type = document.getElementById('ruleType').value;
-    const claims = {};
-    if(type==='claims') {
-      const dept=document.getElementById('ruleDept').value.trim(); if(dept)claims.department=dept;
-      const org=document.getElementById('ruleOrg').value.trim(); if(org)claims.organization=org;
-      const extra=document.getElementById('ruleExtraClaims').value.split(',').map(s=>s.trim()).filter(Boolean);
-      extra.forEach(p=>{const[k,v]=p.split('=');if(k&&v)claims[k.trim()]=v.trim();});
-    }
+    const claims = type === 'claims' ? collectClaims() : {};
     const selSvcs = [...document.getElementById('ruleServices').selectedOptions].map(o=>o.value);
+    const tools = collectTools();
+    if (!tools.length) { toast('Select at least one tool','error'); return; }
     await api('POST','/api/access-rules/add',{
-      id, matchType:type, matchClaims:claims, matchIdentity:type==='identity'?document.getElementById('ruleIdentity').value.trim():'',
-      allowServices:selSvcs, allowTools:document.getElementById('ruleTools').value.split(',').map(s=>s.trim()).filter(Boolean),
+      id, matchType: type, matchClaims: claims,
+      matchIdentity: type === 'identity' ? document.getElementById('ruleIdentity').value.trim() : '',
+      allowServices: selSvcs, allowTools: tools,
     });
     closeModal(); toast('Rule updated','success'); await refreshAll();
   } catch(e) { toast('Error: '+(e.message||e),'error'); }
@@ -873,6 +1055,450 @@ function esc(s) { if(s==null)return''; const d=document.createElement('div'); d.
 
 function startTimer() {
   setInterval(() => { countdown--; document.getElementById('refreshTimer').textContent=`${countdown}s`; if(countdown<=0)refreshAll(); }, 1000);
+}
+
+/* === Governance Rules === */
+let wizardState = { step: 1, service: '', tool: '', tools: [], param: '', operator: 'in', values: '', description: '' };
+
+function renderConstraints() {
+  const el = document.getElementById('constraintsList');
+  const badge = document.getElementById('constraintBadge');
+  const allConstraints = state.constraints || {};
+  let totalCount = 0;
+  Object.values(allConstraints).forEach(cfgs => {
+    if (Array.isArray(cfgs)) cfgs.forEach(c => { totalCount += (c.constraints||[]).length; });
+  });
+  if (totalCount > 0) { badge.textContent = totalCount; badge.style.display = 'inline'; }
+  else { badge.style.display = 'none'; }
+
+  const entries = Object.entries(allConstraints);
+  if (!entries.length || totalCount === 0) {
+    el.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No governance rules defined. Click "New Rule" to create argument-level constraints for gated tools.</div></div></div>';
+    return;
+  }
+  let html = '';
+  for (const [svc, cfgs] of entries) {
+    if (!Array.isArray(cfgs)) continue;
+    for (const cfg of cfgs) {
+      const constraints = cfg.constraints || [];
+      if (!constraints.length) continue;
+      const reqApproval = cfg.requiresApproval !== false;
+      html += `<div class="card"><div class="svc-header"><div style="display:flex;align-items:center;gap:8px">
+        <span class="svc-name">${esc(svc)}.${esc(cfg.toolName)}</span>
+        <span class="tag ${reqApproval?'tag-gated':'tag-open'}">${reqApproval?'approval required':'auto-allow'}</span>
+      </div><div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-ghost" onclick="toggleToolApproval('${esc(svc)}','${esc(cfg.toolName)}',${!reqApproval})">${reqApproval?'Set Auto-Allow':'Require Approval'}</button>
+        <button class="btn btn-sm btn-danger" onclick="clearToolConstraints('${esc(svc)}','${esc(cfg.toolName)}')">Clear All</button>
+      </div></div>`;
+      for (const c of constraints) {
+        html += `<div class="constraint-card"><div class="constraint-info">
+          <div class="constraint-desc">${esc(c.description||'No description')}</div>
+          <div class="constraint-detail">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
+        </div><button class="btn btn-sm btn-danger" onclick="removeConstraint('${esc(svc)}','${esc(cfg.toolName)}','${esc(c.paramName)}')">Remove</button></div>`;
+      }
+      html += '</div>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+async function removeConstraint(svc, tool, param) {
+  await act(() => api('POST', '/api/constraints/remove', {serviceName: svc, toolName: tool, paramName: param}), 'Constraint removed');
+}
+async function clearToolConstraints(svc, tool) {
+  if (!confirm(`Remove all constraints from ${svc}.${tool}?`)) return;
+  await act(() => api('POST', '/api/constraints/clear', {serviceName: svc, toolName: tool}), 'Constraints cleared');
+}
+async function toggleToolApproval(svc, tool, required) {
+  if(!required && !confirm(`Set auto-allow for "${tool}"? Calls will bypass approval if constraints pass.`)) return;
+  await act(() => api('POST', '/api/governance/set-approval', {serviceName: svc, toolName: tool, required}), required ? 'Approval required' : 'Auto-allow set');
+}
+
+/* === Rule Builder Wizard === */
+function openRuleWizard() {
+  wizardState = { step: 1, service: '', tool: '', tools: [], param: '', operator: 'in', values: '', description: '' };
+  renderWizard();
+}
+
+function renderWizard() {
+  const s = wizardState;
+  const steps = ['Select Service', 'Select Tool', 'Build Constraint', 'Review'];
+  const stepsHtml = steps.map((label, i) => {
+    const num = i + 1;
+    const cls = num === s.step ? 'active' : (num < s.step ? 'done' : '');
+    return `<div class="wizard-step ${cls}"><span class="step-num">${num}</span>${label}</div>`;
+  }).join('');
+
+  let bodyHtml = '';
+  if (s.step === 1) bodyHtml = renderWizardStep1();
+  else if (s.step === 2) bodyHtml = renderWizardStep2();
+  else if (s.step === 3) bodyHtml = renderWizardStep3();
+  else if (s.step === 4) bodyHtml = renderWizardStep4();
+
+  const canBack = s.step > 1;
+  const canNext = s.step < 4 && ((s.step === 1 && s.service) || (s.step === 2 && s.tool) || s.step === 3);
+  const isApply = s.step === 4;
+
+  showModal(`<h3>New Governance Rule</h3>
+    <div class="wizard-steps">${stepsHtml}</div>
+    <div class="wizard-body">${bodyHtml}</div>
+    <div class="wizard-actions">
+      <div>${canBack ? `<button class="btn btn-ghost" onclick="wizardBack()">Back</button>` : ''}</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        ${isApply ? `<button class="btn btn-primary" onclick="wizardApply()">Apply Rule</button>` : ''}
+        ${canNext && !isApply ? `<button class="btn btn-primary" onclick="wizardNext()">Next</button>` : ''}
+      </div>
+    </div>`);
+}
+
+function renderWizardStep1() {
+  // Services that have governance enabled
+  const govSvcs = Object.keys(state.governance || {});
+  if (!govSvcs.length) return '<div class="empty"><div class="empty-text">No services with governance enabled. Enable governance on a service in the Catalog first.</div></div>';
+  const cat = state.bundle.catalog || {};
+  return govSvcs.map(svc => {
+    const entry = cat[svc] || {};
+    const toolCount = Object.keys(entry.tools || {}).length;
+    const sel = wizardState.service === svc ? 'selected' : '';
+    const cCount = (state.constraints[svc] || []).reduce((n, c) => n + (c.constraints||[]).length, 0);
+    return `<div class="selectable-card ${sel}" onclick="wizardSelectService('${esc(svc)}')">
+      <div class="sc-title">${esc(svc)}</div>
+      <div class="sc-meta">${toolCount} tool${toolCount!==1?'s':''} ${cCount ? ` &middot; ${cCount} existing rule${cCount!==1?'s':''}` : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+function wizardSelectService(svc) {
+  wizardState.service = svc;
+  wizardState.tool = '';
+  wizardState.tools = [];
+  renderWizard();
+  // Fetch schemas in background
+  api('GET', `/api/tools/schemas?service=${encodeURIComponent(svc)}`).then(data => {
+    wizardState.tools = data.tools || [];
+  }).catch(() => {
+    // Fallback: use catalog tools
+    const cat = state.bundle.catalog || {};
+    const tools = Object.keys((cat[svc] || {}).tools || {});
+    wizardState.tools = tools.map(t => ({name: t, description: '', inputSchema: {}}));
+  });
+}
+
+function renderWizardStep2() {
+  const tools = wizardState.tools;
+  const cat = state.bundle.catalog || {};
+  const catTools = Object.entries((cat[wizardState.service] || {}).tools || {});
+  // Merge catalog info with schema
+  const merged = catTools.map(([name, info]) => {
+    const schema = tools.find(t => t.name === name) || {};
+    return { name, tag: info.tag, description: schema.description || '', inputSchema: schema.inputSchema || {} };
+  });
+  if (!merged.length) return '<div class="empty"><div class="empty-text">No tools found for this service.</div></div>';
+  return merged.map(t => {
+    const sel = wizardState.tool === t.name ? 'selected' : '';
+    const params = Object.keys((t.inputSchema || {}).properties || {});
+    return `<div class="selectable-card ${sel}" onclick="wizardSelectTool('${esc(t.name)}')">
+      <div class="sc-title" style="display:flex;align-items:center;gap:8px">${esc(t.name)} <span class="tag ${t.tag==='gated'?'tag-gated':'tag-open'}" style="font-size:10px">${t.tag}</span></div>
+      ${t.description ? `<div class="sc-desc">${esc(t.description)}</div>` : ''}
+      ${params.length ? `<div class="sc-meta">Parameters: ${params.map(p => `<code>${esc(p)}</code>`).join(', ')}</div>` : '<div class="sc-meta">No parameters</div>'}
+    </div>`;
+  }).join('');
+}
+
+function wizardSelectTool(tool) {
+  wizardState.tool = tool;
+  renderWizard();
+}
+
+function renderWizardStep3() {
+  const s = wizardState;
+  const schema = (s.tools.find(t => t.name === s.tool) || {}).inputSchema || {};
+  const props = Object.entries((schema.properties || {}));
+  const paramOpts = props.map(([name, prop]) => `<option value="${esc(name)}">${esc(name)} (${esc(prop.type||'string')})</option>`).join('');
+  const fallbackOpt = props.length ? '' : '<option value="">-- enter manually --</option>';
+  const operators = [
+    ['in', 'Value must be in allowed list'],
+    ['not_in', 'Value must not be in blocked list'],
+    ['contains', 'Value must contain at least one substring'],
+    ['not_contains', 'Value must not contain any substring'],
+    ['regex', 'Value must match at least one pattern'],
+    ['max_length', 'Value length must not exceed limit'],
+  ];
+  return `
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Parameter</label>
+      ${props.length ? `<select id="wizParam" onchange="wizardState.param=this.value">${paramOpts}</select>` : `<input id="wizParam" placeholder="parameter name" value="${esc(s.param)}" oninput="wizardState.param=this.value" />`}
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Operator</label>
+      <select id="wizOp" onchange="wizardState.operator=this.value">
+        ${operators.map(([v,d]) => `<option value="${v}" ${s.operator===v?'selected':''}>${v} — ${d}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Values (one per line)</label>
+      <textarea id="wizValues" rows="4" placeholder="e.g.&#10;wikipedia.org&#10;stackoverflow.com" oninput="wizardState.values=this.value">${esc(s.values)}</textarea>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Description (human-readable)</label>
+      <input id="wizDesc" placeholder="e.g. Only search these 5 domains" value="${esc(s.description)}" oninput="wizardState.description=this.value" />
+    </div>`;
+}
+
+function renderWizardStep4() {
+  const s = wizardState;
+  // Auto-select param from step 3 if not set
+  if (!s.param) {
+    const sel = document.getElementById('wizParam');
+    if (sel) s.param = sel.value;
+  }
+  const valuesList = s.values.split('\n').map(v => v.trim()).filter(Boolean);
+  const humanText = `When calling <strong>${esc(s.service)}.${esc(s.tool)}</strong>,
+    the parameter <strong>${esc(s.param)}</strong> must satisfy:
+    <strong>${esc(s.operator)}</strong> [${valuesList.map(v => `"${esc(v)}"`).join(', ')}]
+    ${s.description ? `<br><br><em>${esc(s.description)}</em>` : ''}`;
+  const yaml = `service: ${s.service}
+tool: ${s.tool}
+constraint:
+  paramName: ${s.param}
+  operator: ${s.operator}
+  values:
+${valuesList.map(v => `    - "${v}"`).join('\n')}
+  description: "${s.description}"`;
+  return `<div class="review-cols">
+    <div class="review-col"><h4>Human-Readable</h4><div class="review-human">${humanText}</div></div>
+    <div class="review-col"><h4>Structured</h4><pre>${esc(yaml)}</pre></div>
+  </div>`;
+}
+
+function wizardNext() {
+  const s = wizardState;
+  if (s.step === 3) {
+    // Capture form values before advancing
+    const paramEl = document.getElementById('wizParam');
+    if (paramEl) s.param = paramEl.value;
+    const valEl = document.getElementById('wizValues');
+    if (valEl) s.values = valEl.value;
+    const descEl = document.getElementById('wizDesc');
+    if (descEl) s.description = descEl.value;
+    const opEl = document.getElementById('wizOp');
+    if (opEl) s.operator = opEl.value;
+    if (!s.param || !s.values.trim()) { toast('Parameter and values are required', 'error'); return; }
+  }
+  s.step++;
+  renderWizard();
+}
+
+function wizardBack() {
+  // Capture form state before going back
+  if (wizardState.step === 3) {
+    const paramEl = document.getElementById('wizParam');
+    if (paramEl) wizardState.param = paramEl.value;
+    const valEl = document.getElementById('wizValues');
+    if (valEl) wizardState.values = valEl.value;
+    const descEl = document.getElementById('wizDesc');
+    if (descEl) wizardState.description = descEl.value;
+    const opEl = document.getElementById('wizOp');
+    if (opEl) wizardState.operator = opEl.value;
+  }
+  wizardState.step--;
+  renderWizard();
+}
+
+async function wizardApply() {
+  const s = wizardState;
+  const valuesList = s.values.split('\n').map(v => v.trim()).filter(Boolean);
+  try {
+    await api('POST', '/api/constraints/add', {
+      serviceName: s.service,
+      toolName: s.tool,
+      paramName: s.param,
+      operator: s.operator,
+      values: valuesList,
+      description: s.description,
+    });
+    closeModal();
+    toast(`Rule added: ${s.service}.${s.tool}.${s.param}`, 'success');
+    await refreshAll();
+  } catch(e) {
+    toast('Error: ' + (e.message || e), 'error');
+  }
+}
+
+/* === Tool Detail Modal === */
+function showToolDetailModal(service, toolName) {
+  const catalog = state.bundle.catalog || {};
+  const svcCatalog = catalog[service] || {};
+  const toolInfo = (svcCatalog.tools || {})[toolName] || {};
+  const tag = toolInfo.tag || 'open';
+  const rules = state.bundle.accessRules || [];
+
+  // Find rules granting access to this service+tool
+  const matchingRules = rules.filter(r => {
+    const allowSvcs = r.allow?.services || [];
+    const allowTools = r.allow?.tools || ['*'];
+    const svcMatch = allowSvcs.includes('*') || allowSvcs.includes(service);
+    const toolMatch = allowTools.includes('*') || allowTools.includes(toolName);
+    return svcMatch && toolMatch;
+  });
+
+  // Find users who match those rules
+  const usersWithAccess = [];
+  for (const user of (state.users || [])) {
+    for (const rule of matchingRules) {
+      const m = rule.matcher || {};
+      const mt = m.matchType || 'claims';
+      let matches = false;
+      if (mt === 'claims') {
+        const claims = m.claims || {};
+        matches = true;
+        for (const [k, v] of Object.entries(claims)) {
+          if ((user[k] || '') !== v) { matches = false; break; }
+        }
+      } else if (mt === 'identity') {
+        matches = (m.identity || '') === user.email;
+      }
+      if (matches) { usersWithAccess.push({ user, rule }); break; }
+    }
+  }
+
+  // Get governance constraints
+  const svcConstraints = state.constraints[service] || [];
+  const toolCfg = Array.isArray(svcConstraints) ? svcConstraints.find(c => c.toolName === toolName) : null;
+  const constraints = toolCfg ? (toolCfg.constraints || []) : [];
+  const reqApproval = toolCfg ? toolCfg.requiresApproval !== false : true;
+
+  let html = `<h3>${esc(service)}.${esc(toolName)}</h3>`;
+  html += `<div style="margin-bottom:16px"><span class="tag ${tag==='gated'?'tag-gated':'tag-open'}" style="font-size:12px">${tag}</span>`;
+  if (toolCfg) html += ` <span class="tag ${reqApproval?'tag-gated':'tag-open'}" style="font-size:12px">${reqApproval?'approval required':'auto-allow'}</span>`;
+  html += `</div>`;
+
+  // Access section
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Access Rules (${matchingRules.length})</h4>`;
+  if (matchingRules.length) {
+    html += `<div style="margin-bottom:16px">`;
+    for (const r of matchingRules) {
+      const m = r.matcher || {};
+      const mt = m.matchType || 'claims';
+      const matchStr = mt === 'claims' ? Object.entries(m.claims||{}).map(([k,v])=>`${k}=${v}`).join(', ') : (m.identity||'');
+      html += `<div style="padding:6px 0;font-size:13px;border-bottom:1px solid var(--glass-border)"><span class="tag ${mt==='claims'?'tag-claims':'tag-identity'}" style="font-size:10px">${esc(r.id)}</span> <span style="color:var(--text2)">${esc(matchStr)}</span></div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No access rules grant access to this tool</div>`;
+  }
+
+  // Users section
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Users with Access (${usersWithAccess.length})</h4>`;
+  if (usersWithAccess.length) {
+    html += `<div style="margin-bottom:16px">`;
+    for (const { user, rule } of usersWithAccess) {
+      const revoked = (state.bundle.revokedSubjects||[]).includes(user.email);
+      html += `<div style="padding:4px 0;font-size:13px"><strong>${esc(user.username)}</strong> <span style="color:var(--text3)">${esc(user.email)}</span>`;
+      html += ` <span style="color:var(--text3);font-size:11px">via ${esc(rule.id)}</span>`;
+      if (revoked) html += ` <span class="tag tag-disabled" style="font-size:10px">revoked</span>`;
+      html += `</div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No users currently match access rules for this tool</div>`;
+  }
+
+  // Governance rules section
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Governance Rules (${constraints.length})</h4>`;
+  if (constraints.length) {
+    for (const c of constraints) {
+      html += `<div class="constraint-card"><div class="constraint-info">
+        <div class="constraint-desc">${esc(c.description||'No description')}</div>
+        <div class="constraint-detail">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
+      </div></div>`;
+    }
+  } else {
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No governance rules defined for this tool</div>`;
+  }
+
+  html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>`;
+  showModal(html);
+}
+
+/* === User Access View === */
+function computeUserAccess(user) {
+  const rules = state.bundle.accessRules || [];
+  const catalog = state.bundle.catalog || {};
+  const revoked = state.bundle.revokedSubjects || [];
+  const isRevoked = revoked.includes(user.email);
+  const matchingRules = [];
+
+  for (const rule of rules) {
+    const m = rule.matcher || {};
+    const mt = m.matchType || 'claims';
+    let matches = false;
+    if (mt === 'claims') {
+      const claims = m.claims || {};
+      matches = true;
+      for (const [k, v] of Object.entries(claims)) {
+        const userVal = user[k] || '';
+        if (userVal !== v) { matches = false; break; }
+      }
+    } else if (mt === 'identity') {
+      matches = (m.identity || '') === user.email;
+    }
+    if (matches) matchingRules.push(rule);
+  }
+
+  // Resolve allowed services/tools
+  const accessMap = {}; // service -> {tools: Set, rules: []}
+  for (const rule of matchingRules) {
+    const allowSvcs = rule.allow?.services || [];
+    const allowTools = rule.allow?.tools || ['*'];
+    const resolvedSvcs = allowSvcs.includes('*') ? Object.keys(catalog) : allowSvcs.filter(s => catalog[s]);
+    for (const svc of resolvedSvcs) {
+      if (!accessMap[svc]) accessMap[svc] = { tools: new Set(), rules: [] };
+      accessMap[svc].rules.push(rule);
+      const svcTools = Object.keys((catalog[svc] || {}).tools || {});
+      if (allowTools.includes('*')) {
+        svcTools.forEach(t => accessMap[svc].tools.add(t));
+      } else {
+        allowTools.filter(t => svcTools.includes(t)).forEach(t => accessMap[svc].tools.add(t));
+      }
+    }
+  }
+
+  const result = Object.entries(accessMap).map(([svc, info]) => {
+    const svcCatalog = (catalog[svc] || {}).tools || {};
+    const tools = [...info.tools].map(t => ({ name: t, tag: (svcCatalog[t] || {}).tag || 'open' }));
+    return { service: svc, tools, rules: info.rules };
+  });
+  return { access: result, isRevoked, matchingRules };
+}
+
+function showUserAccessModal(userId) {
+  const user = state.users.find(u => u.id === userId);
+  if (!user) return;
+  const { access, isRevoked, matchingRules } = computeUserAccess(user);
+
+  let html = `<h3>Access for ${esc(user.username)}</h3>`;
+  html += `<div style="font-size:13px;color:var(--text2);margin-bottom:16px">${esc(user.email)} &mdash; ${esc(user.role)} / ${esc(user.organization)} / ${esc(user.department)}</div>`;
+
+  if (isRevoked) {
+    html += `<div style="background:var(--red-dim);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius-sm);padding:12px;margin-bottom:16px;color:var(--red);font-size:13px;font-weight:600">This user is revoked. All access is denied regardless of rules.</div>`;
+  }
+
+  if (!access.length) {
+    html += `<div class="empty" style="padding:24px"><div class="empty-text">No services accessible via current rules</div></div>`;
+  } else {
+    for (const svc of access) {
+      html += `<div class="card" style="margin-bottom:12px"><div class="svc-header"><span class="svc-name">${esc(svc.service)}</span></div>`;
+      for (const tool of svc.tools) {
+        html += `<div class="tool-row"><span class="tool-name">${esc(tool.name)}</span><span class="tag ${tool.tag==='gated'?'tag-gated':'tag-open'}">${tool.tag}</span></div>`;
+      }
+      html += `<div style="margin-top:8px;font-size:12px;color:var(--text3)">Granted by: ${svc.rules.map(r => `<span class="tag ${(r.matcher?.matchType||'claims')==='claims'?'tag-claims':'tag-identity'}" style="font-size:10px">${esc(r.id)}</span>`).join(' ')}</div></div>`;
+    }
+  }
+
+  html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>`;
+  showModal(html);
 }
 
 /* === Init === */

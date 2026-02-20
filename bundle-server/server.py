@@ -33,6 +33,7 @@ log = logging.getLogger("bundle-server")
 
 # --- Configuration from environment ---
 NPL_URL = os.environ.get("NPL_URL", "http://localhost:12000")
+GOVERNANCE_EVALUATOR_URL = os.environ.get("GOVERNANCE_EVALUATOR_URL", "http://governance-evaluator:8090")
 KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://localhost:11000")
 KEYCLOAK_REALM = os.environ.get("KEYCLOAK_REALM", "mcpgateway")
 GATEWAY_USERNAME = os.environ.get("GATEWAY_USERNAME", "gateway")
@@ -120,6 +121,7 @@ def fetch_npl_data() -> dict:
             "governance_instances": {},
             "npl_url": NPL_URL,
             "gateway_token": token_manager.get_token(),
+            "governance_evaluator_url": GOVERNANCE_EVALUATOR_URL,
         }
 
     store_id = items[0]["@id"]
@@ -189,6 +191,7 @@ def fetch_npl_data() -> dict:
         "governance_instances": governance_instances,
         "npl_url": NPL_URL,
         "gateway_token": token_manager.get_token(),
+        "governance_evaluator_url": GOVERNANCE_EVALUATOR_URL,
     }
 
 
@@ -225,6 +228,7 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
                 "governance_instances",
                 "npl_url",
                 "gateway_token",
+                "governance_evaluator_url",
                 "_bundle_metadata",
             ],
             "metadata": {"built_at": built_at},

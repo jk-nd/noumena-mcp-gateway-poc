@@ -120,3 +120,12 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V16: Governance constraints — ToolConstraint, ToolConfig, constraint CRUD,
+  #      getToolConfigs for evaluator cache, createdAt + auto-expire on PendingRequest
+  - name: mcp-16.0-governance-constraints
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

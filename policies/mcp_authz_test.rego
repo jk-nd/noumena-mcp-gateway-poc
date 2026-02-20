@@ -5,7 +5,7 @@
 # Tests the three-layer governance model:
 #   Layer 1 — Catalog (open/gated tags)
 #   Layer 2 — Access Rules (claim-based + identity-based)
-#   Layer 3 — NPL Governance (gated tool evaluation)
+#   Layer 3 — Governance Evaluator → NPL (gated tool evaluation)
 
 package envoy.authz
 
@@ -111,7 +111,7 @@ mock_access_rules := [
 
 mock_revoked := []
 
-mock_governance_instances := {}
+mock_governance_evaluator_url := "http://governance-evaluator:8090"
 
 # ============================================================================
 # 1. Non-tool-call methods (allow if authenticated)
@@ -126,7 +126,7 @@ test_allow_initialize if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_allow_tools_list if {
@@ -138,7 +138,7 @@ test_allow_tools_list if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_allow_ping if {
@@ -150,7 +150,7 @@ test_allow_ping if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_allow_notifications if {
@@ -162,7 +162,7 @@ test_allow_notifications if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -178,7 +178,7 @@ test_deny_tool_call_missing_service if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_tool_call_missing_tool if {
@@ -190,7 +190,7 @@ test_deny_tool_call_missing_tool if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_tool_call_disabled_service if {
@@ -209,7 +209,7 @@ test_deny_tool_call_disabled_service if {
 		with catalog as disabled_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_tool_call_empty_catalog if {
@@ -221,7 +221,7 @@ test_deny_tool_call_empty_catalog if {
 		with catalog as {}
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -238,7 +238,7 @@ test_access_rule_claim_match if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Jarvis matches identity rule for duckduckgo.search
@@ -251,7 +251,7 @@ test_access_rule_identity_match if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Alice (engineering) matches "engineering-all" → allowed on duckduckgo open tools
@@ -264,7 +264,7 @@ test_access_rule_wildcard_tool if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Unknown user (external org) → no matching rule → denied
@@ -277,7 +277,7 @@ test_access_rule_no_match if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Jarvis identity-rule only allows search, not fetch_page → denied
@@ -299,7 +299,7 @@ test_access_rule_identity_tool_mismatch if {
 		with catalog as mock_catalog
 		with access_rules as identity_only_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Multiple rules OR semantics — any match allows
@@ -314,7 +314,7 @@ test_access_rule_or_semantics if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Revoked subject → denied even with matching access rule
@@ -327,7 +327,7 @@ test_revoked_subject_denied if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as ["jarvis@acme.com"]
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -343,7 +343,7 @@ test_open_tool_allowed if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_open_tool_denied_no_rule if {
@@ -355,14 +355,14 @@ test_open_tool_denied_no_rule if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
-# 5. Gated tool path: NPL allow, NPL deny, NPL pending, NPL unreachable
+# 5. Gated tool path: evaluator allow, deny, pending, unreachable
 # ============================================================================
 
-# Gated tool + NPL returns allow → allowed
+# Gated tool + evaluator returns allow → allowed
 test_gated_tool_npl_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
@@ -372,11 +372,11 @@ test_gated_tool_npl_allow if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
 }
 
-# Gated tool + NPL returns deny → denied
+# Gated tool + evaluator returns deny → denied
 test_gated_tool_npl_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
@@ -386,11 +386,11 @@ test_gated_tool_npl_deny if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 		with npl_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
 }
 
-# Gated tool + NPL returns pending → denied (with pending headers)
+# Gated tool + evaluator returns pending → denied (with pending headers)
 test_gated_tool_npl_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
@@ -400,11 +400,11 @@ test_gated_tool_npl_pending if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 		with npl_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
 }
 
-# Gated tool + NPL unreachable (no governance instance) → denied
+# Gated tool + evaluator unreachable (no URL) → denied
 test_gated_tool_npl_unreachable if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
@@ -414,7 +414,36 @@ test_gated_tool_npl_unreachable if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as {}
+}
+
+# Gated tool + constraint denied with reason in message
+test_gated_tool_constraint_denied if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+		with npl_decision as {"decision": "deny", "requestId": "", "message": "Constraint violated: Only allowed domains"}
+}
+
+# Constraint denied — reason header includes constraint message
+test_constraint_denied_reason_header if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":45,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+		with npl_decision as {"decision": "deny", "requestId": "", "message": "Constraint violated: Only allowed domains"}
+
+	contains(r, "Constraint violated")
 }
 
 # ============================================================================
@@ -430,7 +459,7 @@ test_user_id_header if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 
 	h["x-user-id"] == "jarvis@acme.com"
 }
@@ -444,7 +473,7 @@ test_granted_services_header if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 
 	# Jarvis matches sales-calendar (mock-calendar) and jarvis-duckduckgo (duckduckgo)
 	contains(h["x-granted-services"], "mock-calendar")
@@ -460,7 +489,7 @@ test_pending_headers if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 		with npl_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
 
 	rh["x-request-id"] == "REQ-42"
@@ -476,7 +505,7 @@ test_reason_header_authorized if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 
 	r == "Authorized"
 }
@@ -490,7 +519,7 @@ test_reason_header_no_access_rule if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 
 	contains(r, "not authorized")
 }
@@ -508,7 +537,6 @@ test_deny_empty_bundle if {
 		with catalog as {}
 		with access_rules as []
 		with revoked_subjects as []
-		with governance_instances as {}
 }
 
 test_deny_no_auth if {
@@ -519,7 +547,7 @@ test_deny_no_auth if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_missing_body if {
@@ -527,7 +555,7 @@ test_deny_missing_body if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -576,7 +604,7 @@ test_granted_services_excludes_disabled if {
 		with catalog as disabled_catalog
 		with access_rules as wildcard_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 
 	"mock-calendar" in result
 	not "duckduckgo" in result
@@ -591,7 +619,7 @@ test_allow_stream_setup if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_stream_setup_no_auth if {
@@ -599,7 +627,7 @@ test_deny_stream_setup_no_auth if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -623,7 +651,74 @@ test_wildcard_service_access if {
 		with catalog as mock_catalog
 		with access_rules as wildcard_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
+
+# ============================================================================
+# 10b. Array-valued JWT claims (Keycloak multi-valued attributes)
+# ============================================================================
+
+# Keycloak encodes some attributes as arrays, e.g. role: ["user"], organization: ["acme"]
+mock_jwt_jarvis_array_claims := token if {
+	header := {"alg": "HS256", "typ": "JWT"}
+	payload := {
+		"sub": "04c28d5a-7ac3-4ce8-b51e-04b4a36ba4d2",
+		"email": "jarvis@acme.com",
+		"preferred_username": "jarvis",
+		"organization": ["acme"],
+		"department": "sales",
+		"role": ["user"],
+	}
+	token := io.jwt.encode_sign(header, payload, {"kty": "oct", "k": "dGVzdC1zZWNyZXQta2V5LWZvci1vcGEtdW5pdC10ZXN0cw"})
+}
+
+# Array claims should match claim-based access rules
+test_array_claims_match_access_rule if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis_array_claims),
+		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
+
+# Array claims with wildcard service rule
+test_array_claims_wildcard_service if {
+	wildcard_rules := [
+		{
+			"id": "all-users",
+			"matcher": {"matchType": "claims", "claims": {"role": "user", "organization": "acme"}, "identity": ""},
+			"allow": {"services": ["*"], "tools": ["*"]},
+		},
+	]
+
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis_array_claims),
+		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as wildcard_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
+
+# Array claims should appear in granted services
+test_array_claims_granted_services if {
+	result := granted_service_names with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis_array_claims),
+		"{\"jsonrpc\":\"2.0\",\"id\":83,\"method\":\"tools/list\",\"params\":{}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+
+	"mock-calendar" in result
 }
 
 # ============================================================================
@@ -667,7 +762,7 @@ test_no_pending_headers_when_allowed if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_instances as mock_governance_instances
+		with governance_evaluator_url as mock_governance_evaluator_url
 		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "OK"}
 
 	not rh["x-request-id"]

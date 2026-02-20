@@ -5,6 +5,19 @@ struct ToolRegistration {
     tag: Text
 };
 
+struct ToolConstraint {
+    paramName: Text,
+    operator: Text,
+    values: List<Text>,
+    description: Text
+};
+
+struct ToolConfig {
+    toolName: Text,
+    constraints: List<ToolConstraint>,
+    requiresApproval: Boolean
+};
+
 struct PendingRequest {
     requestId: Text,
     toolName: Text,
@@ -17,7 +30,8 @@ struct PendingRequest {
     reason: Text,
     decidedBy: Text,
     executionStatus: Text,
-    executionResult: Text
+    executionResult: Text,
+    createdAt: DateTime
 };
 
 struct EvaluationResult {
@@ -35,6 +49,9 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
     private var pendingRequests: Map<Text, PendingRequest> = mapOf<Text, PendingRequest>();
     private var requestIdToKey: Map<Text, Text> = mapOf<Text, Text>();
     private var requestCounter: Number = 0;
+    private var toolConfigs: Map<Text, ToolConfig> = mapOf<Text, ToolConfig>();
+    var approvalDeadlineHours: Number = 168;
+    var governanceDescription: Text = "";
 
     @api
     permission[pAdmin] setup(name: Text) | active {
@@ -58,6 +75,127 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
         tools = tools.with(toolName, reg);
     };
 
+    // --- Constraint CRUD ---
+
+    @api
+    permission[pAdmin] addConstraint(
+        toolName: Text,
+        paramName: Text,
+        operator: Text,
+        values: List<Text>,
+        description: Text
+    ) | active {
+        require(
+            operator == "in" || operator == "not_in" || operator == "contains" ||
+            operator == "not_contains" || operator == "regex" || operator == "max_length",
+            "Operator must be one of: in, not_in, contains, not_contains, regex, max_length"
+        );
+
+        var constraint = ToolConstraint(
+            paramName = paramName,
+            operator = operator,
+            values = values,
+            description = description
+        );
+
+        var maybeConfig = toolConfigs.getOrNone(toolName);
+        if (maybeConfig.isPresent()) {
+            var existing = maybeConfig.getOrFail();
+            // Remove any existing constraint for this param, then append new one
+            var filtered = existing.constraints.filter(
+                function(c: ToolConstraint) -> c.paramName != paramName || c.operator != operator
+            );
+            var updated = ToolConfig(
+                toolName = toolName,
+                constraints = filtered.with(constraint),
+                requiresApproval = existing.requiresApproval
+            );
+            toolConfigs = toolConfigs.with(toolName, updated);
+        } else {
+            var newConfig = ToolConfig(
+                toolName = toolName,
+                constraints = listOf<ToolConstraint>(constraint),
+                requiresApproval = true
+            );
+            toolConfigs = toolConfigs.with(toolName, newConfig);
+        };
+    };
+
+    @api
+    permission[pAdmin] removeConstraint(toolName: Text, paramName: Text) | active {
+        var maybeConfig = toolConfigs.getOrNone(toolName);
+        require(maybeConfig.isPresent(), "No config for tool");
+        var existing = maybeConfig.getOrFail();
+        var filtered = existing.constraints.filter(
+            function(c: ToolConstraint) -> c.paramName != paramName
+        );
+        var updated = ToolConfig(
+            toolName = toolName,
+            constraints = filtered,
+            requiresApproval = existing.requiresApproval
+        );
+        toolConfigs = toolConfigs.with(toolName, updated);
+    };
+
+    @api
+    permission[pAdmin] clearConstraints(toolName: Text) | active {
+        var maybeConfig = toolConfigs.getOrNone(toolName);
+        if (maybeConfig.isPresent()) {
+            var existing = maybeConfig.getOrFail();
+            var updated = ToolConfig(
+                toolName = toolName,
+                constraints = listOf<ToolConstraint>(),
+                requiresApproval = existing.requiresApproval
+            );
+            toolConfigs = toolConfigs.with(toolName, updated);
+        };
+    };
+
+    // --- Tool governance config ---
+
+    @api
+    permission[pAdmin] setRequiresApproval(toolName: Text, required: Boolean) | active {
+        var maybeConfig = toolConfigs.getOrNone(toolName);
+        if (maybeConfig.isPresent()) {
+            var existing = maybeConfig.getOrFail();
+            var updated = ToolConfig(
+                toolName = toolName,
+                constraints = existing.constraints,
+                requiresApproval = required
+            );
+            toolConfigs = toolConfigs.with(toolName, updated);
+        } else {
+            var newConfig = ToolConfig(
+                toolName = toolName,
+                constraints = listOf<ToolConstraint>(),
+                requiresApproval = required
+            );
+            toolConfigs = toolConfigs.with(toolName, newConfig);
+        };
+    };
+
+    // --- Service config ---
+
+    @api
+    permission[pAdmin] setApprovalDeadline(deadlineHours: Number) | active {
+        require(deadlineHours > 0, "Deadline must be positive");
+        approvalDeadlineHours = deadlineHours;
+    };
+
+    @api
+    permission[pAdmin] setGovernanceDescription(desc: Text) | active {
+        governanceDescription = desc;
+    };
+
+    // --- Read config (for governance-evaluator cache) ---
+
+    @api
+    permission[pGateway] getToolConfigs() returns List<ToolConfig> | active {
+        return toolConfigs.values();
+    };
+
+    // --- Evaluate (updated with createdAt + auto-expire) ---
+
     @api
     permission[pGateway] evaluate(
         toolName: Text,
@@ -73,24 +211,31 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
         if (maybeExisting.isPresent()) {
             var existing = maybeExisting.getOrFail();
 
-            if (existing.status == "approved") {
+            // Auto-expire: if deadline has passed, remove and recreate
+            if (existing.status == "pending" && existing.createdAt.plus(hours(approvalDeadlineHours)).isBefore(now(), false)) {
                 pendingRequests = pendingRequests.without(lookupKey);
                 requestIdToKey = requestIdToKey.without(existing.requestId);
-                return EvaluationResult(decision = "allow", requestId = existing.requestId, message = "Approved");
-            };
+                // Fall through to create new request
+            } else {
+                if (existing.status == "approved") {
+                    pendingRequests = pendingRequests.without(lookupKey);
+                    requestIdToKey = requestIdToKey.without(existing.requestId);
+                    return EvaluationResult(decision = "allow", requestId = existing.requestId, message = "Approved");
+                };
 
-            if (existing.status == "denied") {
-                var denyReason = existing.reason;
-                pendingRequests = pendingRequests.without(lookupKey);
-                requestIdToKey = requestIdToKey.without(existing.requestId);
-                return EvaluationResult(decision = "deny", requestId = existing.requestId, message = denyReason);
-            };
+                if (existing.status == "denied") {
+                    var denyReason = existing.reason;
+                    pendingRequests = pendingRequests.without(lookupKey);
+                    requestIdToKey = requestIdToKey.without(existing.requestId);
+                    return EvaluationResult(decision = "deny", requestId = existing.requestId, message = denyReason);
+                };
 
-            return EvaluationResult(
-                decision = "pending",
-                requestId = existing.requestId,
-                message = "Awaiting approval"
-            );
+                return EvaluationResult(
+                    decision = "pending",
+                    requestId = existing.requestId,
+                    message = "Awaiting approval"
+                );
+            };
         };
 
         requestCounter = requestCounter + 1;
@@ -108,7 +253,8 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
             reason = "",
             decidedBy = "",
             executionStatus = "none",
-            executionResult = ""
+            executionResult = "",
+            createdAt = now()
         );
 
         pendingRequests = pendingRequests.with(lookupKey, pending);
@@ -142,7 +288,8 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
             reason = "",
             decidedBy = "admin",
             executionStatus = "queued",
-            executionResult = existing.executionResult
+            executionResult = existing.executionResult,
+            createdAt = existing.createdAt
         );
 
         pendingRequests = pendingRequests.with(lookupKey, updated);
@@ -169,7 +316,8 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
             reason = reason,
             decidedBy = "admin",
             executionStatus = "none",
-            executionResult = existing.executionResult
+            executionResult = existing.executionResult,
+            createdAt = existing.createdAt
         );
 
         pendingRequests = pendingRequests.with(lookupKey, updated);

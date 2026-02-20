@@ -105,6 +105,34 @@ def get_admin_token() -> str:
         return _cached_token
 
 
+_gw_token_lock = threading.Lock()
+_cached_gw_token: str | None = None
+_gw_token_expires: float = 0
+
+
+def _get_gateway_token() -> str:
+    """Get a Keycloak token for the 'gateway' user (has pGateway party)."""
+    global _cached_gw_token, _gw_token_expires
+    with _gw_token_lock:
+        if _cached_gw_token and time.time() < _gw_token_expires - 30:
+            return _cached_gw_token
+        resp = requests.post(
+            f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token",
+            data={
+                "grant_type": "password",
+                "client_id": "mcpgateway",
+                "username": "gateway",
+                "password": ADMIN_PASSWORD,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _cached_gw_token = data["access_token"]
+        _gw_token_expires = time.time() + data.get("expires_in", 300)
+        return _cached_gw_token
+
+
 # --- GatewayStore discovery ---
 _store_id: str | None = None
 
@@ -303,6 +331,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self.handle_get_backends()
             if path == "/api/suggestions":
                 return self.handle_suggestions()
+            if path == "/api/tools/schemas":
+                return self.handle_tool_schemas(params)
+            if path == "/api/constraints":
+                return self.handle_get_constraints(params)
             if path == "/api/sse/npl":
                 return self.handle_sse_proxy()
             return self.send_error_json(404, "Not found")
@@ -369,6 +401,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/users/create": self.handle_create_user,
             "/api/users/update": self.handle_update_user,
             "/api/users/delete": self.handle_delete_user,
+            "/api/constraints/add": self.handle_add_constraint,
+            "/api/constraints/remove": self.handle_remove_constraint,
+            "/api/constraints/clear": self.handle_clear_constraints,
+            "/api/governance/set-approval": self.handle_set_approval,
+            "/api/governance/set-deadline": self.handle_set_deadline,
+            "/api/governance/set-description": self.handle_set_description,
         }
 
         handler = routes.get(path)
@@ -464,12 +502,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not sid:
             return self.send_json({"catalog": {}, "accessRules": [], "revokedSubjects": [], "storeId": None})
         try:
-            gw_resp = requests.post(
-                f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token",
-                data={"grant_type": "password", "client_id": "mcpgateway", "username": "gateway", "password": ADMIN_PASSWORD},
-                timeout=10,
-            )
-            gw_token = gw_resp.json()["access_token"]
+            gw_token = _get_gateway_token()
             resp = requests.post(
                 f"{NPL_URL}/npl/store/GatewayStore/{sid}/getBundleData",
                 headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
@@ -838,9 +871,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.npl_post(f"/npl/store/GatewayStore/{sid}/enableService", {"serviceName": service_name})
             for tool in tools:
                 self.npl_post(f"/npl/store/GatewayStore/{sid}/registerTool", {
-                    "serviceName": service_name, "toolName": tool["name"], "tag": "open",
+                    "serviceName": service_name, "toolName": tool["name"], "tag": "gated",
                 })
-            emit(f"Registered {service_name} with {len(tools)} tools in catalog", "done")
+            emit(f"Registered {service_name} with {len(tools)} tools (all gated) in catalog", "done")
+
+            # Step 9: Auto-create governance instance for approval workflow
+            emit("Creating governance instance...")
+            try:
+                token = get_admin_token()
+                instances = get_governance_instances()
+                if service_name not in instances:
+                    resp = requests.post(
+                        f"{NPL_URL}/npl/governance/ServiceGovernance/",
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json={"@parties": {}}, timeout=10,
+                    )
+                    resp.raise_for_status()
+                    instance_id = resp.json()["@id"]
+                    requests.post(
+                        f"{NPL_URL}/npl/governance/ServiceGovernance/{instance_id}/setup",
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json={"name": service_name}, timeout=10,
+                    )
+                    emit(f"Governance enabled for {service_name}", "done")
+                else:
+                    emit("Governance already active", "done")
+            except Exception as e:
+                emit(f"Governance creation failed: {e}", "warn")
 
             # Final success message
             emit(f"Service \"{service_name}\" wired successfully!", "complete")
@@ -916,7 +973,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }, timeout=15)
         tools_body = self._parse_mcp_response(tools_resp)
         raw_tools = tools_body.get("result", {}).get("tools", [])
-        return [{"name": t["name"], "description": t.get("description", "")} for t in raw_tools]
+        return [{"name": t["name"], "description": t.get("description", ""), "inputSchema": t.get("inputSchema", {})} for t in raw_tools]
 
     def _parse_mcp_response(self, resp) -> dict:
         """Parse a response that may be JSON or SSE."""
@@ -942,17 +999,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # === Suggestions (for form dropdowns) ===
     def handle_suggestions(self):
         """Return catalog data for populating form dropdowns."""
-        suggestions = {"services": [], "tools": {}, "users": [], "departments": [], "organizations": []}
+        suggestions = {"services": [], "tools": {}, "users": [], "departments": [], "organizations": [], "roles": []}
         try:
             # Get catalog
             sid = get_store_id()
             if sid:
-                gw_resp = requests.post(
-                    f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token",
-                    data={"grant_type": "password", "client_id": "mcpgateway", "username": "gateway", "password": ADMIN_PASSWORD},
-                    timeout=10,
-                )
-                gw_token = gw_resp.json()["access_token"]
+                gw_token = _get_gateway_token()
                 resp = requests.post(
                     f"{NPL_URL}/npl/store/GatewayStore/{sid}/getBundleData",
                     headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
@@ -980,6 +1032,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if users_resp.status_code < 400:
                 depts = set()
                 orgs = set()
+                roles = {"user", "admin", "gateway"}
                 for u in users_resp.json():
                     email = u.get("email", "")
                     if email:
@@ -987,12 +1040,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     attrs = u.get("attributes", {})
                     dept = (attrs.get("department") or [""])[0]
                     org = (attrs.get("organization") or [""])[0]
+                    role = (attrs.get("role") or [""])[0]
                     if dept:
                         depts.add(dept)
                     if org:
                         orgs.add(org)
+                    if role:
+                        roles.add(role)
                 suggestions["departments"] = sorted(depts)
                 suggestions["organizations"] = sorted(orgs)
+                suggestions["roles"] = sorted(roles)
         except Exception as e:
             log.warning("Suggestions fetch failed: %s", e)
 
@@ -1055,6 +1112,158 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             if upstream:
                 upstream.close()
+
+    # === Tool schemas ===
+    def handle_tool_schemas(self, params):
+        """Discover tool schemas from a running MCP backend service."""
+        service = params.get("service", [""])[0]
+        if not service:
+            return self.send_error_json(400, "service parameter required")
+        # Find backend URL from aggregator
+        try:
+            resp = requests.get(f"{AGGREGATOR_URL}/backends", timeout=10)
+            backends = resp.json().get("backends", resp.json()) if resp.status_code < 400 else {}
+            backend_url = backends.get(service)
+            if not backend_url:
+                return self.send_error_json(404, f"No backend for service '{service}'")
+            tools = self._discover_tools(backend_url)
+            self.send_json({"service": service, "tools": tools})
+        except Exception as e:
+            self.send_error_json(500, f"Schema discovery failed: {e}")
+
+    # === Constraints CRUD ===
+    def handle_get_constraints(self, params):
+        """Get all tool configs/constraints for a service."""
+        service = params.get("service", [""])[0]
+        instances = get_governance_instances()
+        if service:
+            iid = instances.get(service)
+            if not iid:
+                return self.send_json({"configs": [], "service": service})
+            try:
+                token = _get_gateway_token()
+                resp = requests.post(
+                    f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/getToolConfigs",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json={}, timeout=10,
+                )
+                if resp.status_code < 400:
+                    return self.send_json({"configs": resp.json(), "service": service})
+                return self.send_json({"configs": [], "service": service})
+            except Exception as e:
+                return self.send_error_json(500, str(e))
+        # All services
+        all_configs = {}
+        token = _get_gateway_token()
+        for svc, iid in instances.items():
+            try:
+                resp = requests.post(
+                    f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/getToolConfigs",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json={}, timeout=10,
+                )
+                if resp.status_code < 400:
+                    all_configs[svc] = resp.json()
+            except Exception:
+                pass
+        self.send_json({"configs": all_configs})
+
+    def handle_add_constraint(self, body):
+        """Add a constraint to a tool in a ServiceGovernance instance."""
+        service = body.get("serviceName", "")
+        instances = get_governance_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No governance instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/addConstraint",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "toolName": body.get("toolName", ""),
+                "paramName": body.get("paramName", ""),
+                "operator": body.get("operator", ""),
+                "values": body.get("values", []),
+                "description": body.get("description", ""),
+            },
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_remove_constraint(self, body):
+        service = body.get("serviceName", "")
+        instances = get_governance_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No governance instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/removeConstraint",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"toolName": body.get("toolName", ""), "paramName": body.get("paramName", "")},
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_clear_constraints(self, body):
+        service = body.get("serviceName", "")
+        instances = get_governance_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No governance instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/clearConstraints",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"toolName": body.get("toolName", "")},
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_set_approval(self, body):
+        service = body.get("serviceName", "")
+        instances = get_governance_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No governance instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/setRequiresApproval",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"toolName": body.get("toolName", ""), "required": body.get("required", True)},
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_set_deadline(self, body):
+        service = body.get("serviceName", "")
+        instances = get_governance_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No governance instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/setApprovalDeadline",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"deadlineHours": body.get("deadlineHours", 168)},
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_set_description(self, body):
+        service = body.get("serviceName", "")
+        instances = get_governance_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No governance instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/setGovernanceDescription",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"desc": body.get("description", "")},
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
 
     # === User management (Keycloak admin) ===
     def _get_kc_admin_token(self) -> str:
