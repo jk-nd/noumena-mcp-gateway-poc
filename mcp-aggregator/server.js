@@ -417,6 +417,32 @@ app.delete('/mcp', async (req, res) => {
   return res.status(204).send();
 });
 
+// ── Dynamic backend management ───────────────────────────────────────────
+app.post('/backends', (req, res) => {
+  const { name, url } = req.body;
+  if (!name || !url) {
+    return res.status(400).json({ error: 'name and url required' });
+  }
+  backends.set(name, url);
+  console.log(`[aggregator] registered backend: ${name} → ${url}`);
+  res.json({ ok: true, backends: [...backends.keys()] });
+});
+
+app.delete('/backends/:name', (req, res) => {
+  const { name } = req.params;
+  if (backends.has(name)) {
+    backends.delete(name);
+    console.log(`[aggregator] removed backend: ${name}`);
+  }
+  res.json({ ok: true, backends: [...backends.keys()] });
+});
+
+app.get('/backends', (_req, res) => {
+  const list = {};
+  for (const [name, url] of backends) list[name] = url;
+  res.json({ backends: list });
+});
+
 // ── Health check ──────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({

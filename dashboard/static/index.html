@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP Gateway Dashboard</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0e1a; --bg2: #111827; --glass: rgba(17, 24, 39, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.08); --glass-hover: rgba(255, 255, 255, 0.04);
+  --accent: #3b82f6; --accent-dim: rgba(59, 130, 246, 0.15);
+  --green: #10b981; --green-dim: rgba(16, 185, 129, 0.15);
+  --amber: #f59e0b; --amber-dim: rgba(245, 158, 11, 0.15);
+  --red: #ef4444; --red-dim: rgba(239, 68, 68, 0.15);
+  --purple: #a855f7; --purple-dim: rgba(168, 85, 247, 0.15);
+  --text: #f1f5f9; --text2: #94a3b8; --text3: #64748b;
+  --radius: 12px; --radius-sm: 8px;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.5; }
+
+/* Login */
+.login-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.login-box { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 40px; width: 380px; backdrop-filter: blur(20px); }
+.login-box h2 { font-size: 20px; margin-bottom: 4px; }
+.login-box .subtitle { color: var(--text3); font-size: 13px; margin-bottom: 24px; }
+.login-box .form-group { margin-bottom: 16px; }
+.login-box .error { color: var(--red); font-size: 13px; margin-bottom: 12px; display: none; }
+
+/* Header */
+.header { background: var(--glass); border-bottom: 1px solid var(--glass-border); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.header-left { display: flex; align-items: center; gap: 16px; }
+.header-title { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+.header-subtitle { font-size: 13px; color: var(--text3); }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.header-user { font-size: 13px; color: var(--text2); }
+
+/* Status dots */
+.status-dots { display: flex; gap: 12px; }
+.status-dot { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); }
+.dot.healthy { background: var(--green); box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
+.dot.unhealthy { background: var(--red); box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+
+/* Layout */
+.layout { display: flex; min-height: calc(100vh - 49px); }
+.sidebar { width: 200px; background: var(--glass); border-right: 1px solid var(--glass-border); backdrop-filter: blur(20px); padding: 12px 0; flex-shrink: 0; overflow-y: auto; }
+.nav-section { font-size: 10px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; padding: 12px 20px 4px; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 8px 20px; font-size: 13px; color: var(--text2); cursor: pointer; transition: all 0.15s; border-left: 3px solid transparent; }
+.nav-item:hover { background: var(--glass-hover); color: var(--text); }
+.nav-item.active { color: var(--accent); background: var(--accent-dim); border-left-color: var(--accent); }
+.nav-item.disabled { opacity: 0.35; cursor: default; pointer-events: none; }
+.nav-icon { font-size: 15px; width: 18px; text-align: center; }
+.nav-badge { margin-left: auto; background: var(--red); color: white; font-size: 10px; padding: 1px 6px; border-radius: 10px; font-weight: 600; }
+.nav-soon { margin-left: auto; font-size: 9px; color: var(--text3); background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 4px; }
+
+/* Main */
+.main { flex: 1; padding: 24px; overflow-y: auto; }
+.panel { display: none; } .panel.active { display: block; }
+.panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.panel-title { font-size: 20px; font-weight: 600; }
+.panel-desc { font-size: 13px; color: var(--text3); margin-top: 2px; }
+
+/* Cards & tables */
+.card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); backdrop-filter: blur(16px); padding: 20px; margin-bottom: 16px; transition: border-color 0.2s; }
+.card:hover { border-color: rgba(255, 255, 255, 0.12); }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.stat-card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 16px; text-align: center; cursor: pointer; transition: all 0.15s; }
+.stat-card:hover { border-color: var(--accent); }
+.stat-value { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+.stat-label { font-size: 11px; color: var(--text3); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 14px; font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--glass-border); }
+td { padding: 10px 14px; border-bottom: 1px solid var(--glass-border); color: var(--text2); }
+tr:hover td { background: var(--glass-hover); }
+td:first-child { color: var(--text); }
+
+/* Tags */
+.tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.tag-open { background: var(--green-dim); color: var(--green); }
+.tag-gated { background: var(--amber-dim); color: var(--amber); }
+.tag-enabled { background: var(--green-dim); color: var(--green); }
+.tag-disabled { background: var(--red-dim); color: var(--red); }
+.tag-claims { background: var(--accent-dim); color: var(--accent); }
+.tag-identity { background: var(--purple-dim); color: var(--purple); }
+.tag-pending { background: var(--amber-dim); color: var(--amber); }
+.tag-running { background: var(--green-dim); color: var(--green); }
+
+/* Buttons */
+.btn { padding: 7px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--accent); color: white; } .btn-primary:hover { background: #2563eb; }
+.btn-success { background: var(--green-dim); color: var(--green); border-color: rgba(16, 185, 129, 0.2); }
+.btn-danger { background: var(--red-dim); color: var(--red); border-color: rgba(239, 68, 68, 0.2); }
+.btn-ghost { background: transparent; color: var(--text2); border-color: var(--glass-border); } .btn-ghost:hover { background: var(--glass-hover); color: var(--text); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+/* Forms */
+.form-row { display: flex; gap: 12px; margin-bottom: 12px; align-items: end; }
+.form-group { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.form-group label { font-size: 12px; color: var(--text3); font-weight: 500; }
+.form-group input, .form-group select { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 8px 12px; color: var(--text); font-size: 13px; outline: none; width: 100%; }
+.form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+.form-group input::placeholder { color: var(--text3); }
+
+/* Modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 200; }
+.modal { background: var(--bg2); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 24px; width: 520px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
+.modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+/* Service card */
+.svc-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.svc-name { font-size: 16px; font-weight: 600; }
+.tool-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: var(--radius-sm); margin-bottom: 6px; }
+.tool-name { font-size: 13px; font-family: 'SF Mono', 'Fira Code', monospace; }
+.tool-actions { display: flex; align-items: center; gap: 8px; }
+
+/* Approval card */
+.approval-card { border-left: 3px solid var(--amber); }
+.approval-id { font-family: monospace; color: var(--amber); font-size: 13px; }
+.approval-meta { font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+.approval-meta strong { color: var(--text); }
+
+/* Discover */
+.search-bar { display: flex; gap: 10px; margin-bottom: 16px; }
+.search-bar input { flex: 1; background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; }
+.search-bar input:focus { border-color: var(--accent); }
+.search-bar input::placeholder { color: var(--text3); }
+.tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--glass-border); }
+.tab { padding: 8px 20px; font-size: 13px; color: var(--text3); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+.tab:hover { color: var(--text2); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.discover-card { display: flex; align-items: flex-start; gap: 16px; padding: 16px 20px; }
+.disc-info { flex: 1; min-width: 0; }
+.disc-name { font-size: 15px; font-weight: 600; }
+.disc-desc { font-size: 13px; color: var(--text2); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.disc-meta { font-size: 12px; color: var(--text3); margin-top: 8px; display: flex; gap: 16px; flex-wrap: wrap; }
+
+/* Logs */
+.log-container { background: var(--bg); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); height: 300px; overflow-y: auto; padding: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--text2); }
+.log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.log-entry .ts { color: var(--text3); }
+.log-entry .action { color: var(--accent); }
+
+/* Empty & toast */
+.empty { text-align: center; padding: 48px; color: var(--text3); }
+.empty-icon { font-size: 36px; margin-bottom: 12px; }
+.empty-text { font-size: 14px; }
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+.toast { background: var(--bg2); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 12px 16px; font-size: 13px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); animation: slideIn 0.2s ease; display: flex; align-items: center; gap: 8px; }
+.toast.success { border-left: 3px solid var(--green); }
+.toast.error { border-left: 3px solid var(--red); }
+@keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Progress */
+.wire-progress { padding: 12px; max-height: 400px; overflow-y: auto; }
+.wire-step { font-size: 13px; color: var(--text2); padding: 4px 0; }
+.wire-step.done { color: var(--green); }
+.wire-step.done::before { content: "\2713 "; }
+.wire-step.fail { color: var(--red); }
+.wire-step.fail::before { content: "\2717 "; }
+
+::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--text3); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- Login screen -->
+<div id="loginPage" class="login-page">
+  <div class="login-box">
+    <h2>MCP Gateway</h2>
+    <div class="subtitle">Admin Dashboard Login</div>
+    <div class="error" id="loginError">Invalid credentials</div>
+    <div class="form-group">
+      <label>Username</label>
+      <input id="loginUser" placeholder="admin" value="admin" />
+    </div>
+    <div class="form-group" style="margin-bottom:20px">
+      <label>Password</label>
+      <input id="loginPass" type="password" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()" />
+    </div>
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- App (hidden until logged in) -->
+<div id="app" style="display:none">
+
+<div class="header">
+  <div class="header-left">
+    <div>
+      <div class="header-title">MCP Gateway</div>
+      <div class="header-subtitle">v4 Governance Dashboard</div>
+    </div>
+    <div class="status-dots" id="statusDots"></div>
+  </div>
+  <div class="header-right">
+    <span id="refreshTimer" style="font-size:12px;color:var(--text3);font-variant-numeric:tabular-nums"></span>
+    <button class="btn btn-ghost btn-sm" onclick="refreshAll()">Refresh</button>
+    <span class="header-user" id="headerUser"></span>
+    <button class="btn btn-ghost btn-sm" onclick="doLogout()">Logout</button>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="nav-section">Overview</div>
+    <div class="nav-item active" data-panel="overview" onclick="switchPanel('overview')"><span class="nav-icon">&#9632;</span> Dashboard</div>
+    <div class="nav-item" data-panel="logs" onclick="switchPanel('logs')"><span class="nav-icon">&#9776;</span> Activity Log</div>
+
+    <div class="nav-section">Governance</div>
+    <div class="nav-item" data-panel="catalog" onclick="switchPanel('catalog')"><span class="nav-icon">&#9881;</span> Catalog</div>
+    <div class="nav-item" data-panel="rules" onclick="switchPanel('rules')"><span class="nav-icon">&#9733;</span> Access Rules</div>
+    <div class="nav-item" data-panel="approvals" onclick="switchPanel('approvals')"><span class="nav-icon">&#9998;</span> Approvals <span class="nav-badge" id="approvalBadge" style="display:none">0</span></div>
+    <div class="nav-item" data-panel="revoked" onclick="switchPanel('revoked')"><span class="nav-icon">&#10007;</span> Revoked</div>
+
+    <div class="nav-section">Management</div>
+    <div class="nav-item" data-panel="users" onclick="switchPanel('users')"><span class="nav-icon">&#9787;</span> Users</div>
+    <div class="nav-item" data-panel="discover" onclick="switchPanel('discover')"><span class="nav-icon">&#128269;</span> Discover</div>
+    <div class="nav-item disabled"><span class="nav-icon">&#128273;</span> Credentials <span class="nav-soon">soon</span></div>
+  </div>
+
+  <div class="main">
+
+    <!-- Overview -->
+    <div class="panel active" id="panel-overview">
+      <div class="panel-header"><div><div class="panel-title">Overview</div><div class="panel-desc">System health and key metrics</div></div></div>
+      <div class="stats-row" id="statsRow"></div>
+      <div class="card"><h4 style="margin-bottom:12px;font-size:14px;color:var(--text3)">Service Health</h4><div id="healthTable"></div></div>
+      <div class="card"><h4 style="margin-bottom:12px;font-size:14px;color:var(--text3)">Aggregator Backends</h4><div id="backendsTable"></div></div>
+    </div>
+
+    <!-- Activity log -->
+    <div class="panel" id="panel-logs">
+      <div class="panel-header"><div><div class="panel-title">Activity Log</div><div class="panel-desc">NPL Engine state changes (SSE stream)</div></div>
+        <button class="btn btn-ghost btn-sm" id="sseToggle" onclick="toggleSSE()">Connect SSE</button>
+      </div>
+      <div class="log-container" id="logContainer"><div class="empty"><div class="empty-text">Click "Connect SSE" to subscribe to NPL Engine state changes</div></div></div>
+    </div>
+
+    <!-- Catalog -->
+    <div class="panel" id="panel-catalog">
+      <div class="panel-header"><div><div class="panel-title">Service Catalog</div><div class="panel-desc">Services and tools with governance tags. Set tools to <strong>gated</strong> to require approval, or <strong>open</strong> for immediate access. Enable <strong>Governance</strong> per service to activate the approval workflow.</div></div>
+        <button class="btn btn-primary" onclick="showAddServiceModal()">+ Add Service</button>
+      </div>
+      <div class="card-grid" id="catalogGrid"></div>
+    </div>
+
+    <!-- Access Rules -->
+    <div class="panel" id="panel-rules">
+      <div class="panel-header"><div><div class="panel-title">Access Rules</div><div class="panel-desc">Claim-based and identity-based authorization</div></div>
+        <button class="btn btn-primary" onclick="showAddRuleModal()">+ Add Rule</button>
+      </div>
+      <div class="card"><div class="table-wrap" id="rulesTable"></div></div>
+    </div>
+
+    <!-- Approvals -->
+    <div class="panel" id="panel-approvals">
+      <div class="panel-header"><div><div class="panel-title">Pending Approvals</div><div class="panel-desc">Gated tool calls awaiting human decision</div></div></div>
+      <div id="approvalsList"></div>
+    </div>
+
+    <!-- Revoked -->
+    <div class="panel" id="panel-revoked">
+      <div class="panel-header"><div><div class="panel-title">Revoked Subjects</div><div class="panel-desc">Emergency access revocation</div></div>
+        <button class="btn btn-danger" onclick="showRevokeModal()">+ Revoke Subject</button>
+      </div>
+      <div class="card"><div id="revokedList"></div></div>
+    </div>
+
+    <!-- Users -->
+    <div class="panel" id="panel-users">
+      <div class="panel-header"><div><div class="panel-title">Users</div><div class="panel-desc">Keycloak user directory</div></div>
+        <button class="btn btn-primary" onclick="showCreateUserModal()">+ Create User</button>
+      </div>
+      <div class="card"><div class="table-wrap" id="usersTable"></div></div>
+    </div>
+
+    <!-- Discover -->
+    <div class="panel" id="panel-discover">
+      <div class="panel-header"><div><div class="panel-title">Discover MCP Servers</div><div class="panel-desc">Search and wire services into the gateway</div></div></div>
+      <div class="tab-bar">
+        <div class="tab active" onclick="setDiscoverTab('docker')" id="tabDocker">Docker Hub (mcp/*)</div>
+        <div class="tab" onclick="setDiscoverTab('registry')" id="tabRegistry">MCP Registry</div>
+      </div>
+      <div class="search-bar">
+        <input id="discoverSearch" placeholder="Search for MCP servers..." onkeydown="if(event.key==='Enter')searchDiscover()" />
+        <button class="btn btn-primary" onclick="searchDiscover()">Search</button>
+      </div>
+      <div id="discoverResults"><div class="empty"><div class="empty-icon">&#128269;</div><div class="empty-text">Search Docker Hub for MCP servers to add to your gateway</div></div></div>
+    </div>
+
+    <!-- Credentials (coming soon) -->
+    <div class="panel" id="panel-credentials">
+      <div class="card"><div class="empty"><div class="empty-icon">&#128273;</div><div class="empty-text" style="font-size:16px;color:var(--text2)">Coming Soon</div><div style="color:var(--text3);font-size:13px;margin-top:8px;max-width:400px;margin-left:auto;margin-right:auto">Vault-based credential injection for MCP services.</div></div></div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+<div id="modalContainer"></div>
+
+<script>
+/* === State === */
+let state = { status: {}, bundle: {}, approvals: [], users: [], governance: {}, backends: {}, suggestions: {} };
+let currentUser = null;
+let countdown = 30;
+let discoverTab = 'docker';
+let sseSource = null;
+
+/* === Auth === */
+async function checkAuth() {
+  try {
+    const resp = await fetch('/api/auth/check');
+    const data = await resp.json();
+    if (data.authenticated) {
+      currentUser = data.username;
+      document.getElementById('loginPage').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      document.getElementById('headerUser').textContent = currentUser;
+      refreshAll().then(() => startTimer());
+    } else {
+      document.getElementById('loginPage').style.display = 'flex';
+      document.getElementById('app').style.display = 'none';
+    }
+  } catch(e) { console.error('Auth check failed', e); }
+}
+
+async function doLogin() {
+  const username = document.getElementById('loginUser').value;
+  const password = document.getElementById('loginPass').value;
+  const errEl = document.getElementById('loginError');
+  errEl.style.display = 'none';
+  try {
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    if (resp.ok) { checkAuth(); }
+    else { const d = await resp.json(); errEl.textContent = d.error || 'Login failed'; errEl.style.display = 'block'; }
+  } catch(e) { errEl.textContent = 'Connection failed'; errEl.style.display = 'block'; }
+}
+
+async function doLogout() {
+  await fetch('/api/auth/logout', {method: 'POST'});
+  currentUser = null;
+  document.getElementById('loginPage').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+/* === Navigation === */
+function switchPanel(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('panel-' + name)?.classList.add('active');
+  document.querySelector(`.nav-item[data-panel="${name}"]`)?.classList.add('active');
+}
+
+/* === API === */
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const resp = await fetch(path, opts);
+  if (resp.status === 401) { doLogout(); throw new Error('Session expired'); }
+  const text = await resp.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = {error: text}; }
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+/* === Data fetching === */
+async function fetchStatus() { try { state.status = await api('GET', '/api/status'); } catch(e) {} }
+async function fetchBundle() { try { state.bundle = await api('GET', '/api/bundle'); } catch(e) {} }
+async function fetchApprovals() { try { state.approvals = (await api('GET', '/api/approvals')).pending || []; } catch(e) { state.approvals = []; } }
+async function fetchUsers() { try { state.users = (await api('GET', '/api/users')).users || []; } catch(e) { state.users = []; } }
+async function fetchGovernance() { try { state.governance = (await api('GET', '/api/governance')).instances || {}; } catch(e) { state.governance = {}; } }
+async function fetchBackends() { try { state.backends = (await api('GET', '/api/backends')).backends || {}; } catch(e) { state.backends = {}; } }
+async function fetchSuggestions() { try { state.suggestions = await api('GET', '/api/suggestions'); } catch(e) {} }
+
+async function refreshAll() {
+  countdown = 30;
+  await Promise.all([fetchStatus(), fetchBundle(), fetchApprovals(), fetchUsers(), fetchGovernance(), fetchBackends(), fetchSuggestions()]);
+  renderAll();
+}
+
+/* === Rendering === */
+function renderAll() { renderStatus(); renderStats(); renderCatalog(); renderRules(); renderApprovals(); renderRevoked(); renderUsers(); renderBackends(); }
+
+function renderStatus() {
+  const svcs = ['npl_engine','keycloak','opa','gateway','bundle_server'];
+  const labels = {npl_engine:'NPL',keycloak:'Keycloak',opa:'OPA',gateway:'Envoy',bundle_server:'Bundle'};
+  document.getElementById('statusDots').innerHTML = svcs.map(s => `<div class="status-dot"><span class="dot ${state.status[s]||''}"></span>${labels[s]}</div>`).join('');
+  document.getElementById('healthTable').innerHTML = `<table><tr><th>Service</th><th>Status</th></tr>${svcs.map(s => {
+    const st = state.status[s]||'unknown'; const color = st==='healthy'?'var(--green)':st==='unhealthy'?'var(--red)':'var(--text3)';
+    return `<tr><td>${labels[s]}</td><td style="color:${color}">${st}</td></tr>`;
+  }).join('')}</table>`;
+}
+
+function renderStats() {
+  const cat = state.bundle.catalog || {};
+  const svc = Object.keys(cat).length, tools = Object.values(cat).reduce((n,s) => n + Object.keys(s.tools||{}).length, 0);
+  const rules = (state.bundle.accessRules||[]).length, pending = state.approvals.length, revoked = (state.bundle.revokedSubjects||[]).length, users = state.users.length;
+  document.getElementById('statsRow').innerHTML = `
+    <div class="stat-card" onclick="switchPanel('catalog')"><div class="stat-value" style="color:var(--accent)">${svc}</div><div class="stat-label">Services</div></div>
+    <div class="stat-card" onclick="switchPanel('catalog')"><div class="stat-value">${tools}</div><div class="stat-label">Tools</div></div>
+    <div class="stat-card" onclick="switchPanel('rules')"><div class="stat-value">${rules}</div><div class="stat-label">Rules</div></div>
+    <div class="stat-card" onclick="switchPanel('approvals')"><div class="stat-value" style="color:${pending>0?'var(--amber)':'var(--text)'}">${pending}</div><div class="stat-label">Pending</div></div>
+    <div class="stat-card" onclick="switchPanel('revoked')"><div class="stat-value" style="color:${revoked>0?'var(--red)':'var(--text)'}">${revoked}</div><div class="stat-label">Revoked</div></div>
+    <div class="stat-card" onclick="switchPanel('users')"><div class="stat-value">${users}</div><div class="stat-label">Users</div></div>`;
+}
+
+function renderCatalog() {
+  const cat = state.bundle.catalog || {};
+  const entries = Object.entries(cat);
+  if (!entries.length) { document.getElementById('catalogGrid').innerHTML = '<div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No services. Click "Add Service" or use Discover to wire one.</div></div>'; return; }
+  document.getElementById('catalogGrid').innerHTML = entries.map(([name, svc]) => {
+    const en = svc.enabled !== false, tools = Object.entries(svc.tools||{}), hasGov = !!state.governance[name], hasBe = !!state.backends[name];
+    return `<div class="card"><div class="svc-header"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="svc-name">${esc(name)}</span>
+      <span class="tag ${en?'tag-enabled':'tag-disabled'}">${en?'enabled':'disabled'}</span>
+      ${hasGov?'<span class="tag tag-gated" title="ServiceGovernance active for this service">gov</span>':''}
+      ${hasBe?'<span class="tag tag-running" title="Backend container running">live</span>':''}
+    </div><div style="display:flex;gap:6px">
+      ${en?`<button class="btn btn-sm btn-ghost" onclick="disableService('${esc(name)}')">Disable</button>`:`<button class="btn btn-sm btn-success" onclick="enableService('${esc(name)}')">Enable</button>`}
+      <button class="btn btn-sm btn-danger" onclick="removeService('${esc(name)}')">Remove</button>
+    </div></div>
+    <div>${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
+    ${tools.map(([t,info]) => `<div class="tool-row"><span class="tool-name">${esc(t)}</span><div class="tool-actions">
+      <span class="tag ${info.tag==='gated'?'tag-gated':'tag-open'}">${info.tag||'open'}</span>
+      <button class="btn btn-sm btn-ghost" onclick="toggleTag('${esc(name)}','${esc(t)}','${info.tag==='gated'?'open':'gated'}')" title="${info.tag==='gated'?'Make this tool open (no approval needed)':'Require approval for this tool'}">${info.tag==='gated'?'Set Open':'Set Gated'}</button>
+      <button class="btn btn-sm btn-danger" onclick="removeTool('${esc(name)}','${esc(t)}')">&#10005;</button>
+    </div></div>`).join('')}</div>
+    ${!hasGov && tools.some(([_,i])=>i.tag==='gated')?'<div style="font-size:12px;color:var(--amber);padding:4px 0">Gated tools need a Governance instance to process approval requests</div>':''}
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-sm btn-ghost" onclick="showAddToolModal('${esc(name)}')">+ Tool</button>
+      ${!hasGov?`<button class="btn btn-sm btn-ghost" onclick="createGovernance('${esc(name)}')">+ Enable Governance</button>`:`<span style="font-size:12px;color:var(--green);display:flex;align-items:center;gap:4px">Governance active</span>`}
+    </div></div>`;
+  }).join('');
+}
+
+function renderRules() {
+  const rules = state.bundle.accessRules || [];
+  if (!rules.length) { document.getElementById('rulesTable').innerHTML = '<div class="empty"><div class="empty-icon">&#9733;</div><div class="empty-text">No access rules. Click "Add Rule" to create one.</div></div>'; return; }
+  // Store rules in state for edit modal access
+  state._rules = rules;
+  document.getElementById('rulesTable').innerHTML = `<table><tr><th>ID</th><th>Type</th><th>Match</th><th>Services</th><th>Tools</th><th></th></tr>
+    ${rules.map((r, idx) => { const m=r.matcher||{}, mt=m.matchType||'claims';
+      let ms=mt==='claims'?Object.entries(m.claims||{}).map(([k,v])=>`${k}=${v}`).join(', '):(m.identity||'');
+      return `<tr><td><strong>${esc(r.id||'')}</strong></td><td><span class="tag ${mt==='claims'?'tag-claims':'tag-identity'}">${mt}</span></td>
+        <td>${esc(ms)}</td><td>${esc((r.allow?.services||[]).join(', '))}</td><td>${esc((r.allow?.tools||[]).join(', '))}</td>
+        <td style="white-space:nowrap"><button class="btn btn-sm btn-ghost" onclick="showEditRuleModal(${idx})">Edit</button> <button class="btn btn-sm btn-danger" onclick="removeRule('${esc(r.id)}')">Remove</button></td></tr>`;
+    }).join('')}</table>`;
+}
+
+function renderApprovals() {
+  const badge = document.getElementById('approvalBadge');
+  if (!state.approvals.length) { document.getElementById('approvalsList').innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9998;</div><div class="empty-text">No pending approvals</div></div></div>'; badge.style.display='none'; return; }
+  badge.textContent = state.approvals.length; badge.style.display = 'inline';
+  document.getElementById('approvalsList').innerHTML = state.approvals.map(a => `<div class="card approval-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><span class="approval-id">${esc(a.requestId)}</span><span class="tag tag-pending">pending</span></div>
+    <div class="approval-meta"><strong>Service:</strong> ${esc(a._serviceName||'')}</div>
+    <div class="approval-meta"><strong>Tool:</strong> ${esc(a.toolName||'')}</div>
+    <div class="approval-meta"><strong>Caller:</strong> ${esc(a.callerIdentity||'')}</div>
+    <div class="approval-meta"><strong>Args:</strong> <code style="font-size:12px;color:var(--text3)">${esc(a.arguments||'')}</code></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-success" onclick="approveRequest('${esc(a._instanceId)}','${esc(a.requestId)}')">Approve</button>
+      <button class="btn btn-danger" onclick="showDenyModal('${esc(a._instanceId)}','${esc(a.requestId)}')">Deny</button>
+    </div></div>`).join('');
+}
+
+function renderRevoked() {
+  const subjects = state.bundle.revokedSubjects || [];
+  if (!subjects.length) { document.getElementById('revokedList').innerHTML = '<div class="empty"><div class="empty-icon">&#10003;</div><div class="empty-text">No revoked subjects</div></div>'; return; }
+  document.getElementById('revokedList').innerHTML = `<table><tr><th>Subject</th><th></th></tr>
+    ${subjects.map(s => `<tr><td>${esc(s)}</td><td><button class="btn btn-sm btn-success" onclick="reinstateSubject('${esc(s)}')">Reinstate</button></td></tr>`).join('')}</table>`;
+}
+
+function renderUsers() {
+  if (!state.users.length) { document.getElementById('usersTable').innerHTML = '<div class="empty"><div class="empty-text">No users found</div></div>'; return; }
+  document.getElementById('usersTable').innerHTML = `<table><tr><th>Username</th><th>Email</th><th>Role</th><th>Org</th><th>Dept</th><th>Status</th><th></th></tr>
+    ${state.users.map(u => `<tr>
+      <td><strong>${esc(u.username)}</strong></td><td>${esc(u.email)}</td><td>${esc(u.role)}</td>
+      <td>${esc(u.organization)}</td><td>${esc(u.department)}</td>
+      <td><span class="tag ${u.enabled?'tag-enabled':'tag-disabled'}">${u.enabled?'active':'disabled'}</span></td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm btn-ghost" onclick="showEditUserModal('${esc(u.id)}')">Edit</button>
+        ${u.username!=='admin'&&u.username!=='gateway'?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.id)}','${esc(u.username)}')">Del</button>`:''}
+      </td></tr>`).join('')}</table>`;
+}
+
+function renderBackends() {
+  const be = state.backends;
+  const entries = Object.entries(be);
+  if (!entries.length) { document.getElementById('backendsTable').innerHTML = '<div style="color:var(--text3);font-size:13px">No backends registered in aggregator</div>'; return; }
+  document.getElementById('backendsTable').innerHTML = `<table><tr><th>Service</th><th>URL</th></tr>
+    ${entries.map(([n,u]) => `<tr><td>${esc(n)}</td><td style="font-family:monospace;font-size:12px">${esc(u)}</td></tr>`).join('')}</table>`;
+}
+
+/* === Actions (all wrapped in try/catch) === */
+async function act(fn, successMsg) { try { await fn(); toast(successMsg,'success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); console.error(e); } }
+async function enableService(n) { await act(()=>api('POST','/api/services/enable',{serviceName:n}), 'Service enabled'); }
+async function disableService(n) { await act(()=>api('POST','/api/services/disable',{serviceName:n}), 'Service disabled'); }
+async function removeService(n) { if(!confirm(`Remove "${n}" and all its tools?`))return; await act(()=>api('POST','/api/services/remove',{serviceName:n}), 'Service removed'); }
+async function toggleTag(s,t,tag) { await act(()=>api('POST','/api/tools/set-tag',{serviceName:s,toolName:t,tag}), `${t} set to ${tag}`); }
+async function removeTool(s,t) { await act(()=>api('POST','/api/tools/remove',{serviceName:s,toolName:t}), 'Tool removed'); }
+async function removeRule(id) { await act(()=>api('POST','/api/access-rules/remove',{id}), 'Rule removed'); }
+async function approveRequest(iid,rid) { await act(()=>api('POST','/api/approvals/approve',{instanceId:iid,requestId:rid}), `Approved ${rid}`); }
+async function reinstateSubject(id) { await act(()=>api('POST','/api/revoked/remove',{subjectId:id}), 'Reinstated'); }
+async function createGovernance(svc) { await act(()=>api('POST','/api/governance/create',{serviceName:svc}), `Governance created for ${svc}`); }
+async function deleteUser(id, name) { if(!confirm(`Delete user "${name}"?`))return; await act(()=>api('POST','/api/users/delete',{userId:id}), 'User deleted'); }
+
+/* === Modals === */
+function showModal(html) { document.getElementById('modalContainer').innerHTML = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
+function closeModal() { document.getElementById('modalContainer').innerHTML = ''; }
+
+function showAddServiceModal() {
+  // Find backends not yet in catalog
+  const catalogSvcs = new Set(Object.keys(state.bundle.catalog||{}));
+  const unwired = Object.keys(state.backends||{}).filter(b => !catalogSvcs.has(b));
+  const opts = unwired.map(b => `<option value="${esc(b)}">${esc(b)} (backend running, not in catalog)</option>`).join('');
+  showModal(`<h3>Add Service</h3>
+    ${unwired.length?`<div class="form-group" style="margin-bottom:12px"><label>Available backends (running but not in catalog)</label><select id="newSvcSelect" onchange="document.getElementById('newSvcName').value=this.value"><option value="">-- select --</option>${opts}</select></div>`:''}
+    <div class="form-group" style="margin-bottom:12px"><label>Service Name</label><input id="newSvcName" placeholder="e.g. my-service" list="svcSuggest" /><datalist id="svcSuggest">${unwired.map(b=>`<option value="${esc(b)}">`).join('')}</datalist></div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:16px">Or <a href="#" style="color:var(--accent)" onclick="closeModal();switchPanel('discover');return false;">discover new MCP servers</a> from Docker Hub</div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddService()">Add</button></div>`);
+  document.getElementById('newSvcName').focus();
+}
+async function submitAddService() { const n=document.getElementById('newSvcName').value.trim(); if(!n)return; try { await api('POST','/api/services/register',{serviceName:n}); closeModal(); toast('Service added','success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); } }
+
+function showAddToolModal(svc) {
+  showModal(`<h3>Add Tool to ${esc(svc)}</h3>
+    <div class="form-group" style="margin-bottom:12px"><label>Tool Name</label><input id="newToolName" placeholder="e.g. list_items" /></div>
+    <div class="form-group" style="margin-bottom:16px"><label>Tag</label><select id="newToolTag"><option value="open">open</option><option value="gated">gated</option></select></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddTool('${esc(svc)}')">Add</button></div>`);
+  document.getElementById('newToolName').focus();
+}
+async function submitAddTool(svc) { const n=document.getElementById('newToolName').value.trim(), tag=document.getElementById('newToolTag').value; if(!n)return; try { await api('POST','/api/tools/register',{serviceName:svc,toolName:n,tag}); closeModal(); toast('Tool added','success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); } }
+
+function showAddRuleModal() {
+  const sg = state.suggestions;
+  const svcOpts = (sg.services||[]).map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  const deptOpts = (sg.departments||[]).map(d => `<option value="${esc(d)}">`).join('');
+  const orgOpts = (sg.organizations||[]).map(o => `<option value="${esc(o)}">`).join('');
+  const userOpts = (sg.users||[]).map(u => `<option value="${esc(u)}">`).join('');
+  showModal(`<h3>Add Access Rule</h3>
+    <div class="form-group" style="margin-bottom:12px"><label>Rule ID</label><input id="ruleId" placeholder="e.g. sales-calendar" /></div>
+    <div class="form-group" style="margin-bottom:12px"><label>Match Type</label><select id="ruleType" onchange="toggleRuleFields()"><option value="claims">Claims-based</option><option value="identity">Identity-based</option></select></div>
+    <div id="claimsFields">
+      <div class="form-row">
+        <div class="form-group"><label>Department</label><input id="ruleDept" list="deptList" placeholder="e.g. sales" /><datalist id="deptList">${deptOpts}</datalist></div>
+        <div class="form-group"><label>Organization</label><input id="ruleOrg" list="orgList" placeholder="e.g. acme" /><datalist id="orgList">${orgOpts}</datalist></div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px"><label>Extra claims (key=value, comma-separated)</label><input id="ruleExtraClaims" placeholder="e.g. role=manager" /></div>
+    </div>
+    <div id="identityFields" style="display:none">
+      <div class="form-group" style="margin-bottom:12px"><label>Identity (email)</label><input id="ruleIdentity" list="userList" placeholder="e.g. alice@acme.com" /><datalist id="userList">${userOpts}</datalist></div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px"><label>Allow Services</label><select id="ruleServices" multiple style="min-height:60px">${svcOpts}<option value="*">* (all services)</option></select></div>
+    <div class="form-group" style="margin-bottom:16px"><label>Allow Tools (comma-separated, * for all)</label><input id="ruleTools" value="*" /></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAddRule()">Add Rule</button></div>`);
+  document.getElementById('ruleId').focus();
+}
+function toggleRuleFields() { const t=document.getElementById('ruleType').value; document.getElementById('claimsFields').style.display=t==='claims'?'block':'none'; document.getElementById('identityFields').style.display=t==='identity'?'block':'none'; }
+async function submitAddRule() {
+  const id=document.getElementById('ruleId').value.trim(); if(!id)return;
+  try {
+  const type=document.getElementById('ruleType').value;
+  const claims={};
+  if(type==='claims') {
+    const dept=document.getElementById('ruleDept').value.trim(); if(dept)claims.department=dept;
+    const org=document.getElementById('ruleOrg').value.trim(); if(org)claims.organization=org;
+    const extra=document.getElementById('ruleExtraClaims').value.split(',').map(s=>s.trim()).filter(Boolean);
+    extra.forEach(p=>{const[k,v]=p.split('=');if(k&&v)claims[k.trim()]=v.trim();});
+  }
+  const selSvcs = [...document.getElementById('ruleServices').selectedOptions].map(o=>o.value);
+  await api('POST','/api/access-rules/add',{
+    id, matchType:type, matchClaims:claims, matchIdentity:type==='identity'?document.getElementById('ruleIdentity').value.trim():'',
+    allowServices:selSvcs, allowTools:document.getElementById('ruleTools').value.split(',').map(s=>s.trim()).filter(Boolean),
+  });
+  closeModal(); toast('Rule added','success'); await refreshAll();
+  } catch(e) { toast('Error: '+(e.message||e),'error'); }
+}
+
+function showEditRuleModal(idx) {
+  const r = (state._rules||[])[idx]; if(!r) return;
+  const m = r.matcher||{}, mt = m.matchType||'claims';
+  const claims = m.claims||{};
+  const sg = state.suggestions;
+  const svcOpts = (sg.services||[]).map(s => `<option value="${esc(s)}" ${(r.allow?.services||[]).includes(s)?'selected':''}>${esc(s)}</option>`).join('');
+  const wildSelected = (r.allow?.services||[]).includes('*');
+  const deptOpts = (sg.departments||[]).map(d => `<option value="${esc(d)}">`).join('');
+  const orgOpts = (sg.organizations||[]).map(o => `<option value="${esc(o)}">`).join('');
+  const userOpts = (sg.users||[]).map(u => `<option value="${esc(u)}">`).join('');
+  // Separate well-known claims from extra claims
+  const dept = claims.department||'', org = claims.organization||'';
+  const extraClaims = Object.entries(claims).filter(([k])=>k!=='department'&&k!=='organization').map(([k,v])=>`${k}=${v}`).join(', ');
+  const toolsStr = (r.allow?.tools||[]).join(', ');
+
+  showModal(`<h3>Edit Rule: ${esc(r.id)}</h3>
+    <div class="form-group" style="margin-bottom:12px"><label>Rule ID</label><input id="ruleId" value="${esc(r.id)}" readonly style="opacity:0.5" /></div>
+    <div class="form-group" style="margin-bottom:12px"><label>Match Type</label><select id="ruleType" onchange="toggleRuleFields()"><option value="claims" ${mt==='claims'?'selected':''}>Claims-based</option><option value="identity" ${mt==='identity'?'selected':''}>Identity-based</option></select></div>
+    <div id="claimsFields" style="${mt==='claims'?'':'display:none'}">
+      <div class="form-row">
+        <div class="form-group"><label>Department</label><input id="ruleDept" list="deptList" value="${esc(dept)}" /><datalist id="deptList">${deptOpts}</datalist></div>
+        <div class="form-group"><label>Organization</label><input id="ruleOrg" list="orgList" value="${esc(org)}" /><datalist id="orgList">${orgOpts}</datalist></div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px"><label>Extra claims (key=value, comma-separated)</label><input id="ruleExtraClaims" value="${esc(extraClaims)}" /></div>
+    </div>
+    <div id="identityFields" style="${mt==='identity'?'':'display:none'}">
+      <div class="form-group" style="margin-bottom:12px"><label>Identity (email)</label><input id="ruleIdentity" list="userList" value="${esc(m.identity||'')}" /><datalist id="userList">${userOpts}</datalist></div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px"><label>Allow Services</label><select id="ruleServices" multiple style="min-height:60px">${svcOpts}<option value="*" ${wildSelected?'selected':''}>* (all services)</option></select></div>
+    <div class="form-group" style="margin-bottom:16px"><label>Allow Tools (comma-separated, * for all)</label><input id="ruleTools" value="${esc(toolsStr)}" /></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitEditRule('${esc(r.id)}')">Save Changes</button></div>`);
+}
+async function submitEditRule(oldId) {
+  try {
+    // Remove old rule first
+    await api('POST','/api/access-rules/remove',{id:oldId});
+    // Build updated rule from form
+    const id = document.getElementById('ruleId').value.trim(); if(!id) return;
+    const type = document.getElementById('ruleType').value;
+    const claims = {};
+    if(type==='claims') {
+      const dept=document.getElementById('ruleDept').value.trim(); if(dept)claims.department=dept;
+      const org=document.getElementById('ruleOrg').value.trim(); if(org)claims.organization=org;
+      const extra=document.getElementById('ruleExtraClaims').value.split(',').map(s=>s.trim()).filter(Boolean);
+      extra.forEach(p=>{const[k,v]=p.split('=');if(k&&v)claims[k.trim()]=v.trim();});
+    }
+    const selSvcs = [...document.getElementById('ruleServices').selectedOptions].map(o=>o.value);
+    await api('POST','/api/access-rules/add',{
+      id, matchType:type, matchClaims:claims, matchIdentity:type==='identity'?document.getElementById('ruleIdentity').value.trim():'',
+      allowServices:selSvcs, allowTools:document.getElementById('ruleTools').value.split(',').map(s=>s.trim()).filter(Boolean),
+    });
+    closeModal(); toast('Rule updated','success'); await refreshAll();
+  } catch(e) { toast('Error: '+(e.message||e),'error'); }
+}
+
+function showRevokeModal() {
+  const userOpts = (state.suggestions.users||[]).map(u => `<option value="${esc(u)}">`).join('');
+  showModal(`<h3>Revoke Subject</h3>
+    <div class="form-group" style="margin-bottom:16px"><label>Subject ID (email)</label><input id="revokeId" list="revokeUserList" placeholder="e.g. mallory@evil.com" /><datalist id="revokeUserList">${userOpts}</datalist></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-danger" onclick="submitRevoke()">Revoke</button></div>`);
+  document.getElementById('revokeId').focus();
+}
+async function submitRevoke() { const id=document.getElementById('revokeId').value.trim(); if(!id)return; try { await api('POST','/api/revoked/add',{subjectId:id}); closeModal(); toast('Subject revoked','success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); } }
+
+function showDenyModal(iid, rid) {
+  showModal(`<h3>Deny Request ${esc(rid)}</h3>
+    <div class="form-group" style="margin-bottom:16px"><label>Reason</label><input id="denyReason" placeholder="e.g. Not authorized" /></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-danger" onclick="submitDeny('${esc(iid)}','${esc(rid)}')">Deny</button></div>`);
+  document.getElementById('denyReason').focus();
+}
+async function submitDeny(iid, rid) { const r=document.getElementById('denyReason').value.trim()||'Denied by admin'; try { await api('POST','/api/approvals/deny',{instanceId:iid,requestId:rid,reason:r}); closeModal(); toast(`Denied ${rid}`,'success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); } }
+
+/* === User CRUD modals === */
+function showCreateUserModal() {
+  showModal(`<h3>Create User</h3>
+    <div class="form-row"><div class="form-group"><label>Username</label><input id="cuUser" placeholder="jdoe" /></div><div class="form-group"><label>Email</label><input id="cuEmail" placeholder="jdoe@acme.com" /></div></div>
+    <div class="form-row"><div class="form-group"><label>First Name</label><input id="cuFirst" /></div><div class="form-group"><label>Last Name</label><input id="cuLast" /></div></div>
+    <div class="form-row"><div class="form-group"><label>Department</label><input id="cuDept" placeholder="engineering" /></div><div class="form-group"><label>Organization</label><input id="cuOrg" value="acme" /></div></div>
+    <div class="form-row"><div class="form-group"><label>Role</label><select id="cuRole"><option value="user">user</option><option value="admin">admin</option></select></div><div class="form-group"><label>Password</label><input id="cuPass" type="password" placeholder="Initial password" /></div></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitCreateUser()">Create</button></div>`);
+  document.getElementById('cuUser').focus();
+}
+async function submitCreateUser() {
+  const b = {username:document.getElementById('cuUser').value.trim(), email:document.getElementById('cuEmail').value.trim(),
+    firstName:document.getElementById('cuFirst').value.trim(), lastName:document.getElementById('cuLast').value.trim(),
+    department:document.getElementById('cuDept').value.trim(), organization:document.getElementById('cuOrg').value.trim(),
+    role:document.getElementById('cuRole').value, password:document.getElementById('cuPass').value};
+  if(!b.username) return;
+  try { await api('POST','/api/users/create',b); closeModal(); toast('User created','success'); await refreshAll(); }
+  catch(e) { toast('Error: '+(e.message||e),'error'); }
+}
+
+function showEditUserModal(userId) {
+  const u = state.users.find(x => x.id === userId); if(!u) return;
+  showModal(`<h3>Edit User: ${esc(u.username)}</h3>
+    <div class="form-row"><div class="form-group"><label>Email</label><input id="euEmail" value="${esc(u.email)}" /></div></div>
+    <div class="form-row"><div class="form-group"><label>First Name</label><input id="euFirst" value="${esc(u.firstName)}" /></div><div class="form-group"><label>Last Name</label><input id="euLast" value="${esc(u.lastName)}" /></div></div>
+    <div class="form-row"><div class="form-group"><label>Department</label><input id="euDept" value="${esc(u.department)}" /></div><div class="form-group"><label>Organization</label><input id="euOrg" value="${esc(u.organization)}" /></div></div>
+    <div class="form-row"><div class="form-group"><label>Role</label><select id="euRole">${['user','admin','gateway'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}</select></div>
+      <div class="form-group"><label>New Password (blank=unchanged)</label><input id="euPass" type="password" /></div></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitEditUser('${esc(userId)}')">Save</button></div>`);
+}
+async function submitEditUser(userId) {
+  const b = {userId, email:document.getElementById('euEmail').value.trim(), firstName:document.getElementById('euFirst').value.trim(),
+    lastName:document.getElementById('euLast').value.trim(), department:document.getElementById('euDept').value.trim(),
+    organization:document.getElementById('euOrg').value.trim(), role:document.getElementById('euRole').value};
+  const pw = document.getElementById('euPass').value; if(pw) b.password = pw;
+  try { await api('POST','/api/users/update',b); closeModal(); toast('User updated','success'); await refreshAll(); }
+  catch(e) { toast('Error: '+(e.message||e),'error'); }
+}
+
+/* === Discover === */
+function setDiscoverTab(tab) { discoverTab = tab; document.getElementById('tabDocker').classList.toggle('active',tab==='docker'); document.getElementById('tabRegistry').classList.toggle('active',tab==='registry');
+  document.getElementById('discoverSearch').placeholder = tab==='docker' ? 'Search Docker Hub mcp/* images...' : 'Search MCP Registry...';
+}
+
+async function searchDiscover() {
+  const q = document.getElementById('discoverSearch').value.trim();
+  const container = document.getElementById('discoverResults');
+  container.innerHTML = '<div class="empty"><div class="empty-text">Searching...</div></div>';
+  if (discoverTab === 'docker') { await searchDockerHub(q, container); }
+  else { await searchMCPRegistry(q, container); }
+}
+
+async function searchDockerHub(q, container) {
+  try {
+    const data = await api('GET', '/api/dockerhub/search' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const images = data.images || [];
+    if (!images.length) { container.innerHTML = '<div class="empty"><div class="empty-icon">&#128269;</div><div class="empty-text">No images found</div></div>'; return; }
+    container.innerHTML = images.map(img => {
+      const pulls = img.pull_count > 1000000 ? (img.pull_count/1000000).toFixed(1)+'M' : img.pull_count > 1000 ? (img.pull_count/1000).toFixed(0)+'K' : img.pull_count;
+      return `<div class="card discover-card"><div class="disc-info">
+        <div class="disc-name">${esc(img.full_name)}</div>
+        <div class="disc-desc">${esc(img.description||'No description')}</div>
+        <div class="disc-meta"><span>${pulls} pulls</span>${img.star_count?`<span>${img.star_count} stars</span>`:''}</div>
+      </div><div style="flex-shrink:0">
+        <button class="btn btn-sm btn-primary" onclick="wireDockerService('${esc(img.full_name)}','${esc(img.name)}')">Wire to Gateway</button>
+      </div></div>`;
+    }).join('');
+  } catch(e) { container.innerHTML = '<div class="empty"><div class="empty-icon">&#9888;</div><div class="empty-text">Docker Hub search failed</div></div>'; }
+}
+
+async function searchMCPRegistry(q, container) {
+  try {
+    const data = await api('GET', '/api/registry/search' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const entries = data.servers || [];
+    if (!entries.length) { container.innerHTML = '<div class="empty"><div class="empty-icon">&#128269;</div><div class="empty-text">No servers found</div></div>'; return; }
+    container.innerHTML = entries.map(entry => {
+      const s = entry.server || entry; const name=s.name||'', desc=s.description||'', ver=s.version||'', repo=s.repository?.url||'';
+      const short = name.split('/').pop()||name;
+      return `<div class="card discover-card"><div class="disc-info">
+        <div class="disc-name">${esc(name)}</div>
+        <div class="disc-desc">${esc(desc)}</div>
+        <div class="disc-meta">${ver?`<span>v${esc(ver)}</span>`:''} ${repo?`<a href="${esc(repo)}" target="_blank" style="color:var(--accent)">Repo</a>`:''}</div>
+      </div><div style="flex-shrink:0">
+        <button class="btn btn-sm btn-ghost" onclick="addRegistryService('${esc(short)}')">+ Add to Catalog</button>
+      </div></div>`;
+    }).join('');
+  } catch(e) { container.innerHTML = '<div class="empty"><div class="empty-icon">&#9888;</div><div class="empty-text">MCP Registry search failed</div></div>'; }
+}
+
+async function wireDockerService(image, name) {
+  const svcName = prompt('Service name for the gateway:', name);
+  if (!svcName) return;
+  showModal(`<h3>Wiring ${esc(image)}</h3><div class="wire-progress" id="wireProgress"><div class="wire-step">Starting wire process...</div></div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="wireClose" style="display:none" onclick="closeModal();refreshAll();">Close</button></div>`);
+
+  try {
+    // Use streaming fetch to show real-time progress
+    const resp = await fetch('/api/docker/wire', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({image, serviceName: svcName}),
+    });
+    const prog = document.getElementById('wireProgress');
+    if (!prog) return;
+    prog.innerHTML = '';
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+
+      // Parse SSE events from buffer
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop(); // Keep incomplete event in buffer
+      for (const part of parts) {
+        if (!part.trim()) continue;
+        const dataLine = part.split('\n').find(l => l.startsWith('data: '));
+        if (!dataLine) continue;
+        try {
+          const data = JSON.parse(dataLine.substring(6));
+          const el = document.createElement('div');
+          el.className = 'wire-step';
+          if (data.status === 'done' || data.status === 'complete') el.classList.add('done');
+          else if (data.status === 'error') el.classList.add('fail');
+          else if (data.status === 'pulling') { el.style.color = 'var(--text3)'; el.style.fontSize = '12px'; }
+          el.textContent = data.step;
+          // For pulling status, replace previous pulling line to avoid spam
+          if (data.status === 'pulling') {
+            const prev = prog.querySelector('.wire-pulling');
+            if (prev) prev.remove();
+            el.classList.add('wire-pulling');
+          }
+          prog.appendChild(el);
+          prog.scrollTop = prog.scrollHeight;
+          if (data.status === 'complete') {
+            toast(`${svcName} wired to gateway`, 'success');
+          }
+        } catch {}
+      }
+    }
+  } catch(e) {
+    const prog = document.getElementById('wireProgress');
+    if(prog) { const el = document.createElement('div'); el.className = 'wire-step fail'; el.textContent = 'Error: ' + e.message; prog.appendChild(el); }
+  }
+  const btn = document.getElementById('wireClose'); if(btn) btn.style.display = 'inline-flex';
+}
+
+async function addRegistryService(name) {
+  const svcName = prompt('Add to catalog as:', name); if(!svcName) return;
+  await api('POST', '/api/services/register', {serviceName: svcName});
+  toast(`"${svcName}" added to catalog. Add tools and access rules to complete setup.`, 'success');
+  switchPanel('catalog'); await refreshAll();
+}
+
+/* === SSE Stream === */
+let sseEventCount = 0;
+function toggleSSE() {
+  if (sseSource) { sseSource.close(); sseSource = null; document.getElementById('sseToggle').textContent = 'Connect SSE'; document.getElementById('sseToggle').classList.remove('btn-danger'); document.getElementById('sseToggle').classList.add('btn-ghost'); return; }
+  document.getElementById('sseToggle').textContent = 'Disconnect';
+  document.getElementById('sseToggle').classList.remove('btn-ghost');
+  document.getElementById('sseToggle').classList.add('btn-danger');
+  sseEventCount = 0;
+  const container = document.getElementById('logContainer');
+  container.innerHTML = '<div class="log-entry"><span class="ts">' + new Date().toLocaleTimeString() + '</span> <span class="action">connecting</span> Opening SSE stream to NPL Engine...</div>';
+  sseSource = new EventSource('/api/sse/npl');
+
+  // The proxy re-emits all events as 'message' type
+  sseSource.onmessage = function(e) {
+    sseEventCount++;
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    const ts = new Date().toLocaleTimeString();
+    try {
+      const data = JSON.parse(e.data);
+      const payloadType = data.payloadType || 'event';
+      if (payloadType === 'tick') {
+        // Only show every 10th tick to reduce noise
+        if (sseEventCount % 10 !== 0) return;
+        entry.innerHTML = `<span class="ts">${ts}</span> <span style="color:var(--text3)">tick</span> <span style="color:var(--text3)">#${sseEventCount}</span>`;
+      } else {
+        entry.innerHTML = `<span class="ts">${ts}</span> <span class="action">${esc(payloadType)}</span> ${esc(JSON.stringify(data).substring(0,300))}`;
+      }
+    } catch {
+      entry.innerHTML = `<span class="ts">${ts}</span> ${esc(e.data.substring(0,300))}`;
+    }
+    container.appendChild(entry);
+    // Keep log size manageable
+    while (container.children.length > 200) container.removeChild(container.firstChild);
+    container.scrollTop = container.scrollHeight;
+  };
+
+  sseSource.onopen = function() {
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `<span class="ts">${new Date().toLocaleTimeString()}</span> <span style="color:var(--green)">connected</span> SSE stream active`;
+    container.appendChild(entry);
+  };
+
+  sseSource.onerror = function() {
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `<span class="ts">${new Date().toLocaleTimeString()}</span> <span style="color:var(--amber)">disconnected</span> SSE connection lost. Reconnecting...`;
+    container.appendChild(entry);
+    container.scrollTop = container.scrollHeight;
+  };
+}
+
+/* === Utils === */
+function toast(msg, type='success') { const el=document.createElement('div'); el.className=`toast ${type}`; el.textContent=msg; document.getElementById('toasts').appendChild(el); setTimeout(()=>el.remove(),3000); }
+function esc(s) { if(s==null)return''; const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
+
+function startTimer() {
+  setInterval(() => { countdown--; document.getElementById('refreshTimer').textContent=`${countdown}s`; if(countdown<=0)refreshAll(); }, 1000);
+}
+
+/* === Init === */
+checkAuth();
+</script>
+</body>
+</html>

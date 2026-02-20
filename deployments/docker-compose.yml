@@ -403,6 +403,39 @@ services:
     profiles:
       - test
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Governance Dashboard (admin UI for v4 GatewayStore + ServiceGovernance)
+  # ─────────────────────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.dashboard
+    ports:
+      - "8888:8888"
+    environment:
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      ADMIN_USERNAME: "admin"
+      ADMIN_PASSWORD: "Welcome123"
+      GATEWAY_URL: "http://envoy-gateway:8000"
+      OPA_URL: "http://opa:8181"
+      BUNDLE_SERVER_URL: "http://bundle-server:8282"
+      AGGREGATOR_URL: "http://mcp-aggregator:8000"
+      DOCKER_NETWORK: "gateway_backend-net"
+      PORT: "8888"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - policy-net
+      - public-net
+      - backend-net
+
   # CORS proxy for NPL Engine (needed for Inspector browser access)
   npl-cors-proxy:
     image: nginx:alpine
