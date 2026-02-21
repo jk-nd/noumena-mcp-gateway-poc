@@ -203,6 +203,8 @@ protocol[pAdmin, pGateway] GatewayStore() {
         allowTools: List<Text>
     ) | active {
         require(matchType == "claims" || matchType == "identity", "matchType must be 'claims' or 'identity'");
+        require(allowServices.size() > 0, "allowServices must not be empty");
+        require(allowTools.size() > 0, "allowTools must not be empty");
         // Ensure no duplicate ID
         var existing = accessRules.findFirstOrNone(function(r: AccessRule) -> r.id == id);
         require(!existing.isPresent(), "Access rule with this ID already exists");
