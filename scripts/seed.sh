@@ -161,9 +161,9 @@ add_rule "sales-search-only" \
   "claims" '{"department":"sales"}' "" \
   '["duckduckgo"]' '["*"]'
 
-add_rule "jarvis-calendar-read" \
+add_rule "jarvis-calendar" \
   "identity" '{}' "jarvis@acme.com" \
-  '["mock-calendar"]' '["list_events","read_inbox"]'
+  '["mock-calendar"]' '["*"]'
 
 add_rule "compliance-all" \
   "claims" '{"role":"approver"}' "" \
@@ -366,7 +366,7 @@ echo "Access rules:"
 echo "  - acme-all-search       org=acme            -> duckduckgo.*"
 echo "  - engineering-calendar   dept=engineering     -> mock-calendar.*"
 echo "  - sales-search-only      dept=sales           -> duckduckgo.*"
-echo "  - jarvis-calendar-read   jarvis@acme.com      -> mock-calendar.{list_events,read_inbox}"
+echo "  - jarvis-calendar        jarvis@acme.com      -> mock-calendar.*"
 echo "  - compliance-all         role=approver         -> *.*"
 echo ""
 echo "Governance models:"
