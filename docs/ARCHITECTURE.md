@@ -31,9 +31,14 @@ This document describes the MCP Gateway's service topology, network isolation de
                         │  │:9191:8181│  │    :8282      │  │  :12000   │  │
                         │  └──────────┘  └──────────────┘  └───────────┘  │
                         │                                                  │
+                        │  ┌────────────────────┐  ┌──────────────────┐   │
+                        │  │Governance Evaluator │  │Credential Proxy  │   │
+                        │  │       :8090         │  │     :9002        │   │
+                        │  └────────────────────┘  └──────────────────┘   │
+                        │                                                  │
                         │  ┌────────────────┐  ┌──────────────────┐       │
-                        │  │Credential Proxy│  │ NPL CORS Proxy   │       │
-                        │  │     :9002      │  │     :12001       │       │
+                        │  │   Dashboard    │  │ NPL CORS Proxy   │       │
+                        │  │     :8888      │  │     :12001       │       │
                         │  └────────────────┘  └──────────────────┘       │
                         └─────────┬───────────────────────────────────────┘
                                   │ route (if allowed)
@@ -72,12 +77,14 @@ This document describes the MCP Gateway's service topology, network isolation de
 | Keycloak | Java | 11000 (HTTP), 9000 (health) | public | OIDC identity provider (user auth, JWT issuance) |
 | OPA Sidecar | Go | 9191 (gRPC), 8181 (HTTP) | policy | Rego policy evaluation, Envoy ext_authz |
 | Bundle Server | Python | 8282 | policy, public | SSE-driven OPA bundle builder and server |
-| NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (PolicyStore, ApprovalPolicy, RateLimitPolicy, ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy) |
+| NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (GatewayStore + ServiceGovernance) |
 | Engine DB | PostgreSQL | 5432 | policy | NPL Engine persistence |
 | MCP Aggregator | Node.js | 8000 | backend | Multi-backend MCP request routing |
 | DuckDuckGo MCP | Node.js | 8000 | backend | Supergateway sidecar for DuckDuckGo search |
 | GitHub MCP | Node.js | 8000 | backend, secrets | Supergateway sidecar for GitHub (needs credentials) |
 | Mock Calendar MCP | Node.js | 8000 | backend | Streamable HTTP MCP server for testing |
+| Governance Evaluator | Python | 8090 | policy, public | Argument-level constraint evaluation + NPL approval routing |
+| Dashboard | Python | 8888 | policy, public, backend | Admin web UI: catalog, rules, approvals, users, metrics |
 | Credential Proxy | Python | 9002 | secrets, policy | Vault-to-env credential injection |
 | Vault | Go | 8200 | secrets | Secret storage (dev mode) |
 | NPL Inspector | React | 8080 | policy, public | NPL state inspection UI |
@@ -101,16 +108,14 @@ Agent                 Envoy              OPA              NPL Engine        MCP 
   │                    │                  │                    │                  │                │
   │                    │ ext_authz(gRPC)  │                    │                  │                │
   │                    │─────────────────►│                    │                  │                │
-  │                    │                  │ Layer 1:           │                  │                │
-  │                    │                  │ catalog+grants     │                  │                │
-  │                    │                  │ +security policy   │                  │                │
+  │                    │                  │ Layer 1: Catalog   │                  │                │
+  │                    │                  │ Layer 2: Access    │                  │                │
   │                    │                  │ (~1ms, in-memory)  │                  │                │
   │                    │                  │                    │                  │                │
-  │                    │                  │ [if contextual     │                  │                │
-  │                    │                  │  route exists]     │                  │                │
-  │                    │                  │ Layer 2:           │                  │                │
-  │                    │                  │ http.send ────────►│                  │                │
-  │                    │                  │   evaluate()       │                  │                │
+  │                    │                  │ [if tag == gated]  │                  │                │
+  │                    │                  │ Layer 3: NPL       │                  │                │
+  │                    │                  │ http.send ────────►│ Gov. Evaluator   │                │
+  │                    │                  │   evaluate()       │   → NPL Engine   │                │
   │                    │                  │ ◄─────────────────│                  │                │
   │                    │                  │ (~60ms, network)   │                  │                │
   │                    │                  │                    │                  │                │
@@ -128,10 +133,11 @@ Agent                 Envoy              OPA              NPL Engine        MCP 
   │ JSON-RPC response  │                  │                    │                  │                │
 ```
 
-### Layer 1 vs Layer 2
+### Three-Layer Evaluation (v4)
 
-- **Layer 1** (~1ms): OPA evaluates catalog, grants, and security policy entirely from in-memory bundle data. No network I/O. Handles ~99% of requests.
-- **Layer 2** (~60ms): When a contextual route exists (e.g., approvals, rate limiting), OPA calls the NPL Engine via `http.send()`. Handles ~1% of requests.
+- **Layer 1 — Catalog** (~0.5ms): Is the service enabled and tool registered? In-memory bundle check.
+- **Layer 2 — Access Rules** (~0.5ms): Does any access rule (claim-based or identity-based) grant this caller access? In-memory bundle check.
+- **Layer 3 — NPL Governance** (~60ms): For `gated` tools only, OPA calls the governance evaluator which checks argument constraints and routes to NPL for approval workflows. `Open` tools skip this layer entirely.
 
 ---
 
@@ -140,19 +146,19 @@ Agent                 Envoy              OPA              NPL Engine        MCP 
 The OPA bundle is rebuilt whenever policy state changes in the NPL Engine:
 
 ```
-PolicyStore (NPL)                Bundle Server                    OPA
+GatewayStore (NPL)               Bundle Server                    OPA
       │                               │                           │
       │ SSE push notification          │                           │
       │ (state change event)           │                           │
       │──────────────────────────────►│                           │
       │                               │ debounce (100ms)          │
       │                               │                           │
-      │ GET PolicyStore/              │                           │
+      │ GET GatewayStore/             │                           │
       │◄──────────────────────────────│                           │
-      │ getPolicyData()               │                           │
+      │ getBundleData()               │                           │
       │──────────────────────────────►│                           │
-      │ {catalog, grants, routes,     │                           │
-      │  security_policy, token}      │                           │
+      │ {catalog, accessRules,        │                           │
+      │  revokedSubjects, token}      │                           │
       │◄──────────────────────────────│                           │
       │                               │ build bundle              │
       │                               │ (data.json + manifest)    │
@@ -258,17 +264,14 @@ JWT claims are mapped to NPL protocol parties via `npl/src/main/yaml/rules.yml`:
 
 | NPL Party | JWT Role Claim | Purpose |
 |-----------|---------------|---------|
-| `pAdmin` | `admin` | Organization administrator — manages policies, views all state |
-| `pGateway` | `gateway` | Gateway service account — runtime policy enforcement |
-| `pApprover` | `admin` | Human approver — approves/denies pending requests (ApprovalPolicy only) |
+| `pAdmin` | `admin` | Organization administrator — manages catalog, access rules, governance |
+| `pGateway` | `gateway` | Gateway service account — runtime policy enforcement, bundle data reads |
 
-> **Note:** `pAdmin` and `pGateway` are shared across all contextual routing protocols (ApprovalPolicy, RateLimitPolicy, ConstraintPolicy, PreconditionPolicy, FlowPolicy, IdentityPolicy). `pApprover` is specific to ApprovalPolicy.
-
-> Tool users (humans and AI agents) are NOT NPL parties. They are governed by grants inside the PolicyStore, identified by `subjectId`.
+> Tool users (humans and AI agents) are NOT NPL parties. They are governed by access rules in the GatewayStore, matched by JWT claims or identity.
 
 ---
 
 **See also:**
 - [How-To Guide](HOWTO.md) — step-by-step configuration walkthrough
-- [OPA Policy Internals](OPA_POLICY_INTERNALS.md) — Rego policy details and bundle structure
+- [v4 Governance Design](DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) — three-layer architecture design
 - [Approval Workflow Deep Dive](APPROVAL_WORKFLOW.md) — approval state machine and store-and-forward

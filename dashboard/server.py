@@ -50,6 +50,8 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://envoy-gateway:8000")
 OPA_URL = os.environ.get("OPA_URL", "http://opa:8181")
 BUNDLE_SERVER_URL = os.environ.get("BUNDLE_SERVER_URL", "http://bundle-server:8282")
 AGGREGATOR_URL = os.environ.get("AGGREGATOR_URL", "http://mcp-aggregator:8000")
+ENVOY_ADMIN_URL = os.environ.get("ENVOY_ADMIN_URL", "http://envoy-gateway:9901")
+GOVERNANCE_EVALUATOR_URL = os.environ.get("GOVERNANCE_EVALUATOR_URL", "http://governance-evaluator:8090")
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "gateway_backend-net")
 PORT = int(os.environ.get("PORT", "8888"))
 
@@ -229,6 +231,79 @@ def find_supergateway_image():
     return None
 
 
+# --- Envoy stats parser ---
+def _parse_envoy_stats(stats_text, clusters_text):
+    """Parse Envoy admin stats and clusters into structured metrics."""
+    result = {"stats": {}, "clusters": {}}
+
+    # Parse stats (key: value lines)
+    if isinstance(stats_text, str):
+        for line in stats_text.strip().splitlines():
+            if ": " in line:
+                key, _, val = line.partition(": ")
+                key = key.strip()
+                try:
+                    result["stats"][key] = int(val.strip())
+                except ValueError:
+                    result["stats"][key] = val.strip()
+
+    # Extract key metrics from stats
+    s = result["stats"]
+    result["downstream_rq_total"] = s.get(
+        "http.mcp_gateway.downstream_rq_total", 0
+    )
+    result["downstream_rq_active"] = s.get(
+        "http.mcp_gateway.downstream_rq_active", 0
+    )
+    result["downstream_cx_total"] = s.get(
+        "http.mcp_gateway.downstream_cx_total", 0
+    )
+    result["downstream_cx_active"] = s.get(
+        "http.mcp_gateway.downstream_cx_active", 0
+    )
+    # Response codes
+    for code in ["2xx", "4xx", "5xx"]:
+        result[f"downstream_rq_{code}"] = s.get(
+            f"http.mcp_gateway.downstream_rq_{code}", 0
+        )
+    # ext_authz stats
+    for key in ["ok", "denied", "error", "failure_mode_allowed"]:
+        result[f"ext_authz_{key}"] = s.get(
+            f"http.mcp_gateway.ext_authz.ok", 0
+        ) if key == "ok" else s.get(
+            f"http.mcp_gateway.ext_authz.{key}", 0
+        )
+
+    # Parse clusters text
+    if isinstance(clusters_text, str):
+        current_cluster = None
+        for line in clusters_text.strip().splitlines():
+            line = line.strip()
+            if line.endswith("::default_priority::max_connections::"):
+                # cluster header line pattern
+                continue
+            if "::" in line and not line.startswith(" "):
+                # Cluster name line, e.g. "opa_service::..."
+                parts = line.split("::")
+                current_cluster = parts[0]
+                if current_cluster not in result["clusters"]:
+                    result["clusters"][current_cluster] = {}
+            elif current_cluster and "::" in line:
+                parts = line.split("::")
+                key = parts[-2] if len(parts) >= 2 else ""
+                val = parts[-1] if len(parts) >= 1 else ""
+                if key in ("membership_healthy", "membership_total", "rq_total",
+                           "rq_success", "rq_error"):
+                    try:
+                        result["clusters"][current_cluster][key] = int(val)
+                    except ValueError:
+                        pass
+
+    # Remove raw stats to keep response size small
+    del result["stats"]
+    return result
+
+
 # --- API handler ---
 class ThreadingHTTPServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
@@ -311,6 +386,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self.require_auth():
                 return
 
+            if path == "/api/metrics":
+                return self.handle_metrics()
             if path == "/api/status":
                 return self.handle_status()
             if path == "/api/bundle":
@@ -495,6 +572,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception:
             status["keycloak"] = "unreachable"
         self.send_json(status)
+
+    # === Metrics ===
+    def handle_metrics(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def fetch(name, url):
+            try:
+                r = requests.get(url, timeout=3)
+                ct = r.headers.get("content-type", "")
+                if "text/plain" in ct:
+                    return name, r.text, r.status_code
+                return name, r.json(), r.status_code
+            except Exception as e:
+                return name, {"error": str(e)}, 0
+
+        sources = {
+            "envoy_stats": f"{ENVOY_ADMIN_URL}/stats?filter=http.mcp_gateway",
+            "envoy_clusters": f"{ENVOY_ADMIN_URL}/clusters",
+            "opa": f"{OPA_URL}/health",
+            "bundle_server": f"{BUNDLE_SERVER_URL}/health",
+            "governance_evaluator": f"{GOVERNANCE_EVALUATOR_URL}/health",
+            "aggregator": f"{AGGREGATOR_URL}/health",
+            "npl_engine": f"{NPL_URL}/actuator/health",
+        }
+        results = {}
+        with ThreadPoolExecutor(max_workers=7) as pool:
+            futures = {pool.submit(fetch, n, u): n for n, u in sources.items()}
+            for f in as_completed(futures, timeout=5):
+                try:
+                    name, data, status = f.result()
+                    results[name] = data
+                except Exception:
+                    pass
+        results["envoy"] = _parse_envoy_stats(
+            results.pop("envoy_stats", ""), results.pop("envoy_clusters", "")
+        )
+        self.send_json(results)
 
     # === Bundle data ===
     def handle_bundle(self):

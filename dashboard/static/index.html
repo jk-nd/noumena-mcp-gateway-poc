@@ -246,6 +246,26 @@ td:first-child { color: var(--text); }
 .form-group textarea:focus { border-color: var(--accent); }
 
 ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--text3); border-radius: 3px; }
+
+/* Metrics panel */
+.metrics-section { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; transition: border-color 0.2s; }
+.metrics-section:hover { border-color: rgba(255, 255, 255, 0.12); }
+.metrics-section-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; cursor: pointer; user-select: none; transition: background 0.15s; }
+.metrics-section-header:hover { background: var(--glass-hover); }
+.metrics-section-header .ms-left { display: flex; align-items: center; gap: 10px; }
+.metrics-section-header .ms-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.metrics-section-header .ms-name { font-size: 14px; font-weight: 600; }
+.metrics-section-header .ms-badge { font-size: 11px; color: var(--text3); }
+.metrics-section-header .ms-chevron { font-size: 12px; color: var(--text3); transition: transform 0.2s; }
+.metrics-section.collapsed .ms-chevron { transform: rotate(-90deg); }
+.metrics-section-body { padding: 0 20px 16px; }
+.metrics-section.collapsed .metrics-section-body { display: none; }
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.metric-item { background: rgba(0,0,0,0.2); border-radius: var(--radius-sm); padding: 8px 10px; min-width: 0; }
+.metric-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.metric-value { font-size: 15px; font-weight: 700; font-family: 'SF Mono', 'Fira Code', monospace; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metric-sub { font-size: 11px; color: var(--text3); margin-top: 2px; }
+.metric-tag { display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 3px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -292,6 +312,7 @@ td:first-child { color: var(--text); }
     <div class="nav-section">Overview</div>
     <div class="nav-item active" data-panel="overview" onclick="switchPanel('overview')"><span class="nav-icon">&#9632;</span> Dashboard</div>
     <div class="nav-item" data-panel="logs" onclick="switchPanel('logs')"><span class="nav-icon">&#9776;</span> Activity Log</div>
+    <div class="nav-item" data-panel="metrics" onclick="switchPanel('metrics')"><span class="nav-icon">&#9632;</span> Metrics</div>
 
     <div class="nav-section">Governance</div>
     <div class="nav-item" data-panel="catalog" onclick="switchPanel('catalog')"><span class="nav-icon">&#9881;</span> Catalog</div>
@@ -322,6 +343,21 @@ td:first-child { color: var(--text); }
         <button class="btn btn-ghost btn-sm" id="sseToggle" onclick="toggleSSE()">Connect SSE</button>
       </div>
       <div class="log-container" id="logContainer"><div class="empty"><div class="empty-text">Click "Connect SSE" to subscribe to NPL Engine state changes</div></div></div>
+    </div>
+
+    <!-- Metrics -->
+    <div class="panel" id="panel-metrics">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Metrics</div>
+          <div class="panel-desc">Real-time operational metrics from all gateway components</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="metricsLastUpdate" style="font-size:11px;color:var(--text3)"></span>
+          <button class="btn btn-ghost btn-sm" onclick="fetchMetrics()">Refresh</button>
+        </div>
+      </div>
+      <div id="metricsContainer"></div>
     </div>
 
     <!-- Catalog -->
@@ -452,11 +488,20 @@ async function doLogout() {
 }
 
 /* === Navigation === */
+let metricsInterval = null;
 function switchPanel(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('panel-' + name)?.classList.add('active');
   document.querySelector(`.nav-item[data-panel="${name}"]`)?.classList.add('active');
+  // Metrics auto-refresh
+  if (name === 'metrics') {
+    fetchMetrics();
+    metricsInterval = setInterval(fetchMetrics, 5000);
+  } else if (metricsInterval) {
+    clearInterval(metricsInterval);
+    metricsInterval = null;
+  }
 }
 
 /* === API === */
@@ -1688,6 +1733,136 @@ function showUserAccessModal(userId) {
 
   html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>`;
   showModal(html);
+}
+
+/* === Metrics === */
+let metricsCollapsed = {};
+
+async function fetchMetrics() {
+  try {
+    state.metrics = await api('GET', '/api/metrics');
+    renderMetrics();
+    const now = new Date();
+    const el = document.getElementById('metricsLastUpdate');
+    if (el) el.textContent = 'Updated ' + now.toLocaleTimeString();
+  } catch(e) { console.error('Metrics fetch failed', e); }
+}
+
+function renderMetrics() {
+  const m = state.metrics || {};
+  const container = document.getElementById('metricsContainer');
+  if (!container) return;
+
+  const sections = [
+    { id: 'envoy', name: 'Envoy Gateway', color: 'var(--accent)', render: renderEnvoyMetrics },
+    { id: 'opa', name: 'OPA Policy Engine', color: 'var(--green)', render: renderOpaMetrics },
+    { id: 'bundle', name: 'Bundle Server', color: 'var(--purple)', render: renderBundleMetrics },
+    { id: 'gov', name: 'Governance Evaluator', color: 'var(--amber)', render: renderGovMetrics },
+    { id: 'agg', name: 'MCP Aggregator', color: 'var(--accent)', render: renderAggMetrics },
+  ];
+
+  container.innerHTML = sections.map(s => {
+    const collapsed = metricsCollapsed[s.id] ? 'collapsed' : '';
+    const statusDot = getMetricStatus(s.id, m);
+    return `<div class="metrics-section ${collapsed}" id="ms-${s.id}">
+      <div class="metrics-section-header" onclick="toggleMetricSection('${s.id}')">
+        <div class="ms-left">
+          <span class="ms-dot" style="background:${statusDot==='up'?s.color:'var(--red)'};box-shadow:0 0 6px ${statusDot==='up'?s.color:'var(--red)'}"></span>
+          <span class="ms-name">${s.name}</span>
+          <span class="ms-badge">${statusDot==='up'?'healthy':'down'}</span>
+        </div>
+        <span class="ms-chevron">&#9660;</span>
+      </div>
+      <div class="metrics-section-body"><div class="metrics-grid">${s.render(m)}</div></div>
+    </div>`;
+  }).join('');
+}
+
+function toggleMetricSection(id) {
+  metricsCollapsed[id] = !metricsCollapsed[id];
+  const el = document.getElementById('ms-' + id);
+  if (el) el.classList.toggle('collapsed');
+}
+
+function getMetricStatus(id, m) {
+  if (id === 'envoy') return (m.envoy && !m.envoy.error) ? 'up' : 'down';
+  if (id === 'opa') return (m.opa && !m.opa.error) ? 'up' : 'down';
+  if (id === 'bundle') return (m.bundle_server && !m.bundle_server.error) ? 'up' : 'down';
+  if (id === 'gov') return (m.governance_evaluator && !m.governance_evaluator.error) ? 'up' : 'down';
+  if (id === 'agg') return (m.aggregator && !m.aggregator.error) ? 'up' : 'down';
+  return 'down';
+}
+
+function metricItem(label, value, opts) {
+  const color = opts?.color || 'var(--text)';
+  const sub = opts?.sub ? `<div class="metric-sub">${esc(opts.sub)}</div>` : '';
+  const tag = opts?.tag ? `<div class="metric-tag" style="background:${opts.tagBg||'var(--accent-dim)'};color:${opts.tagColor||'var(--accent)'}">${esc(opts.tag)}</div>` : '';
+  return `<div class="metric-item"><div class="metric-label">${esc(label)}</div><div class="metric-value" style="color:${color}">${value != null ? value : '—'}</div>${sub}${tag}</div>`;
+}
+
+function renderEnvoyMetrics(m) {
+  const e = m.envoy || {};
+  if (e.error) return `<div style="color:var(--text3);padding:8px">Envoy unreachable: ${esc(e.error)}</div>`;
+  return metricItem('Total Requests', fmt(e.downstream_rq_total))
+    + metricItem('Active Requests', e.downstream_rq_active)
+    + metricItem('Total Connections', fmt(e.downstream_cx_total))
+    + metricItem('Active Connections', e.downstream_cx_active)
+    + metricItem('2xx Responses', fmt(e.downstream_rq_2xx), {color:'var(--green)'})
+    + metricItem('4xx Responses', fmt(e.downstream_rq_4xx), {color: e.downstream_rq_4xx > 0 ? 'var(--amber)' : 'var(--text)'})
+    + metricItem('5xx Responses', fmt(e.downstream_rq_5xx), {color: e.downstream_rq_5xx > 0 ? 'var(--red)' : 'var(--text)'})
+    + metricItem('ext_authz Allow', fmt(e.ext_authz_ok), {color:'var(--green)'})
+    + metricItem('ext_authz Deny', fmt(e.ext_authz_denied), {color: e.ext_authz_denied > 0 ? 'var(--red)' : 'var(--text)'})
+    + metricItem('ext_authz Error', fmt(e.ext_authz_error), {color: e.ext_authz_error > 0 ? 'var(--red)' : 'var(--text)'});
+}
+
+function renderOpaMetrics(m) {
+  const o = m.opa || {};
+  const e = m.envoy || {};
+  const bs = m.bundle_server || {};
+  if (o.error) return `<div style="color:var(--text3);padding:8px">OPA unreachable: ${esc(o.error)}</div>`;
+  return metricItem('Status', 'Healthy', {color:'var(--green)'})
+    + metricItem('Decisions Allow', fmt(e.ext_authz_ok), {color:'var(--green)'})
+    + metricItem('Decisions Deny', fmt(e.ext_authz_denied), {color: e.ext_authz_denied > 0 ? 'var(--red)' : 'var(--text)'})
+    + metricItem('Bundle Revision', bs.revision || '—', {sub: bs.bundle_age ? `age: ${bs.bundle_age}` : ''});
+}
+
+function renderBundleMetrics(m) {
+  const b = m.bundle_server || {};
+  if (b.error) return `<div style="color:var(--text3);padding:8px">Bundle server unreachable: ${esc(b.error)}</div>`;
+  return metricItem('Status', b.status || 'ok', {color:'var(--green)'})
+    + metricItem('Revision', b.revision || '—')
+    + metricItem('Bundle Age', b.bundle_age || '—')
+    + metricItem('SSE Connected', b.sse_connected ? 'Yes' : 'No', {color: b.sse_connected ? 'var(--green)' : 'var(--red)'})
+    + metricItem('Rebuild Count', b.rebuild_count != null ? b.rebuild_count : '—')
+    + metricItem('Rebuild Errors', b.rebuild_errors != null ? b.rebuild_errors : '0', {color: b.rebuild_errors > 0 ? 'var(--red)' : 'var(--text)'});
+}
+
+function renderGovMetrics(m) {
+  const g = m.governance_evaluator || {};
+  if (g.error) return `<div style="color:var(--text3);padding:8px">Governance evaluator unreachable: ${esc(g.error)}</div>`;
+  return metricItem('Status', g.status || 'ok', {color:'var(--green)'})
+    + metricItem('Cached Services', g.cached_services != null ? g.cached_services : '—');
+}
+
+function renderAggMetrics(m) {
+  const a = m.aggregator || {};
+  if (a.error) return `<div style="color:var(--text3);padding:8px">Aggregator unreachable: ${esc(a.error)}</div>`;
+  let html = metricItem('Active Sessions', a.active_sessions != null ? a.active_sessions : '—');
+  const backends = a.backends || [];
+  if (backends.length) {
+    html += `<div class="metric-item" style="grid-column:1/-1"><div class="metric-label">Registered Backends</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${backends.map(b => `<span style="display:inline-block;font-size:12px;font-weight:500;padding:3px 10px;border-radius:10px;background:var(--accent-dim);color:var(--accent)">${esc(b)}</span>`).join('')}</div></div>`;
+  } else if (typeof a === 'object' && !a.error) {
+    html += metricItem('Backends', Object.keys(a).filter(k => k !== 'active_sessions' && k !== 'error').length || '—');
+  }
+  return html;
+}
+
+function fmt(n) {
+  if (n == null || n === undefined) return '—';
+  if (typeof n !== 'number') return String(n);
+  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n/1000).toFixed(1) + 'K';
+  return String(n);
 }
 
 /* === Init === */

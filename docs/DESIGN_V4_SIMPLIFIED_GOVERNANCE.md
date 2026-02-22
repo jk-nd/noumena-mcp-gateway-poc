@@ -2,10 +2,15 @@
 
 ## Status
 
-**Design** — Conversation captured 2026-02-19. Not yet implemented.
+**Implemented** — Design captured 2026-02-19, implemented 2026-02-20.
 
 Supersedes the v3 architecture (security policy YAML, per-user grants, classifier DSL,
 contextual route groups with six policy protocols, ~1000-line OPA Rego).
+
+The v4 system is fully operational with: GatewayStore + ServiceGovernance NPL protocols,
+simplified OPA Rego (~240 lines), governance evaluator sidecar, admin dashboard with
+service catalog, access rules, governance rules, approval workflows, user management,
+Docker Hub discovery, and real-time metrics panel.
 
 ---
 

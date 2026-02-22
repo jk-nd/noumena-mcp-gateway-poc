@@ -453,6 +453,8 @@ services:
       OPA_URL: "http://opa:8181"
       BUNDLE_SERVER_URL: "http://bundle-server:8282"
       AGGREGATOR_URL: "http://mcp-aggregator:8000"
+      ENVOY_ADMIN_URL: "http://envoy-gateway:9901"
+      GOVERNANCE_EVALUATOR_URL: "http://governance-evaluator:8090"
       DOCKER_NETWORK: "gateway_backend-net"
       PORT: "8888"
     volumes:

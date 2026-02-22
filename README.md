@@ -46,11 +46,13 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
 |-----------|------|
 | **Envoy AI Gateway** | MCP protocol handling, JWT validation (Keycloak JWKS), routing to backends, SSE streaming |
 | **OPA Sidecar** | ext_authz policy evaluation via Rego; loads policy data from OPA bundles (in-memory, zero network I/O) |
-| **NPL Engine** | Policy state manager: unified PolicyStore singleton (catalog + grants + contextual routing) |
-| **Bundle Server** | Reads NPL PolicyStore, serves OPA bundles; SSE-triggered rebuild on NPL mutations |
+| **NPL Engine** | Policy state manager: GatewayStore (catalog + access rules + revocation) + ServiceGovernance (per-service workflows) |
+| **Bundle Server** | Reads NPL GatewayStore, serves OPA bundles; SSE-triggered rebuild on NPL mutations |
 | **Supergateway Sidecars** | Wrap STDIO MCP tools as Streamable HTTP endpoints |
 | **Mock Calendar MCP** | HTTP-native MCP server for bilateral streaming tests (SSE notifications) |
 | **Keycloak** | OIDC authentication provider with user/role management |
+| **Governance Evaluator** | Constraint evaluation sidecar: argument-level rules (regex, in/not_in, max_length) + NPL approval routing |
+| **Dashboard** | Admin web UI: service catalog, access rules, governance rules, approvals, user management, Docker discovery, real-time metrics |
 | **Credential Proxy** | Fetches secrets from Vault, injects into supergateway containers at startup |
 | **Vault** | Secret storage (API keys, tokens, passwords) |
 | **TUI** | Interactive CLI wizard for managing services, users, and credentials |
@@ -110,6 +112,7 @@ npx @modelcontextprotocol/inspector
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
+| **Dashboard** | http://localhost:8888 | admin / Welcome123 |
 | Envoy Admin | http://localhost:9901 | (none) |
 | OPA API | http://localhost:8181 | (none) |
 | Keycloak Admin | http://localhost:11000 | admin / welcome |
@@ -161,9 +164,10 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 3. Envoy → OPA              ext_authz (gRPC): forwards JSON-RPC body + headers
 4. OPA                      Decodes JWT: userId=jarvis@acme.com
 5. OPA                      Parses JSON-RPC: method=tools/call, tool=duckduckgo.search
-6. OPA                      Evaluates against in-memory bundle data:
-                              - catalog: service enabled? tool enabled? not suspended?
-                              - grants: user has access to this tool?
+6. OPA                      Three-layer evaluation (in-memory bundle data):
+                              - Layer 1 (Catalog): service enabled? tool registered?
+                              - Layer 2 (Access Rules): caller matches a rule for this service/tool?
+                              - Layer 3 (NPL): if tag=gated, governance evaluator check
 7. OPA → Envoy              allow or deny (with X-OPA-Reason header)
 8. Envoy → Backend MCP      Routes to supergateway sidecar (if allowed)
 9. Backend → Envoy → Agent  SSE response streamed back
@@ -174,8 +178,9 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 | Request Type | Rule |
 |-------------|------|
 | `initialize`, `tools/list`, `ping`, `notifications/*` | Always allowed (non-tool methods) |
-| `GET /mcp` (stream setup) | Allowed if user has any tool grants |
-| `tools/call` | Service enabled + not suspended, tool enabled, user granted access |
+| `GET /mcp` (stream setup) | Allowed if user has any matching access rules |
+| `tools/call` (open tag) | Service enabled, tool in catalog, caller matches access rule |
+| `tools/call` (gated tag) | Above + governance evaluator must return allow |
 | Missing JWT or unknown user | Denied |
 
 ### Bundle Propagation
@@ -184,17 +189,21 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 - **Propagation latency**: near-instant (SSE push, not polling)
 - **No cold calls**: OPA always has data in memory after first bundle load
 
-### PolicyStore (Unified NPL Singleton)
+### GatewayStore + ServiceGovernance (v4)
 
 ```
-PolicyStore                     Single protocol, single instance
-  ├── Catalog                   Services + enabled tools (org-wide)
-  ├── Grants                    Per-user tool access (wildcard or specific)
-  ├── Revoked Subjects          Emergency kill switch
-  └── Contextual Routes         Layer 2 policy routing table (Phase 3)
+GatewayStore                    Single protocol, single instance
+  ├── Catalog                   Services + tools with open/gated tags
+  ├── Access Rules              Claim-based and identity-based authorization
+  └── Revoked Subjects          Emergency kill switch
+
+ServiceGovernance               One instance per governed service
+  ├── Tool Configs              Per-tool constraints (regex, in/not_in, max_length)
+  ├── Pending Requests          Gated tool calls awaiting approval
+  └── Approval Settings         Per-tool approval requirements + deadlines
 ```
 
-All policy state is managed through the PolicyStore singleton. Bundle server reads everything in 2 HTTP calls (list singleton + `getPolicyData()`), regardless of user/service count.
+Bundle server reads GatewayStore in one call (`getBundleData()`). ServiceGovernance instances are evaluated at request time by the governance evaluator for gated tools.
 
 ## Credential Injection
 
@@ -319,22 +328,29 @@ service_defaults:
 ```
 noumena-mcp-gateway/
 ├── policies/              # OPA Rego policies (ext_authz)
-│   ├── mcp_authz.rego     # Authorization policy: JWT decode, JSON-RPC parse, bundle data RBAC
+│   ├── mcp_authz.rego     # v4 authorization: three-layer catalog/access/governance
 │   └── mcp_authz_test.rego # Rego unit tests (opa test policies/ -v)
 │
 ├── bundle-server/          # OPA bundle server (Python)
-│   └── server.py           # Reads NPL PolicyStore, serves OPA bundles, SSE-triggered rebuild
+│   └── server.py           # Reads NPL GatewayStore, serves OPA bundles, SSE-triggered rebuild
+│
+├── dashboard/              # Admin web UI (Python + single-page HTML)
+│   ├── server.py           # API server: proxies to NPL, Keycloak, OPA, Docker, metrics
+│   └── static/index.html   # SPA: catalog, rules, approvals, users, discover, metrics
+│
+├── governance-evaluator/   # Constraint evaluation sidecar (Python)
+│   └── server.py           # Argument-level constraints + NPL approval routing
+│
+├── mcp-aggregator/         # Multi-backend MCP routing (Node.js)
+│   └── server.js           # Aggregates tools from multiple backends, routes by namespace
 │
 ├── credential-proxy/       # Credential injection service (Kotlin/Ktor)
 │   └── src/main/kotlin/    # VaultClient, CredentialSelector
 │
-├── shared/                 # Shared config models and policy types
-│   └── src/main/kotlin/    # ServicesConfig, PolicyModels
-│
 ├── npl/                    # NPL protocol definitions
 │   └── src/main/npl-1.0/
-│       ├── policy/         # PolicyStore (unified catalog + grants + routing)
-│       └── policies/       # CredentialInjectionPolicy
+│       ├── store/          # GatewayStore (catalog + access rules + revocation)
+│       └── governance/     # ServiceGovernance (per-service workflows + constraints)
 │
 ├── tui/                    # Gateway Wizard (interactive CLI)
 │   └── src/
@@ -345,7 +361,7 @@ noumena-mcp-gateway/
 │   └── server.js           # Express: POST /mcp + GET /mcp SSE stream
 │
 ├── configs/                # Runtime configuration
-│   ├── services.yaml       # Service definitions + user access (bootstrap/cache)
+│   ├── services.yaml       # Service definitions (bootstrap/cache)
 │   └── credentials.yaml    # Credential mappings
 │
 ├── deployments/            # Docker Compose + Envoy config
@@ -353,9 +369,12 @@ noumena-mcp-gateway/
 │   ├── envoy/
 │   │   └── envoy-config.yaml  # Envoy static config (JWT, ext_authz → OPA, routing)
 │   └── docker/
-│       ├── Dockerfile.supergateway   # Supergateway sidecar image
+│       ├── Dockerfile.supergateway        # Supergateway sidecar image
+│       ├── Dockerfile.dashboard           # Admin dashboard image
+│       ├── Dockerfile.governance-evaluator
+│       ├── Dockerfile.mcp-aggregator
 │       ├── Dockerfile.credential-proxy
-│       └── Dockerfile.mock-calendar  # HTTP-native MCP server image
+│       └── Dockerfile.mock-calendar       # HTTP-native MCP server image
 │
 ├── keycloak/               # Custom Keycloak image
 ├── keycloak-provisioning/  # Terraform for Keycloak setup
@@ -410,11 +429,15 @@ curl http://localhost:8181/v1/data
 
 | Document | Description |
 |----------|-------------|
-| [Policy Architecture v3](docs/POLICY_ARCHITECTURE_V3.md) | Two-layer architecture: OPA bundles (Layer 1) + contextual NPL evaluation (Layer 2) |
+| [Architecture Reference](docs/ARCHITECTURE.md) | Service topology, network isolation, data flow diagrams |
+| [v4 Governance Design](docs/DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) | Three-layer governance: catalog, access rules, NPL workflows |
+| [How-To Guide](docs/HOWTO.md) | Step-by-step configuration walkthrough |
+| [Approval Workflow](docs/APPROVAL_WORKFLOW.md) | Human-in-the-loop approval system deep dive |
 | [Credential Injection](docs/CREDENTIAL_INJECTION.md) | Credential injection system design and Vault integration |
-| [TUI Credential Management](docs/TUI_CREDENTIAL_MANAGEMENT.md) | Credential management via TUI |
+| [Security Strategy](docs/SECURITY_STRATEGY.md) | Enterprise security strategy and MCP risk framework |
+| [Packaging Strategy](docs/PACKAGING_STRATEGY.md) | Distribution strategy (CLI tier + Docker/Helm tier) |
 | [TUI Add Service Guide](docs/TUI_ADD_SERVICE_GUIDE.md) | Adding MCP services via TUI |
-| [CIQ Offer Scope](docs/CIQ_OFFER_SCOPE.md) | Phase 1/Phase 2 architecture for CIQ deployment |
+| [TUI Credential Management](docs/TUI_CREDENTIAL_MANAGEMENT.md) | Credential management via TUI |
 
 ## License
 
