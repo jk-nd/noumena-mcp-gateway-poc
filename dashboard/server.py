@@ -931,8 +931,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 inner = client.containers.list(
                     filters={"label": f"gateway.parent={container_name}"})
+                if not inner:
+                    # Fallback: find inner containers by image (for pre-label containers)
+                    inner = client.containers.list(filters={"ancestor": image})
                 for c in inner:
-                    log.info("Removing old inner MCP container %s", c.name)
+                    log.info("Removing old inner MCP container %s (image=%s)", c.name, image)
                     c.remove(force=True)
             except Exception:
                 pass
@@ -1045,6 +1048,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 inner = client.containers.list(
                     filters={"label": f"gateway.parent={container_name}"})
+                if not inner:
+                    # Fallback: extract image from supergateway's MCP_COMMAND env
+                    try:
+                        sg = client.containers.get(container_name)
+                        for env in (sg.attrs.get("Config", {}).get("Env") or []):
+                            if env.startswith("MCP_COMMAND=") and "docker run" in env:
+                                # MCP_COMMAND=docker run -i --rm [--label ...] <image>
+                                mcp_image = env.split()[-1]
+                                inner = client.containers.list(filters={"ancestor": mcp_image})
+                                break
+                    except Exception:
+                        pass
                 for c in inner:
                     log.info("Removing inner MCP container %s", c.name)
                     c.remove(force=True)
