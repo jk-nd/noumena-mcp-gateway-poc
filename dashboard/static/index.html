@@ -96,6 +96,8 @@ td:first-child { color: var(--text); }
 .btn-danger { background: var(--red-dim); color: var(--red); border-color: rgba(239, 68, 68, 0.2); }
 .btn-ghost { background: transparent; color: var(--text2); border-color: var(--glass-border); } .btn-ghost:hover { background: var(--glass-hover); color: var(--text); }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-icon { background: none; border: 1px solid var(--glass-border); color: var(--text2); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); font-size: 14px; transition: all 0.15s; line-height: 1; }
+.btn-icon:hover { background: var(--glass-hover); color: var(--text); border-color: rgba(255,255,255,0.15); }
 
 /* Forms */
 .form-row { display: flex; gap: 12px; margin-bottom: 12px; align-items: end; }
@@ -164,9 +166,10 @@ td:first-child { color: var(--text); }
 .svc-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .svc-name { font-size: 16px; font-weight: 600; }
 .svc-toggles { display: flex; align-items: center; gap: 16px; }
-.tool-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: var(--radius-sm); margin-bottom: 6px; }
-.tool-name { font-size: 13px; font-family: 'SF Mono', 'Fira Code', monospace; }
-.tool-actions { display: flex; align-items: center; gap: 8px; }
+.tool-row { display: flex; align-items: center; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: var(--radius-sm); margin-bottom: 6px; gap: 10px; }
+.tool-name { font-size: 13px; font-family: 'SF Mono', 'Fira Code', monospace; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-badges { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.tool-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 /* Approval card */
 .approval-card { border-left: 3px solid var(--amber); }
@@ -451,6 +454,8 @@ let currentUser = null;
 let countdown = 30;
 let discoverTab = 'docker';
 let sseSource = null;
+let _currentToolContext = null;
+let _pendingAction = null;
 
 /* === Auth === */
 async function checkAuth() {
@@ -584,16 +589,15 @@ function renderCatalog() {
   const entries = Object.entries(cat).filter(([name, svc]) => catalogMatchesSearch(name, svc, searchQ));
   if (!entries.length) { document.getElementById('catalogGrid').innerHTML = '<div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">' + (searchQ ? 'No matches for "'+esc(searchQ)+'"' : 'No services. Click "Add Service" or use Discover to wire one.') + '</div></div>'; return; }
   document.getElementById('catalogGrid').innerHTML = entries.map(([name, svc]) => {
-    const en = svc.enabled !== false, tools = Object.entries(svc.tools||{}), hasGov = !!state.governance[name], hasBe = !!state.backends[name];
+    const en = svc.enabled !== false, tools = Object.entries(svc.tools||{});
     return `<div class="card"><div class="svc-header"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <span class="svc-name">${esc(name)}</span>
-      ${hasBe?'<span class="tag tag-running" title="Backend container running">live</span>':''}
     </div><div class="svc-toggles">
       <label class="toggle-label" title="${en?'Service is enabled — click to disable':'Service is disabled — click to enable'}">
         <label class="toggle"><input type="checkbox" ${en?'checked':''} onchange="${en?`disableService('${esc(name)}')`:`enableService('${esc(name)}')`}" /><span class="toggle-slider"></span></label>
       </label>
     </div></div>
-    <div>${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
+    <div style="max-height:300px;overflow-y:auto">${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
     ${tools.map(([t,info]) => {
       const isLogic = info.tag === 'logic';
       const svcConstraints = state.constraints[name] || [];
@@ -604,9 +608,9 @@ function renderCatalog() {
         const toolMatch = (r.allow?.tools||[]).includes('*') || (r.allow?.tools||[]).includes(t);
         return svcMatch && toolMatch;
       }).length;
-      return `<div class="tool-row"><span class="tool-name"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3)">${esc(t)}</a>${ruleCount?` <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent)">${ruleCount} access</span>`:''} ${cCount?` <span class="constraint-badge">${cCount} gov</span>`:''}</span><div class="tool-actions">
-      <label class="toggle-label" title="${isLogic?'Logic — requires governance rules':'ACL — access rules sufficient'}">
-        <span class="toggle-state-label" style="font-size:11px;min-width:36px;text-align:right;color:${isLogic?'var(--amber)':'var(--green)'}">${isLogic?'Logic':'ACL'}</span>
+      return `<div class="tool-row"><span class="tool-name"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3)">${esc(t)}</a></span><div class="tool-badges">${ruleCount?`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent)">${ruleCount} access</span>`:''}</div><div class="tool-actions">
+      <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${isLogic?'var(--amber-dim)':'rgba(255,255,255,0.04)'};color:${isLogic?'var(--amber)':'var(--text3)'}">${cCount} gov</span>
+      <label class="toggle-label" title="${isLogic?'Governance enabled — click to disable':'Governance disabled — click to enable'}">
         <label class="toggle"><input type="checkbox" ${isLogic?'checked':''} onchange="toggleTagUpdate(this,'${esc(name)}','${esc(t)}')" /><span class="toggle-slider"></span></label>
       </label>
       <button class="btn btn-sm btn-danger" onclick="confirmRemoveTool('${esc(name)}','${esc(t)}')" style="padding:4px 8px" title="Remove tool">&#10005;</button>
@@ -646,7 +650,7 @@ function renderCatalogList() {
 
   let html = '';
   for (const [name, svc] of entries) {
-    const en = svc.enabled !== false, hasBe = !!state.backends[name];
+    const en = svc.enabled !== false;
     const tools = Object.entries(svc.tools || {});
     const collapsed = !!state._collapsedServices[name];
     const chevron = collapsed ? '&#9654;' : '&#9660;';
@@ -655,7 +659,6 @@ function renderCatalogList() {
         <div style="display:flex;align-items:center;gap:10px">
           <span style="font-size:12px;color:var(--text3);width:16px;text-align:center">${chevron}</span>
           <strong style="font-size:15px">${esc(name)}</strong>
-          ${hasBe?'<span class="tag tag-running" style="font-size:10px">live</span>':''}
           <span style="font-size:12px;color:var(--text3)">${tools.length} tool${tools.length!==1?'s':''}</span>
         </div>
         <div style="display:flex;align-items:center;gap:10px" onclick="event.stopPropagation()">
@@ -670,16 +673,23 @@ function renderCatalogList() {
         const svcC = state.constraints[name] || [];
         const toolCfg = Array.isArray(svcC) ? svcC.find(c => c.toolName === t) : null;
         const cCount = toolCfg ? (toolCfg.constraints||[]).length : 0;
+        const ruleCount = (state.bundle.accessRules || []).filter(r => {
+          const svcMatch = (r.allow?.services||[]).includes('*') || (r.allow?.services||[]).includes(name);
+          const toolMatch = (r.allow?.tools||[]).includes('*') || (r.allow?.tools||[]).includes(t);
+          return svcMatch && toolMatch;
+        }).length;
         html += `<tr style="border-top:1px solid var(--glass-border)">
-          <td style="padding:8px 16px 8px 42px;color:var(--text)"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3);font-family:'SF Mono','Fira Code',monospace">${esc(t)}</a></td>
-          <td style="padding:8px 8px"><label class="toggle-label"><span class="toggle-state-label" style="font-size:11px;min-width:36px;text-align:right;color:${isLogic?'var(--amber)':'var(--green)'}">${isLogic?'Logic':'ACL'}</span><label class="toggle"><input type="checkbox" ${isLogic?'checked':''} onchange="toggleTagUpdate(this,'${esc(name)}','${esc(t)}')" /><span class="toggle-slider"></span></label></label></td>
-          <td style="padding:8px 8px">${cCount?`<span class="constraint-badge">${cCount}</span>`:''}</td>
-          <td style="padding:8px 16px 8px 8px;text-align:right"><button class="btn btn-sm btn-danger" onclick="confirmRemoveTool('${esc(name)}','${esc(t)}')" style="padding:4px 8px">&#10005;</button></td>
+          <td style="padding:8px 16px 8px 42px;color:var(--text);width:35%"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3);font-family:'SF Mono','Fira Code',monospace">${esc(t)}</a></td>
+          <td style="padding:8px 12px;width:15%">${ruleCount?`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent)">${ruleCount} access</span>`:''}</td>
+          <td style="padding:8px 12px;width:30%"><label class="toggle-label" style="justify-content:flex-start;gap:8px"><span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${isLogic?'var(--amber-dim)':'rgba(255,255,255,0.04)'};color:${isLogic?'var(--amber)':'var(--text3)'}">${cCount} gov</span><label class="toggle"><input type="checkbox" ${isLogic?'checked':''} onchange="toggleTagUpdate(this,'${esc(name)}','${esc(t)}')" /><span class="toggle-slider"></span></label></label></td>
+          <td style="padding:8px 16px 8px 8px;text-align:right;width:10%"><button class="btn btn-sm btn-danger" onclick="confirmRemoveTool('${esc(name)}','${esc(t)}')" style="padding:4px 8px">&#10005;</button></td>
         </tr>`;
       }
       html += `</tbody></table>`;
+      html += `<div style="padding:8px 16px;display:flex;justify-content:flex-end;border-top:1px solid var(--glass-border)"><a href="#" onclick="showDeleteServiceModal('${esc(name)}',${tools.length});return false;" style="font-size:12px;color:var(--red);opacity:0.6;text-decoration:none" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.6'">Delete service\u2026</a></div>`;
     } else if (!collapsed && tools.length === 0) {
       html += `<div style="padding:8px 16px 14px 42px;color:var(--text3);font-size:13px">No tools registered</div>`;
+      html += `<div style="padding:8px 16px;display:flex;justify-content:flex-end;border-top:1px solid var(--glass-border)"><a href="#" onclick="showDeleteServiceModal('${esc(name)}',0);return false;" style="font-size:12px;color:var(--red);opacity:0.6;text-decoration:none" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.6'">Delete service\u2026</a></div>`;
     }
     html += `</div>`;
   }
@@ -806,8 +816,6 @@ async function toggleTag(s,t,tag) {
 }
 function toggleTagUpdate(cb, svc, tool) {
   const newTag = cb.checked ? 'logic' : 'acl';
-  const label = cb.closest('.toggle-label').querySelector('.toggle-state-label');
-  if (label) { label.textContent = cb.checked ? 'Logic' : 'ACL'; label.style.color = cb.checked ? 'var(--amber)' : 'var(--green)'; }
   toggleTag(svc, tool, newTag);
 }
 async function removeTool(s,t) { await act(()=>api('POST','/api/tools/remove',{serviceName:s,toolName:t}), 'Tool removed'); }
@@ -898,13 +906,7 @@ async function showAddToolModal(svc) {
         </select>
       </div>
       <div id="customToolRow" style="display:none" class="form-group" style="margin-bottom:12px"><label>Custom Tool Name</label><input id="customToolName" placeholder="e.g. list_items" /></div>
-      <div id="toolDescription" style="font-size:12px;color:var(--text3);margin-bottom:12px;min-height:18px"></div>
-      <div class="form-group" style="margin-bottom:16px"><label>Mode</label>
-        <label class="toggle-label" style="margin-top:6px">
-          <span class="toggle-state-label" style="font-size:12px;min-width:36px;text-align:right;color:var(--green)">ACL</span>
-          <label class="toggle"><input type="checkbox" id="newToolTag" onchange="var l=this.closest('.toggle-label').querySelector('.toggle-state-label'); l.textContent=this.checked?'Logic':'ACL'; l.style.color=this.checked?'var(--amber)':'var(--green)'" /><span class="toggle-slider"></span></label>
-        </label>
-      </div>`;
+      <div id="toolDescription" style="font-size:12px;color:var(--text3);margin-bottom:12px;min-height:18px"></div>`;
     const sel = document.getElementById('newToolName');
     sel.onchange = () => {
       const custom = sel.value === '__custom__';
@@ -916,23 +918,11 @@ async function showAddToolModal(svc) {
     };
   } else if (backendTools.length > 0 && unregistered.length === 0) {
     content.innerHTML = `<div style="color:var(--text3);padding:8px 0">All backend tools are already registered.</div>
-      <div class="form-group" style="margin-bottom:12px;margin-top:12px"><label>Custom Tool Name</label><input id="newToolName" placeholder="e.g. list_items" /><input type="hidden" id="customToolName" /></div>
-      <div class="form-group" style="margin-bottom:16px"><label>Mode</label>
-        <label class="toggle-label" style="margin-top:6px">
-          <span class="toggle-state-label" style="font-size:12px;min-width:36px;text-align:right;color:var(--green)">ACL</span>
-          <label class="toggle"><input type="checkbox" id="newToolTag" onchange="var l=this.closest('.toggle-label').querySelector('.toggle-state-label'); l.textContent=this.checked?'Logic':'ACL'; l.style.color=this.checked?'var(--amber)':'var(--green)'" /><span class="toggle-slider"></span></label>
-        </label>
-      </div>`;
+      <div class="form-group" style="margin-bottom:12px;margin-top:12px"><label>Custom Tool Name</label><input id="newToolName" placeholder="e.g. list_items" /><input type="hidden" id="customToolName" /></div>`;
     document.getElementById('addToolSubmit').disabled = false;
   } else {
     content.innerHTML = `<div style="color:var(--text3);padding:8px 0;font-size:13px">No running backend found for this service. Enter a tool name manually.</div>
-      <div class="form-group" style="margin-bottom:12px;margin-top:8px"><label>Tool Name</label><input id="newToolName" placeholder="e.g. list_items" /><input type="hidden" id="customToolName" /></div>
-      <div class="form-group" style="margin-bottom:16px"><label>Mode</label>
-        <label class="toggle-label" style="margin-top:6px">
-          <span class="toggle-state-label" style="font-size:12px;min-width:36px;text-align:right;color:var(--green)">ACL</span>
-          <label class="toggle"><input type="checkbox" id="newToolTag" onchange="var l=this.closest('.toggle-label').querySelector('.toggle-state-label'); l.textContent=this.checked?'Logic':'ACL'; l.style.color=this.checked?'var(--amber)':'var(--green)'" /><span class="toggle-slider"></span></label>
-        </label>
-      </div>`;
+      <div class="form-group" style="margin-bottom:12px;margin-top:8px"><label>Tool Name</label><input id="newToolName" placeholder="e.g. list_items" /><input type="hidden" id="customToolName" /></div>`;
     document.getElementById('addToolSubmit').disabled = false;
   }
 }
@@ -1108,6 +1098,7 @@ function showAddRuleModal() {
 function toggleRuleFields() { const t=document.getElementById('ruleType').value; document.getElementById('claimsFields').style.display=t==='claims'?'block':'none'; document.getElementById('identityFields').style.display=t==='identity'?'block':'none'; }
 
 async function submitAddRule() {
+  const ctx = _currentToolContext;
   const id = document.getElementById('ruleId').value.trim(); if (!id) return;
   const selSvcsCheck = [...document.getElementById('ruleServices').selectedOptions].map(o=>o.value);
   if (!selSvcsCheck.length) { toast('Select at least one service','error'); return; }
@@ -1122,6 +1113,7 @@ async function submitAddRule() {
       allowServices: selSvcsCheck, allowTools: tools,
     });
     closeModal(); toast('Rule added','success'); await refreshAll();
+    if (ctx) showToolDetailModal(ctx.service, ctx.toolName);
   } catch(e) { toast('Error: '+(e.message||e),'error'); }
 }
 
@@ -1131,14 +1123,19 @@ function showEditRuleModal(idx) {
   const claims = m.claims||{};
   const tools = r.allow?.tools||[];
   const services = r.allow?.services||[];
+  const ctx = _currentToolContext;
+  const cancelAction = ctx
+    ? `showToolDetailModal('${esc(ctx.service)}','${esc(ctx.toolName)}')`
+    : `closeModal()`;
 
   showModal(`<h3>Edit Rule: ${esc(r.id)}</h3>
     ${buildRuleFormHTML({ id: r.id, idReadonly: true, matchType: mt, identity: m.identity||'', services, tools })}
-    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitEditRule('${esc(r.id)}')">Save Changes</button></div>`);
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="${cancelAction}">Cancel</button><button class="btn btn-primary" onclick="submitEditRule('${esc(r.id)}')">Save Changes</button></div>`);
   initRuleForm(claims, tools);
 }
 
 async function submitEditRule(oldId) {
+  const ctx = _currentToolContext;
   try {
     await api('POST','/api/access-rules/remove',{id:oldId});
     const id = document.getElementById('ruleId').value.trim(); if (!id) return;
@@ -1153,6 +1150,7 @@ async function submitEditRule(oldId) {
       allowServices: selSvcs, allowTools: tools,
     });
     closeModal(); toast('Rule updated','success'); await refreshAll();
+    if (ctx) showToolDetailModal(ctx.service, ctx.toolName);
   } catch(e) { toast('Error: '+(e.message||e),'error'); }
 }
 
@@ -1671,6 +1669,7 @@ async function wizardApply() {
 
 /* === Tool Detail Modal === */
 function showToolDetailModal(service, toolName) {
+  _currentToolContext = { service, toolName };
   const catalog = state.bundle.catalog || {};
   const svcCatalog = catalog[service] || {};
   const toolInfo = (svcCatalog.tools || {})[toolName] || {};
@@ -1712,57 +1711,262 @@ function showToolDetailModal(service, toolName) {
   const constraints = toolCfg ? (toolCfg.constraints || []) : [];
   const reqApproval = toolCfg ? toolCfg.requiresApproval !== false : true;
 
-  let html = `<h3>${esc(service)}.${esc(toolName)}</h3>`;
-  html += `<div style="margin-bottom:16px"><span class="tag ${tag==='logic'?'tag-logic':'tag-acl'}" style="font-size:12px">${tag}</span>`;
-  if (toolCfg) html += ` <span class="tag ${reqApproval?'tag-logic':'tag-acl'}" style="font-size:12px">${reqApproval?'approval required':'auto-allow'}</span>`;
-  html += `</div>`;
+  let html = `<h3 style="margin-bottom:16px">${esc(service)}.${esc(toolName)}</h3>`;
 
-  // Access section
-  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Access Rules (${matchingRules.length})</h4>`;
+  // Access rules section — interactive
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Access Rules (${matchingRules.length})</h4>`;
+  html += `<button class="btn btn-sm btn-primary" onclick="showGrantAccessForTool('${esc(service)}','${esc(toolName)}')">+ Grant Access</button>`;
+  html += `</div>`;
   if (matchingRules.length) {
     html += `<div style="margin-bottom:16px">`;
     for (const r of matchingRules) {
       const m = r.matcher || {};
       const mt = m.matchType || 'claims';
-      const matchStr = mt === 'claims' ? Object.entries(m.claims||{}).map(([k,v])=>`${k}=${v}`).join(', ') : (m.identity||'');
-      html += `<div style="padding:6px 0;font-size:13px;border-bottom:1px solid var(--glass-border)"><span class="tag ${mt==='claims'?'tag-claims':'tag-identity'}" style="font-size:10px">${esc(r.id)}</span> <span style="color:var(--text2)">${esc(matchStr)}</span></div>`;
+      const matchStr = mt === 'claims'
+        ? Object.entries(m.claims||{}).map(([k,v])=>`${k}=${v}`).join(', ')
+        : (m.identity||'');
+      const svcs = r.allow?.services || [];
+      const tools = r.allow?.tools || ['*'];
+      const scopeSvcs = svcs.includes('*') ? 'all services' : svcs.join(', ');
+      const scopeTools = tools.includes('*') ? 'all tools' : tools.join(', ');
+      const ruleIdx = (state._rules||[]).indexOf(r);
+      html += `<div class="constraint-card" style="margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span class="tag ${mt==='claims'?'tag-claims':'tag-identity'}" style="font-size:11px">${esc(r.id)}</span>
+          <div style="display:flex;gap:4px">
+            <button class="btn-icon" onclick="showEditRuleModal(${ruleIdx});return false;" title="Edit rule">&#9998;</button>
+            <button class="btn-icon" onclick="removeRuleInToolContext('${esc(r.id)}');return false;" title="Remove rule">&#10005;</button>
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">${esc(mt)}: ${esc(matchStr)}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">scope: ${esc(scopeSvcs)} / ${esc(scopeTools)}</div>
+      </div>`;
     }
     html += `</div>`;
   } else {
-    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No access rules grant access to this tool</div>`;
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px;padding:12px;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);text-align:center">No access rules grant access to this tool. Click <strong>+ Grant Access</strong> above to create one.</div>`;
   }
 
-  // Users section
-  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Users with Access (${usersWithAccess.length})</h4>`;
+  // Users section — collapsible
+  html += `<div style="margin-bottom:16px">`;
+  html += `<div style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:4px" onclick="const b=document.getElementById('toolUsersBody');const c=document.getElementById('toolUsersChevron');if(b.style.display==='none'){b.style.display='block';c.innerHTML='&#9660;'}else{b.style.display='none';c.innerHTML='&#9654;'}">`;
+  html += `<span id="toolUsersChevron" style="font-size:10px;color:var(--text3);width:12px">&#9654;</span>`;
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Users with Access (${usersWithAccess.length})</h4>`;
+  html += `</div>`;
+  html += `<div id="toolUsersBody" style="display:none">`;
   if (usersWithAccess.length) {
-    html += `<div style="margin-bottom:16px">`;
     for (const { user, rule } of usersWithAccess) {
       const revoked = (state.bundle.revokedSubjects||[]).includes(user.email);
-      html += `<div style="padding:4px 0;font-size:13px"><strong>${esc(user.username)}</strong> <span style="color:var(--text3)">${esc(user.email)}</span>`;
+      html += `<div style="padding:4px 0;padding-left:20px;font-size:13px"><strong>${esc(user.username)}</strong> <span style="color:var(--text3)">${esc(user.email)}</span>`;
       html += ` <span style="color:var(--text3);font-size:11px">via ${esc(rule.id)}</span>`;
       if (revoked) html += ` <span class="tag tag-disabled" style="font-size:10px">revoked</span>`;
       html += `</div>`;
     }
-    html += `</div>`;
   } else {
-    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No users currently match access rules for this tool</div>`;
+    html += `<div style="color:var(--text3);font-size:13px;padding-left:20px">No users currently match access rules for this tool</div>`;
   }
+  html += `</div></div>`;
 
-  // Governance rules section
-  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Governance Rules (${constraints.length})</h4>`;
+  // Governance section — interactive
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Governance (${constraints.length} constraint${constraints.length!==1?'s':''})</h4>`;
+  html += `<div style="display:flex;gap:8px;align-items:center">`;
+  if (toolCfg) {
+    html += `<button class="btn btn-sm ${reqApproval?'btn-success':'btn-ghost'}" onclick="toggleApprovalInToolContext('${esc(service)}','${esc(toolName)}',${!reqApproval})" title="${reqApproval?'Click to set auto-allow':'Click to require approval'}">${reqApproval?'approval required':'auto-allow'}</button>`;
+  }
+  html += `<button class="btn btn-sm btn-ghost" onclick="showAddConstraintInline('${esc(service)}','${esc(toolName)}')">+ Add Constraint</button>`;
+  html += `</div></div>`;
   if (constraints.length) {
     for (const c of constraints) {
-      html += `<div class="constraint-card"><div class="constraint-info">
-        <div class="constraint-desc">${esc(c.description||'No description')}</div>
-        <div class="constraint-detail">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
-      </div></div>`;
+      html += `<div class="constraint-card" style="margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="constraint-desc" style="font-size:13px">${esc(c.description||'No description')}</div>
+          <button class="btn-icon" onclick="removeConstraintInToolContext('${esc(service)}','${esc(toolName)}','${esc(c.paramName)}')" title="Remove constraint">&#10005;</button>
+        </div>
+        <div class="constraint-detail" style="font-size:12px;color:var(--text2);margin-top:4px">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
+      </div>`;
     }
   } else {
-    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No governance rules defined for this tool</div>`;
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No governance constraints defined for this tool</div>`;
   }
 
-  html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>`;
+  // Inline add constraint form (hidden by default)
+  html += `<div id="addConstraintForm" style="display:none;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px">
+    <h4 style="font-size:13px;margin-bottom:12px">Add Constraint</h4>
+    <div class="form-row">
+      <div class="form-group"><label>Parameter</label><input id="cParamName" placeholder="e.g. attendees" /></div>
+      <div class="form-group"><label>Operator</label><select id="cOperator">
+        <option value="in">in</option><option value="notIn">notIn</option>
+        <option value="eq">eq</option><option value="neq">neq</option>
+        <option value="lt">lt</option><option value="lte">lte</option>
+        <option value="gt">gt</option><option value="gte">gte</option>
+      </select></div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px"><label>Values (comma-separated)</label><input id="cValues" placeholder="e.g. @acme.com, @partner.com" /></div>
+    <div class="form-group" style="margin-bottom:12px"><label>Description</label><input id="cDesc" placeholder="e.g. Only internal meetings" /></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('addConstraintForm').style.display='none'">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitInlineConstraint('${esc(service)}','${esc(toolName)}')">Add Constraint</button>
+    </div>
+  </div>`;
+
+  html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="_currentToolContext=null;closeModal()">Close</button></div>`;
   showModal(html);
+}
+
+/* === Tool-Centric Management Helpers === */
+
+function describeRule(rule) {
+  const m = rule.matcher || {};
+  const mt = m.matchType || 'claims';
+  const match = mt === 'claims'
+    ? Object.entries(m.claims || {}).map(([k,v]) => `${k}=${v}`).join(', ')
+    : (m.identity || '');
+  const svcs = (rule.allow?.services || []).join(', ');
+  const tools = (rule.allow?.tools || []).join(', ');
+  return `${match} \u2192 ${svcs} / ${tools}`;
+}
+
+function showGrantAccessForTool(service, toolName) {
+  const allRules = state.bundle.accessRules || [];
+  const matchingIds = new Set(allRules.filter(r => {
+    const allowSvcs = r.allow?.services || [];
+    const allowTools = r.allow?.tools || ['*'];
+    const svcMatch = allowSvcs.includes('*') || allowSvcs.includes(service);
+    const toolMatch = allowTools.includes('*') || allowTools.includes(toolName);
+    return svcMatch && toolMatch;
+  }).map(r => r.id));
+  const nonMatching = allRules.filter(r => !matchingIds.has(r.id));
+
+  let html = `<h3>Grant Access to ${esc(service)}.${esc(toolName)}</h3>`;
+  html += `<p style="color:var(--text2);font-size:13px;margin-bottom:16px">Create a new access rule or expand an existing one to cover this tool.</p>`;
+
+  // Option 1: Create new rule
+  html += `<h4 style="font-size:13px;margin-bottom:12px">Create New Rule</h4>`;
+  html += buildRuleFormHTML({ matchType: 'claims', services: [service], tools: [toolName] });
+  html += `<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:20px">
+    <button class="btn btn-ghost" onclick="showToolDetailModal('${esc(service)}','${esc(toolName)}')">Cancel</button>
+    <button class="btn btn-primary" onclick="submitAddRule()">Create Rule</button>
+  </div>`;
+
+  // Option 2: Expand existing rule
+  if (nonMatching.length) {
+    html += `<div style="border-top:1px solid var(--glass-border);padding-top:16px">`;
+    html += `<h4 style="font-size:13px;margin-bottom:12px">Or Expand an Existing Rule</h4>`;
+    for (const r of nonMatching) {
+      const desc = describeRule(r);
+      const tools = r.allow?.tools || [];
+      const isWild = tools.includes('*');
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--glass-border)">
+        <div style="min-width:0;flex:1"><strong style="font-size:13px">${esc(r.id)}</strong> <span style="color:var(--text3);font-size:12px">${esc(desc)}</span></div>
+        <button class="btn btn-ghost btn-sm" ${isWild?'disabled title="Already covers all tools"':''} onclick="expandRuleToTool('${esc(r.id)}','${esc(service)}','${esc(toolName)}')" style="flex-shrink:0;margin-left:8px">+ Add tool</button>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  showModal(html);
+  initRuleForm({}, [toolName]);
+  document.getElementById('ruleId').focus();
+}
+
+async function expandRuleToTool(ruleId, service, toolName) {
+  const rule = (state.bundle.accessRules || []).find(r => r.id === ruleId);
+  if (!rule) return;
+  const m = rule.matcher || {};
+  const svcs = [...(rule.allow?.services || [])];
+  const tools = [...(rule.allow?.tools || [])];
+
+  if (!svcs.includes('*') && !svcs.includes(service)) svcs.push(service);
+  if (!tools.includes('*') && !tools.includes(toolName)) tools.push(toolName);
+
+  try {
+    await api('POST', '/api/access-rules/remove', { id: ruleId });
+    await api('POST', '/api/access-rules/add', {
+      id: ruleId,
+      matchType: m.matchType || 'claims',
+      matchClaims: m.claims || {},
+      matchIdentity: m.identity || '',
+      allowServices: svcs,
+      allowTools: tools,
+    });
+    closeModal();
+    toast('Rule expanded', 'success');
+    await refreshAll();
+    showToolDetailModal(service, toolName);
+  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+}
+
+async function removeRuleInToolContext(ruleId) {
+  const ctx = _currentToolContext;
+  const r = (state._rules || []).find(r => r.id === ruleId);
+  const doRemove = async () => {
+    try {
+      await api('POST', '/api/access-rules/remove', { id: ruleId });
+      closeModal();
+      toast('Rule removed', 'success');
+      await refreshAll();
+      if (ctx) showToolDetailModal(ctx.service, ctx.toolName);
+    } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+  };
+  if (!r) { doRemove(); return; }
+  const svcs = r.allow?.services || [];
+  const tools = r.allow?.tools || [];
+  const hasWild = svcs.includes('*') || tools.includes('*');
+  const svcCount = svcs.includes('*') ? Object.keys(state.bundle.catalog || {}).length : svcs.length;
+  const toolCount = tools.includes('*') ? 'all' : tools.length;
+  if (hasWild || svcCount > 1 || (typeof toolCount === 'number' && toolCount > 1)) {
+    _pendingAction = doRemove;
+    const cancelBtn = ctx
+      ? `<button class="btn btn-ghost" onclick="showToolDetailModal('${esc(ctx.service)}','${esc(ctx.toolName)}')">Cancel</button>`
+      : `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>`;
+    showModal(`<h3>Remove rule &ldquo;${esc(ruleId)}&rdquo;?</h3>
+      <p style="color:var(--text2);margin:12px 0">This rule grants access to <strong>${svcCount} service${svcCount!==1?'s':''}</strong> and <strong>${toolCount} tool${toolCount!=='all'&&toolCount!==1?'s':''}</strong>. Users relying on it will lose access.</p>
+      <div class="modal-actions">${cancelBtn}<button class="btn btn-danger" onclick="_pendingAction()">Remove</button></div>`);
+  } else {
+    if (confirm(`Remove access rule "${ruleId}"?`)) doRemove();
+  }
+}
+
+async function removeConstraintInToolContext(service, toolName, paramName) {
+  if (!confirm(`Remove constraint on "${paramName}" for ${service}.${toolName}?`)) return;
+  try {
+    await api('POST', '/api/constraints/remove', { serviceName: service, toolName: toolName, paramName: paramName });
+    toast('Constraint removed', 'success');
+    await refreshAll();
+    showToolDetailModal(service, toolName);
+  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+}
+
+async function toggleApprovalInToolContext(service, toolName, required) {
+  if (!required && !confirm(`Set auto-allow for "${toolName}"? Calls will bypass approval if constraints pass.`)) return;
+  try {
+    await api('POST', '/api/governance/set-approval', { serviceName: service, toolName: toolName, required: required });
+    toast(required ? 'Approval required' : 'Auto-allow set', 'success');
+    await refreshAll();
+    showToolDetailModal(service, toolName);
+  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+}
+
+function showAddConstraintInline(service, toolName) {
+  const form = document.getElementById('addConstraintForm');
+  if (form) { form.style.display = form.style.display === 'none' ? 'block' : 'none'; return; }
+}
+
+async function submitInlineConstraint(service, toolName) {
+  const paramName = (document.getElementById('cParamName').value || '').trim();
+  const operator = document.getElementById('cOperator').value;
+  const values = (document.getElementById('cValues').value || '').split(',').map(v => v.trim()).filter(Boolean);
+  const description = (document.getElementById('cDesc').value || '').trim();
+  if (!paramName) { toast('Parameter name is required', 'error'); return; }
+  if (!values.length) { toast('At least one value is required', 'error'); return; }
+  try {
+    await api('POST', '/api/constraints/add', { serviceName: service, toolName: toolName, paramName: paramName, operator: operator, values: values, description: description });
+    toast('Constraint added', 'success');
+    await refreshAll();
+    showToolDetailModal(service, toolName);
+  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
 }
 
 /* === User Access View === */
