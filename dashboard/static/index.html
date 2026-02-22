@@ -570,10 +570,8 @@ function renderCatalog() {
       ${hasBe?'<span class="tag tag-running" title="Backend container running">live</span>':''}
     </div><div class="svc-toggles">
       <label class="toggle-label" title="${en?'Service is enabled — click to disable':'Service is disabled — click to enable'}">
-        <label class="toggle"><input type="checkbox" ${en?'checked':''} onchange="${en?`disableService('${esc(name)}')`:`enableService('${esc(name)}')`}" /><span class="toggle-slider"></span></label>Enabled
+        <label class="toggle"><input type="checkbox" ${en?'checked':''} onchange="${en?`disableService('${esc(name)}')`:`enableService('${esc(name)}')`}" /><span class="toggle-slider"></span></label>
       </label>
-      ${hasGov?'<span class="tag tag-gated" style="font-size:10px" title="Governance active">gov</span>':''}
-      <button class="btn btn-sm btn-danger" onclick="removeService('${esc(name)}')" title="Remove service" style="padding:4px 8px">&#10005;</button>
     </div></div>
     <div>${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
     ${tools.map(([t,info]) => {
@@ -589,8 +587,9 @@ function renderCatalog() {
       <button class="btn btn-sm btn-danger" onclick="removeTool('${esc(name)}','${esc(t)}')" style="padding:4px 8px" title="Remove tool">&#10005;</button>
     </div></div>`;
     }).join('')}</div>
-    <div style="margin-top:12px">
+    <div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between">
       <button class="btn btn-sm btn-ghost" onclick="showAddToolModal('${esc(name)}')">+ Tool</button>
+      <a href="#" onclick="showDeleteServiceModal('${esc(name)}',${tools.length});return false;" style="font-size:12px;color:var(--red);opacity:0.6;text-decoration:none" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.6'">Delete service\u2026</a>
     </div></div>`;
   }).join('');
   // Also refresh list view if active
@@ -639,14 +638,13 @@ function renderCatalogList() {
   document.getElementById('catalogListView').innerHTML = rows.length === 0
     ? '<div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No services in catalog</div></div>'
     : `<table class="catalog-table"><thead><tr>
-        ${th('service','Service')}${th('tool','Tool')}${th('tag','Mode')}${th('enabled','Enabled')}${th('governance','Governance')}${th('constraints','Constraints')}
+        ${th('service','Service')}${th('tool','Tool')}${th('tag','Mode')}${th('enabled','Enabled')}${th('constraints','Constraints')}
         <th>Live</th><th></th>
       </tr></thead><tbody>${rows.map(r => `<tr>
         <td><strong>${esc(r.service)}</strong></td>
         <td>${r.tool ? `<a href="#" onclick="showToolDetailModal('${esc(r.service)}','${esc(r.tool)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3);font-family:'SF Mono','Fira Code',monospace">${esc(r.tool)}</a>` : '<span style="color:var(--text3)">—</span>'}</td>
         <td>${r.tool ? `<label class="toggle-label"><span class="toggle-state-label" style="font-size:11px;min-width:36px;text-align:right;color:${r.tag==='gated'?'var(--amber)':'var(--green)'}">${r.tag==='gated'?'Gated':'Open'}</span><label class="toggle"><input type="checkbox" ${r.tag==='gated'?'checked':''} onchange="toggleTagUpdate(this,'${esc(r.service)}','${esc(r.tool)}')" /><span class="toggle-slider"></span></label></label>` : ''}</td>
         <td><label class="toggle"><input type="checkbox" ${r.enabled?'checked':''} onchange="${r.enabled?`disableService('${esc(r.service)}')`:`enableService('${esc(r.service)}')`}" /><span class="toggle-slider"></span></label></td>
-        <td>${r.governance ? '<span class="tag tag-gated" style="font-size:10px">gov</span>' : ''}</td>
         <td>${r.constraints ? `<span class="constraint-badge">${r.constraints}</span>` : ''}</td>
         <td>${r.live ? '<span class="tag tag-running">live</span>' : ''}</td>
         <td>${r.tool ? `<button class="btn btn-sm btn-danger" onclick="removeTool('${esc(r.service)}','${esc(r.tool)}')" style="padding:4px 8px">&#10005;</button>` : `<button class="btn btn-sm btn-danger" onclick="removeService('${esc(r.service)}')" style="padding:4px 8px">&#10005;</button>`}</td>
@@ -727,7 +725,15 @@ function renderBackends() {
 async function act(fn, successMsg) { try { await fn(); toast(successMsg,'success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); console.error(e); } }
 async function enableService(n) { if(!confirm(`Enable service "${n}"? Its tools will become available to authorized users.`))return; await act(()=>api('POST','/api/services/enable',{serviceName:n}), 'Service enabled'); }
 async function disableService(n) { await act(()=>api('POST','/api/services/disable',{serviceName:n}), 'Service disabled'); }
-async function removeService(n) { if(!confirm(`Remove "${n}" and all its tools?`))return; await act(()=>api('POST','/api/services/remove',{serviceName:n}), 'Service removed'); }
+async function removeService(n) { await act(()=>api('POST','/api/services/remove',{serviceName:n}), 'Service removed'); }
+function showDeleteServiceModal(name, toolCount) {
+  showModal(`<h3 style="margin-top:0">Delete service &ldquo;${esc(name)}&rdquo;?</h3>
+    <p style="color:var(--text2);margin:12px 0">This will remove the service and all ${toolCount} tool${toolCount!==1?'s':''}. This cannot be undone.</p>
+    <label style="display:block;margin:12px 0 6px;font-size:13px;color:var(--text2)">Type &ldquo;<strong>${esc(name)}</strong>&rdquo; to confirm:</label>
+    <input id="deleteConfirmInput" type="text" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px" oninput="document.getElementById('deleteConfirmBtn').disabled=this.value!=='${esc(name)}'" autocomplete="off" spellcheck="false" />
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-danger" id="deleteConfirmBtn" disabled onclick="closeModal();removeService('${esc(name)}')">Delete</button></div>`);
+  setTimeout(() => document.getElementById('deleteConfirmInput')?.focus(), 100);
+}
 async function toggleTag(s,t,tag) {
   if(tag==='open'&&!confirm(`Set "${t}" to open? It will no longer require approval.`))return;
   // Auto-create governance instance when first tool is set to gated

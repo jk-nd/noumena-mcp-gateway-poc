@@ -285,14 +285,27 @@ static_resources:
                           requires:
                             allow_missing_or_failed: {}
 
-                  # Step 1.5: Add WWW-Authenticate header on 401 (triggers MCP OAuth flow)
+                  # Step 1.5: Response rewriting (Lua)
+                  # - 401: Add WWW-Authenticate header (triggers MCP OAuth flow)
+                  # - 403: Convert to 200 + JSON-RPC error body (so MCP SDK reads the reason
+                  #         instead of throwing a generic transport error)
                   - name: envoy.filters.http.lua
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
                       inline_code: |
                         function envoy_on_response(response_handle)
-                          if response_handle:headers():get(":status") == "401" then
+                          local status = response_handle:headers():get(":status")
+                          if status == "401" then
                             response_handle:headers():add("WWW-Authenticate", 'Bearer resource_metadata="http://localhost:8000/.well-known/oauth-protected-resource"')
+                          elseif status == "403" then
+                            local reason = response_handle:headers():get("x-authz-reason") or "Access denied"
+                            reason = reason:gsub('"', '\\"')
+                            local body = '{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"' .. reason .. '"}}'
+                            response_handle:headers():replace(":status", "200")
+                            response_handle:headers():replace("content-type", "application/json")
+                            response_handle:headers():remove("content-length")
+                            response_handle:headers():add("content-length", tostring(#body))
+                            response_handle:body():setBytes(body)
                           end
                         end
 
