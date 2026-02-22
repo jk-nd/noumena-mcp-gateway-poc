@@ -38,3 +38,26 @@ governance.ServiceGovernance:
       claims:
         role:
           - gateway
+  pApprover:
+    set:
+      claims:
+        role:
+          - approver
+
+# ============================================================================
+# V4 GOVERNANCE — ToolAuthorization (workflow-gated tool execution)
+# ============================================================================
+
+governance.ToolAuthorization:
+  pUser:
+    set:
+      claims:
+        role:
+          - user
+          - admin
+          - approver
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway

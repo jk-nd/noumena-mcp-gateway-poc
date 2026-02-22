@@ -927,7 +927,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             emit("Found supergateway image", "done")
 
-            # Step 3: Stop existing container if any
+            # Step 3: Stop existing container (and its inner MCP container) if any
+            try:
+                inner = client.containers.list(
+                    filters={"label": f"gateway.parent={container_name}"})
+                for c in inner:
+                    log.info("Removing old inner MCP container %s", c.name)
+                    c.remove(force=True)
+            except Exception:
+                pass
             try:
                 old = client.containers.get(container_name)
                 emit(f"Removing old container {container_name}...")
@@ -943,7 +951,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 sg_image,
                 name=container_name,
                 environment={
-                    "MCP_COMMAND": f"docker run -i --rm {image}",
+                    "MCP_COMMAND": f"docker run -i --rm --label gateway.parent={container_name} {image}",
                     "PORT": "8000",
                 },
                 volumes={"/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}},
@@ -1026,13 +1034,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 pass
 
     def handle_docker_stop(self, body):
-        """Stop and remove a wired service container."""
+        """Stop and remove a wired service container and its inner MCP container."""
         container_name = body.get("containerName", "")
         service_name = body.get("serviceName", "")
         client = get_docker_client()
         if not client:
             return self.send_error_json(503, "Docker not available")
         try:
+            # Remove inner MCP container spawned by supergateway (labeled)
+            try:
+                inner = client.containers.list(
+                    filters={"label": f"gateway.parent={container_name}"})
+                for c in inner:
+                    log.info("Removing inner MCP container %s", c.name)
+                    c.remove(force=True)
+            except Exception as e:
+                log.warning("Failed to clean inner containers for %s: %s", container_name, e)
+            # Remove the supergateway container itself
             container = client.containers.get(container_name)
             container.remove(force=True)
             # Remove from aggregator

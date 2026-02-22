@@ -77,10 +77,14 @@ def auth_header() -> dict:
 _cache_lock = threading.Lock()
 _config_cache: dict[str, dict] = {}
 
+# Cache: list of authorized ToolAuthorization instances
+# Each entry: {instanceId, serviceName, toolName, agentIdentity, scope}
+_auth_cache: list[dict] = []
+
 
 def refresh_cache():
-    """Fetch all ServiceGovernance instances and their tool configs."""
-    global _config_cache
+    """Fetch all ServiceGovernance instances and their tool configs, plus ToolAuthorizations."""
+    global _config_cache, _auth_cache
     try:
         headers = auth_header()
 
@@ -122,12 +126,38 @@ def refresh_cache():
                 "toolConfigs": tool_configs,
             }
 
+        # Fetch ToolAuthorization instances in "authorized" state
+        new_auth_cache: list[dict] = []
+        try:
+            auth_resp = requests.get(
+                f"{NPL_URL}/npl/governance/ToolAuthorization/",
+                headers=headers,
+                timeout=10,
+            )
+            auth_items = auth_resp.json().get("items", [])
+            new_auth_cache = [
+                {
+                    "instanceId": item["@id"],
+                    "serviceName": item.get("serviceName", ""),
+                    "toolName": item.get("toolName", ""),
+                    "agentIdentity": item.get("agentIdentity", ""),
+                    "scope": item.get("scope", ""),
+                }
+                for item in auth_items
+                if item.get("@state") == "authorized"
+                and item.get("serviceName", "") != ""  # skip uninitialized
+            ]
+        except Exception as e:
+            log.warning("Failed to fetch ToolAuthorization instances: %s", e)
+
         with _cache_lock:
             _config_cache = new_cache
+            _auth_cache = new_auth_cache
         log.info(
-            "Cache refreshed: %d services, %d tool configs total",
+            "Cache refreshed: %d services, %d tool configs, %d workflow authorizations",
             len(new_cache),
             sum(len(v["toolConfigs"]) for v in new_cache.values()),
+            len(new_auth_cache),
         )
     except Exception as e:
         log.error("Cache refresh failed: %s", e)
@@ -199,6 +229,31 @@ def evaluate_constraints(tool_config: dict, arguments: dict) -> tuple[bool, str]
             return False, msg
 
     return True, "Constraints satisfied"
+
+
+# --- Workflow authorization helpers ---
+def find_matching_authorization(service_name: str, tool_name: str, caller_identity: str) -> dict | None:
+    """Find a ToolAuthorization in 'authorized' state matching service, tool, and agent."""
+    with _cache_lock:
+        for auth in _auth_cache:
+            if (auth["serviceName"] == service_name
+                    and auth["toolName"] == tool_name
+                    and auth["agentIdentity"] == caller_identity):
+                return auth
+    return None
+
+
+def consume_authorization(instance_id: str):
+    """Consume a one-shot ToolAuthorization after successful execution."""
+    try:
+        requests.post(
+            f"{NPL_URL}/npl/governance/ToolAuthorization/{instance_id}/consume",
+            headers={**auth_header(), "Content-Type": "application/json"},
+            json={},
+            timeout=5,
+        )
+    except Exception as e:
+        log.warning("Failed to consume authorization %s: %s", instance_id, e)
 
 
 # --- NPL forwarding ---
@@ -305,7 +360,20 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
         constraints_pass, constraint_msg = evaluate_constraints(tool_config, arguments)
 
         if not constraints_pass:
-            # Constraint violation → deny immediately (no NPL call needed)
+            # Check for workflow authorization override
+            auth = find_matching_authorization(
+                service_name, tool_name, body.get("callerIdentity", ""))
+            if auth:
+                consume_authorization(auth["instanceId"])
+                log.info("Workflow override: %s.%s by %s (auth %s: %s)",
+                         service_name, tool_name, body.get("callerIdentity"),
+                         auth["instanceId"], auth["scope"])
+                return self.send_json({
+                    "decision": "allow",
+                    "requestId": "",
+                    "message": f"Authorized by workflow: {auth['scope']}",
+                })
+            # No override — constraint violation stands
             log.info("Constraint denied: %s.%s — %s", service_name, tool_name, constraint_msg)
             return self.send_json({
                 "decision": "deny",

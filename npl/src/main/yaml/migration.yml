@@ -129,3 +129,19 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V17: Multi-user approvals — add pApprover party to ServiceGovernance
+  - name: mcp-17.0-multi-user-approvals
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V18: Workflow-gated tool execution — ToolAuthorization protocol
+  - name: mcp-18.0-tool-authorization-workflow
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
