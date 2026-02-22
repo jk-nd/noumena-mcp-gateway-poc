@@ -129,11 +129,11 @@ register_tool() {
   echo "   ${svc}.${tool} [${tag}]"
 }
 
-register_tool "duckduckgo"    "search"       "open"
-register_tool "mock-calendar" "list_events"  "open"
-register_tool "mock-calendar" "read_inbox"   "open"
-register_tool "mock-calendar" "create_event" "gated"
-register_tool "mock-calendar" "send_email"   "gated"
+register_tool "duckduckgo"    "search"       "acl"
+register_tool "mock-calendar" "list_events"  "acl"
+register_tool "mock-calendar" "read_inbox"   "acl"
+register_tool "mock-calendar" "create_event" "logic"
+register_tool "mock-calendar" "send_email"   "logic"
 
 green "   Tools registered"
 
@@ -251,7 +251,7 @@ GOV_BASE="/npl/governance/ServiceGovernance"
 
 if [[ -n "$MOCK_CAL_GOV" ]]; then
   # Register tools in governance
-  for tool_tag in "list_events:open" "read_inbox:open" "create_event:gated" "send_email:gated"; do
+  for tool_tag in "list_events:acl" "read_inbox:acl" "create_event:logic" "send_email:logic"; do
     tool="${tool_tag%%:*}"
     tag="${tool_tag##*:}"
     npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/registerTool" \
@@ -300,7 +300,7 @@ fi
 
 if [[ -n "$DDG_GOV" ]]; then
   npl_call "${GOV_BASE}/${DDG_GOV}/registerTool" \
-    "{\"toolName\":\"search\",\"tag\":\"open\"}"
+    "{\"toolName\":\"search\",\"tag\":\"acl\"}"
 
   # Search is open (Phase 1 read action) — no gate, just guardrails
   npl_call "${GOV_BASE}/${DDG_GOV}/setRequiresApproval" \
@@ -359,8 +359,8 @@ echo ""
 bold "=== Seed Complete ==="
 echo ""
 echo "Services:"
-echo "  - duckduckgo    (search [open])"
-echo "  - mock-calendar (list_events [open], read_inbox [open], create_event [gated], send_email [gated])"
+echo "  - duckduckgo    (search [acl])"
+echo "  - mock-calendar (list_events [acl], read_inbox [acl], create_event [logic], send_email [logic])"
 echo ""
 echo "Access rules:"
 echo "  - acme-all-search       org=acme            -> duckduckgo.*"
@@ -370,8 +370,8 @@ echo "  - jarvis-calendar        jarvis@acme.com      -> mock-calendar.*"
 echo "  - compliance-all         role=approver         -> *.*"
 echo ""
 echo "Governance models:"
-echo "  READ (open):   list_events, read_inbox, search — auto-allow"
-echo "  WRITE (gated): two models coexist:"
+echo "  READ (acl):    list_events, read_inbox, search — auto-allow"
+echo "  WRITE (logic): two models coexist:"
 echo ""
 if [[ -n "$MOCK_CAL_GOV" ]]; then
   echo "  mock-calendar: ${MOCK_CAL_GOV}"

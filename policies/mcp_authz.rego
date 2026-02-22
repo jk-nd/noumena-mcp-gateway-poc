@@ -3,7 +3,7 @@
 # Three layers, each answers one question:
 #   Layer 1 — Catalog: Is this service/tool available?
 #   Layer 2 — Access Rules: Is this caller allowed?
-#   Layer 3 — NPL Governance: Does this gated call comply? (runtime NPL call)
+#   Layer 3 — NPL Governance: Does this logic-gated call comply? (runtime NPL call)
 #
 # Fail-closed: default allow = false
 
@@ -222,7 +222,7 @@ allow if {
 	bearer_token
 }
 
-# --- Allow: Open tools (catalog + access rules sufficient) ---
+# --- Allow: ACL tools (catalog + access rules sufficient) ---
 
 allow if {
 	not is_stream_setup
@@ -232,12 +232,12 @@ allow if {
 	user_id
 	service_enabled
 	tool_in_catalog
-	tool_tag == "open"
+	tool_tag == "acl"
 	caller_authorized
 	caller_not_revoked
 }
 
-# --- Allow: Gated tools (requires NPL allow) ---
+# --- Allow: Logic tools (requires NPL allow) ---
 
 allow if {
 	not is_stream_setup
@@ -247,7 +247,7 @@ allow if {
 	user_id
 	service_enabled
 	tool_in_catalog
-	tool_tag == "gated"
+	tool_tag == "logic"
 	caller_authorized
 	caller_not_revoked
 	npl_decision.decision == "allow"
@@ -344,26 +344,26 @@ reason := sprintf("User '%s' is revoked", [user_id]) if {
 	not caller_not_revoked
 }
 
-reason := sprintf("Gated tool pending: %s", [npl_decision.requestId]) if {
+reason := sprintf("Logic tool pending: %s", [npl_decision.requestId]) if {
 	is_tool_call
 	service_name
 	user_id
 	service_enabled
 	tool_in_catalog
-	tool_tag == "gated"
+	tool_tag == "logic"
 	caller_authorized
 	caller_not_revoked
 	npl_decision
 	npl_decision.decision == "pending"
 }
 
-reason := sprintf("Gated tool denied: %s", [npl_decision.message]) if {
+reason := sprintf("Logic tool denied: %s", [npl_decision.message]) if {
 	is_tool_call
 	service_name
 	user_id
 	service_enabled
 	tool_in_catalog
-	tool_tag == "gated"
+	tool_tag == "logic"
 	caller_authorized
 	caller_not_revoked
 	npl_decision

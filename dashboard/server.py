@@ -660,7 +660,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_register_tool(self, body):
         sid = ensure_store_id()
         resp = self.npl_post(f"/npl/store/GatewayStore/{sid}/registerTool", {
-            "serviceName": body["serviceName"], "toolName": body["toolName"], "tag": body.get("tag", "open"),
+            "serviceName": body["serviceName"], "toolName": body["toolName"], "tag": body.get("tag", "acl"),
         })
         self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
 
@@ -993,7 +993,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.npl_post(f"/npl/store/GatewayStore/{sid}/enableService", {"serviceName": service_name})
             for tool in tools:
                 self.npl_post(f"/npl/store/GatewayStore/{sid}/registerTool", {
-                    "serviceName": service_name, "toolName": tool["name"], "tag": "gated",
+                    "serviceName": service_name, "toolName": tool["name"], "tag": "logic",
                 })
             emit(f"Registered {service_name} with {len(tools)} tools (all gated) in catalog", "done")
 

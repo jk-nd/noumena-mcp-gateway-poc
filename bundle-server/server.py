@@ -141,7 +141,7 @@ def fetch_npl_data() -> dict:
     for svc_name, entry in bundle_data.get("catalog", {}).items():
         tools = {}
         for tool_name, tool_entry in entry.get("tools", {}).items():
-            tools[tool_name] = {"tag": tool_entry.get("tag", "open")}
+            tools[tool_name] = {"tag": tool_entry.get("tag", "acl")}
         catalog[svc_name] = {
             "enabled": entry.get("enabled", False),
             "tools": tools,

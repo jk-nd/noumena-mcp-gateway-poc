@@ -41,7 +41,7 @@ struct EvaluationResult {
 };
 
 @api
-protocol[pAdmin, pGateway] ServiceGovernance() {
+protocol[pAdmin, pGateway, pApprover] ServiceGovernance() {
     initial state active;
 
     var serviceName: Text = "";
@@ -62,14 +62,14 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
 
     @api
     permission[pAdmin] registerTool(toolName: Text, tag: Text) | active {
-        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        require(tag == "acl" || tag == "logic", "Tag must be 'acl' or 'logic'");
         var reg = ToolRegistration(toolName = toolName, tag = tag);
         tools = tools.with(toolName, reg);
     };
 
     @api
     permission[pAdmin] setTag(toolName: Text, tag: Text) | active {
-        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        require(tag == "acl" || tag == "logic", "Tag must be 'acl' or 'logic'");
         require(tools.getOrNone(toolName).isPresent(), "Tool not found");
         var reg = ToolRegistration(toolName = toolName, tag = tag);
         tools = tools.with(toolName, reg);
@@ -234,7 +234,7 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
                     decision = "pending",
                     requestId = existing.requestId,
                     message = "Awaiting approval"
-              u/  );
+                );
             };
         };
 
@@ -268,7 +268,7 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
     };
 
     @api
-    permission[pAdmin] approve(requestId: Text) | active {
+    permission[pAdmin | pApprover] approve(requestId: Text) | active {
         var maybeLookupKey = requestIdToKey.getOrNone(requestId);
         require(maybeLookupKey.isPresent(), "Request not found");
         var lookupKey = maybeLookupKey.getOrFail();
@@ -296,7 +296,7 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
     };
 
     @api
-    permission[pAdmin] deny(requestId: Text, reason: Text) | active {
+    permission[pAdmin | pApprover] deny(requestId: Text, reason: Text) | active {
         var maybeLookupKey = requestIdToKey.getOrNone(requestId);
         require(maybeLookupKey.isPresent(), "Request not found");
         var lookupKey = maybeLookupKey.getOrFail();
@@ -324,7 +324,7 @@ protocol[pAdmin, pGateway] ServiceGovernance() {
     };
 
     @api
-    permission[pAdmin] getPendingRequests() returns List<PendingRequest> | active {
+    permission[pAdmin | pApprover] getPendingRequests() returns List<PendingRequest> | active {
         var allValues = pendingRequests.values();
         return allValues.filter(function(req: PendingRequest) -> req.status == "pending");
     };

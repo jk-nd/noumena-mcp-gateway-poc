@@ -2,7 +2,7 @@ package store
 
 /**
  * Tool entry with a governance tag.
- * tag: "open" (Layer 2 sufficient) or "gated" (requires NPL evaluation)
+ * tag: "acl" (Layer 2 sufficient) or "logic" (requires NPL evaluation)
  */
 struct ToolEntry {
     tag: Text
@@ -59,7 +59,7 @@ struct BundleData {
  * GatewayStore — unified singleton for v4 three-layer governance.
  *
  * Replaces PolicyStore with a simpler model:
- *   - Catalog: services + tools with open/gated tags
+ *   - Catalog: services + tools with acl/logic tags
  *   - Access rules: claim-based and identity-based (replaces per-user grants)
  *   - Emergency revocation: fail-closed subject blocking
  *
@@ -140,11 +140,11 @@ protocol[pAdmin, pGateway] GatewayStore() {
     // ========================================================================
 
     /**
-     * Register a tool on a service with a tag (open or gated).
+     * Register a tool on a service with a tag (acl or logic).
      */
     @api
     permission[pAdmin] registerTool(serviceName: Text, toolName: Text, tag: Text) | active {
-        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        require(tag == "acl" || tag == "logic", "Tag must be 'acl' or 'logic'");
         var maybeEntry = catalog.getOrNone(serviceName);
         require(maybeEntry.isPresent(), "Service not found");
         var entry = maybeEntry.getOrFail();
@@ -155,11 +155,11 @@ protocol[pAdmin, pGateway] GatewayStore() {
     };
 
     /**
-     * Change the tag of an existing tool (open <-> gated).
+     * Change the tag of an existing tool (acl <-> logic).
      */
     @api
     permission[pAdmin] setTag(serviceName: Text, toolName: Text, tag: Text) | active {
-        require(tag == "open" || tag == "gated", "Tag must be 'open' or 'gated'");
+        require(tag == "acl" || tag == "logic", "Tag must be 'acl' or 'logic'");
         var maybeEntry = catalog.getOrNone(serviceName);
         require(maybeEntry.isPresent(), "Service not found");
         var entry = maybeEntry.getOrFail();

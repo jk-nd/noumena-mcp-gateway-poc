@@ -386,7 +386,7 @@ resource "keycloak_user" "carol" {
   enabled    = true
 
   attributes = {
-    "role"         = "user"
+    "role"         = "approver"
     "organization" = "acme"
     "department"   = "compliance"
   }

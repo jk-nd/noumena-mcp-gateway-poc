@@ -3,7 +3,7 @@
 # Run with: opa test policies/ -v
 #
 # Tests the three-layer governance model:
-#   Layer 1 — Catalog (open/gated tags)
+#   Layer 1 — Catalog (acl/logic tags)
 #   Layer 2 — Access Rules (claim-based + identity-based)
 #   Layer 3 — Governance Evaluator → NPL (gated tool evaluation)
 
@@ -76,15 +76,15 @@ mock_catalog := {
 	"mock-calendar": {
 		"enabled": true,
 		"tools": {
-			"list_events": {"tag": "open"},
-			"create_event": {"tag": "gated"},
+			"list_events": {"tag": "acl"},
+			"create_event": {"tag": "logic"},
 		},
 	},
 	"duckduckgo": {
 		"enabled": true,
 		"tools": {
-			"search": {"tag": "open"},
-			"fetch_page": {"tag": "open"},
+			"search": {"tag": "acl"},
+			"fetch_page": {"tag": "acl"},
 		},
 	},
 }
@@ -197,7 +197,7 @@ test_deny_tool_call_disabled_service if {
 	disabled_catalog := {
 		"mock-calendar": {
 			"enabled": false,
-			"tools": {"list_events": {"tag": "open"}},
+			"tools": {"list_events": {"tag": "acl"}},
 		},
 	}
 
@@ -331,10 +331,10 @@ test_revoked_subject_denied if {
 }
 
 # ============================================================================
-# 4. Open tool path: allowed, denied by access rules
+# 4. ACL tool path: allowed, denied by access rules
 # ============================================================================
 
-test_open_tool_allowed if {
+test_acl_tool_allowed if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -346,7 +346,7 @@ test_open_tool_allowed if {
 		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-test_open_tool_denied_no_rule if {
+test_acl_tool_denied_no_rule if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
@@ -359,11 +359,11 @@ test_open_tool_denied_no_rule if {
 }
 
 # ============================================================================
-# 5. Gated tool path: evaluator allow, deny, pending, unreachable
+# 5. Logic tool path: evaluator allow, deny, pending, unreachable
 # ============================================================================
 
-# Gated tool + evaluator returns allow → allowed
-test_gated_tool_npl_allow if {
+# Logic tool + evaluator returns allow → allowed
+test_logic_tool_npl_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -376,8 +376,8 @@ test_gated_tool_npl_allow if {
 		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
 }
 
-# Gated tool + evaluator returns deny → denied
-test_gated_tool_npl_deny if {
+# Logic tool + evaluator returns deny → denied
+test_logic_tool_npl_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -390,8 +390,8 @@ test_gated_tool_npl_deny if {
 		with npl_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
 }
 
-# Gated tool + evaluator returns pending → denied (with pending headers)
-test_gated_tool_npl_pending if {
+# Logic tool + evaluator returns pending → denied (with pending headers)
+test_logic_tool_npl_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -404,8 +404,8 @@ test_gated_tool_npl_pending if {
 		with npl_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
 }
 
-# Gated tool + evaluator unreachable (no URL) → denied
-test_gated_tool_npl_unreachable if {
+# Logic tool + evaluator unreachable (no URL) → denied
+test_logic_tool_npl_unreachable if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -416,8 +416,8 @@ test_gated_tool_npl_unreachable if {
 		with revoked_subjects as mock_revoked
 }
 
-# Gated tool + constraint denied with reason in message
-test_gated_tool_constraint_denied if {
+# Logic tool + constraint denied with reason in message
+test_logic_tool_constraint_denied if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -584,8 +584,8 @@ test_tool_name_from_qualified_tool if {
 
 test_granted_services_excludes_disabled if {
 	disabled_catalog := {
-		"mock-calendar": {"enabled": true, "tools": {"list_events": {"tag": "open"}}},
-		"duckduckgo": {"enabled": false, "tools": {"search": {"tag": "open"}}},
+		"mock-calendar": {"enabled": true, "tools": {"list_events": {"tag": "acl"}}},
+		"duckduckgo": {"enabled": false, "tools": {"search": {"tag": "acl"}}},
 	}
 
 	wildcard_rules := [
