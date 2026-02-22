@@ -366,7 +366,7 @@ static_resources:
                       address: opa
                       port_value: 9191
 
-    # MCP Aggregator (multi-backend routing gateway)
+    # Envoy AI Gateway (MCP aggregation + streaming)
     - name: mcp_aggregator
       connect_timeout: 5s
       type: STRICT_DNS
@@ -378,52 +378,8 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: mcp-aggregator
-                      port_value: 8000
-
-    # Backend MCP servers (supergateway wrapping STDIO tools)
-    - name: duckduckgo_mcp
-      connect_timeout: 5s
-      type: STRICT_DNS
-      lb_policy: ROUND_ROBIN
-      load_assignment:
-        cluster_name: duckduckgo_mcp
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: duckduckgo-mcp
-                      port_value: 8000
-
-    # Mock Calendar MCP (HTTP-native, bilateral streaming)
-    - name: mock_calendar_mcp
-      connect_timeout: 5s
-      type: STRICT_DNS
-      lb_policy: ROUND_ROBIN
-      load_assignment:
-        cluster_name: mock_calendar_mcp
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: mock-calendar-mcp
-                      port_value: 8000
-
-    - name: github_mcp
-      connect_timeout: 5s
-      type: STRICT_DNS
-      lb_policy: ROUND_ROBIN
-      load_assignment:
-        cluster_name: github_mcp
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: github-mcp
-                      port_value: 8000
+                      address: aigw-run
+                      port_value: 1975
 
 admin:
   address:

@@ -135,7 +135,7 @@ class StoreAndForwardTest {
     @Order(1)
     fun `open tool list_events allowed without governance`() = runBlocking {
         val response = mcpPost(1, "tools/call",
-            """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}""")
+            """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}""")
 
         println("    Status: ${response.status}")
         assertEquals(HttpStatusCode.OK, response.status,
@@ -151,7 +151,7 @@ class StoreAndForwardTest {
     @Test
     @Order(2)
     fun `gated tool create_event returns 403 pending`() = runBlocking {
-        val params = """{"name":"mock-calendar.create_event","arguments":{"title":"Approval Test","date":"2026-02-15","time":"10:00","duration":30}}"""
+        val params = """{"name":"mock-calendar__create_event","arguments":{"title":"Approval Test","date":"2026-02-15","time":"10:00","duration":30}}"""
         val response = mcpPost(2, "tools/call", params)
 
         println("    Status: ${response.status}")
@@ -217,7 +217,7 @@ class StoreAndForwardTest {
         println("    ✓ Approved $requestId")
 
         // Re-call the same gated tool → OPA calls evaluate() → returns "allow" (consumed)
-        val params = """{"name":"mock-calendar.create_event","arguments":{"title":"Approval Test","date":"2026-02-15","time":"10:00","duration":30}}"""
+        val params = """{"name":"mock-calendar__create_event","arguments":{"title":"Approval Test","date":"2026-02-15","time":"10:00","duration":30}}"""
         val response = mcpPost(4, "tools/call", params)
 
         println("    Re-call status: ${response.status}")
@@ -236,7 +236,7 @@ class StoreAndForwardTest {
     @Order(5)
     fun `deny flow - gated call denied end-to-end`() = runBlocking {
         // Trigger a new pending request with different arguments
-        val params = """{"name":"mock-calendar.create_event","arguments":{"title":"Denied Meeting","date":"2026-03-01","time":"09:00","duration":60}}"""
+        val params = """{"name":"mock-calendar__create_event","arguments":{"title":"Denied Meeting","date":"2026-03-01","time":"09:00","duration":60}}"""
         val triggerResp = mcpPost(5, "tools/call", params)
         assertEquals(HttpStatusCode.Forbidden, triggerResp.status)
         println("    ✓ New gated call → 403 (pending)")

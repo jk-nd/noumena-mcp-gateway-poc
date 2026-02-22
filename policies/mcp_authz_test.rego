@@ -173,7 +173,7 @@ test_deny_tool_call_missing_service if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"github.create_issue\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"github__create_issue\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -185,7 +185,7 @@ test_deny_tool_call_missing_tool if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.delete_event\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__delete_event\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -204,7 +204,7 @@ test_deny_tool_call_disabled_service if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as disabled_catalog
 		with access_rules as mock_access_rules
@@ -216,7 +216,7 @@ test_deny_tool_call_empty_catalog if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as {}
 		with access_rules as mock_access_rules
@@ -233,7 +233,7 @@ test_access_rule_claim_match if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -241,12 +241,12 @@ test_access_rule_claim_match if {
 		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Jarvis matches identity rule for duckduckgo.search
+# Jarvis matches identity rule for duckduckgo__search
 test_access_rule_identity_match if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo__search\",\"arguments\":{\"query\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -259,7 +259,7 @@ test_access_rule_wildcard_tool if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_alice),
-		"{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.search\",\"arguments\":{\"query\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo__search\",\"arguments\":{\"query\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -272,7 +272,7 @@ test_access_rule_no_match if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
-		"{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -294,7 +294,7 @@ test_access_rule_identity_tool_mismatch if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo.fetch_page\",\"arguments\":{\"url\":\"http://example.com\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"duckduckgo__fetch_page\",\"arguments\":{\"url\":\"http://example.com\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as identity_only_rules
@@ -309,7 +309,7 @@ test_access_rule_or_semantics if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -322,7 +322,7 @@ test_revoked_subject_denied if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -338,7 +338,7 @@ test_acl_tool_allowed if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{\"date\":\"2026-02-14\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{\"date\":\"2026-02-14\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -350,7 +350,7 @@ test_acl_tool_denied_no_rule if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
-		"{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -367,7 +367,7 @@ test_logic_tool_npl_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -381,7 +381,7 @@ test_logic_tool_npl_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -395,7 +395,7 @@ test_logic_tool_npl_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -409,7 +409,7 @@ test_logic_tool_npl_unreachable if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -421,7 +421,7 @@ test_logic_tool_constraint_denied if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -435,7 +435,7 @@ test_constraint_denied_reason_header if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":45,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":45,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -484,7 +484,7 @@ test_pending_headers if {
 	rh := response_headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -500,7 +500,7 @@ test_reason_header_authorized if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -514,7 +514,7 @@ test_reason_header_no_access_rule if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
-		"{\"jsonrpc\":\"2.0\",\"id\":54,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":54,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -532,7 +532,7 @@ test_deny_empty_bundle if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as {}
 		with access_rules as []
@@ -542,7 +542,7 @@ test_deny_empty_bundle if {
 test_deny_no_auth if {
 	not allow with input as mock_input_no_auth(
 		"POST", "/mcp",
-		"{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -566,7 +566,7 @@ test_service_name_from_qualified_tool if {
 	result := service_name with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 
 	result == "mock-calendar"
@@ -576,7 +576,7 @@ test_tool_name_from_qualified_tool if {
 	result := tool_name with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 
 	result == "list_events"
@@ -646,7 +646,7 @@ test_wildcard_service_access if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as wildcard_rules
@@ -677,7 +677,7 @@ test_array_claims_match_access_rule if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis_array_claims),
-		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
@@ -698,7 +698,7 @@ test_array_claims_wildcard_service if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis_array_claims),
-		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as wildcard_rules
@@ -757,7 +757,7 @@ test_no_pending_headers_when_allowed if {
 	rh := response_headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar.create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules

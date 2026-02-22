@@ -339,7 +339,7 @@ td:first-child { color: var(--text); }
       <div class="panel-header"><div><div class="panel-title">Overview</div><div class="panel-desc">System health and key metrics</div></div></div>
       <div class="stats-row" id="statsRow"></div>
       <div class="card"><h4 style="margin-bottom:12px;font-size:14px;color:var(--text3)">Service Health</h4><div id="healthTable"></div></div>
-      <div class="card"><h4 style="margin-bottom:12px;font-size:14px;color:var(--text3)">Aggregator Backends</h4><div id="backendsTable"></div></div>
+      <div class="card"><h4 style="margin-bottom:12px;font-size:14px;color:var(--text3)">Gateway Backends</h4><div id="backendsTable"></div></div>
     </div>
 
     <!-- Activity log -->
@@ -788,7 +788,7 @@ function renderUsers() {
 function renderBackends() {
   const be = state.backends;
   const entries = Object.entries(be);
-  if (!entries.length) { document.getElementById('backendsTable').innerHTML = '<div style="color:var(--text3);font-size:13px">No backends registered in aggregator</div>'; return; }
+  if (!entries.length) { document.getElementById('backendsTable').innerHTML = '<div style="color:var(--text3);font-size:13px">No backends registered in gateway</div>'; return; }
   document.getElementById('backendsTable').innerHTML = `<table><tr><th>Service</th><th>URL</th></tr>
     ${entries.map(([n,u]) => `<tr><td>${esc(n)}</td><td style="font-family:monospace;font-size:12px">${esc(u)}</td></tr>`).join('')}</table>`;
 }
@@ -888,8 +888,8 @@ async function showAddToolModal(svc) {
   try {
     const resp = await api('GET', `/api/tools/schemas?service=${encodeURIComponent(svc)}`);
     backendTools = (resp.tools || []).map(t => {
-      // Tools from aggregator are prefixed "svc.tool", strip the prefix
-      const name = t.name.startsWith(svc + '.') ? t.name.slice(svc.length + 1) : t.name;
+      // Tools from aigw are prefixed "svc__tool", strip the prefix
+      const name = t.name.startsWith(svc + '__') ? t.name.slice(svc.length + 2) : t.name;
       return { name, description: t.description || '' };
     });
   } catch(e) { /* backend not reachable — fall back to manual input */ }
@@ -2071,7 +2071,7 @@ function renderMetrics() {
     { id: 'opa', name: 'OPA Policy Engine', color: 'var(--green)', render: renderOpaMetrics },
     { id: 'bundle', name: 'Bundle Server', color: 'var(--purple)', render: renderBundleMetrics },
     { id: 'gov', name: 'Governance Evaluator', color: 'var(--amber)', render: renderGovMetrics },
-    { id: 'agg', name: 'MCP Aggregator', color: 'var(--accent)', render: renderAggMetrics },
+    { id: 'agg', name: 'AI Gateway', color: 'var(--accent)', render: renderAggMetrics },
   ];
 
   container.innerHTML = sections.map(s => {
@@ -2102,7 +2102,7 @@ function getMetricStatus(id, m) {
   if (id === 'opa') return (m.opa && !m.opa.error) ? 'up' : 'down';
   if (id === 'bundle') return (m.bundle_server && !m.bundle_server.error) ? 'up' : 'down';
   if (id === 'gov') return (m.governance_evaluator && !m.governance_evaluator.error) ? 'up' : 'down';
-  if (id === 'agg') return (m.aggregator && !m.aggregator.error) ? 'up' : 'down';
+  if (id === 'agg') return (m.aigw && !m.aigw.error) ? 'up' : 'down';
   return 'down';
 }
 
@@ -2158,8 +2158,8 @@ function renderGovMetrics(m) {
 }
 
 function renderAggMetrics(m) {
-  const a = m.aggregator || {};
-  if (a.error) return `<div style="color:var(--text3);padding:8px">Aggregator unreachable: ${esc(a.error)}</div>`;
+  const a = m.aigw || {};
+  if (a.error) return `<div style="color:var(--text3);padding:8px">AI Gateway unreachable: ${esc(a.error)}</div>`;
   let html = metricItem('Active Sessions', a.active_sessions != null ? a.active_sessions : '—');
   const backends = a.backends || [];
   if (backends.length) {

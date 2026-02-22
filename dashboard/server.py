@@ -7,7 +7,7 @@ Serves a single-page dashboard and proxies authenticated API calls to:
   - OPA / Envoy (health checks)
   - Docker Hub (MCP server discovery)
   - Docker Engine (container management for service wiring)
-  - MCP Aggregator (dynamic backend registration)
+  - Envoy AI Gateway (aigw-run config file management)
 """
 
 import hashlib
@@ -49,9 +49,11 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Welcome123")
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://envoy-gateway:8000")
 OPA_URL = os.environ.get("OPA_URL", "http://opa:8181")
 BUNDLE_SERVER_URL = os.environ.get("BUNDLE_SERVER_URL", "http://bundle-server:8282")
-AGGREGATOR_URL = os.environ.get("AGGREGATOR_URL", "http://mcp-aggregator:8000")
 ENVOY_ADMIN_URL = os.environ.get("ENVOY_ADMIN_URL", "http://envoy-gateway:9901")
 GOVERNANCE_EVALUATOR_URL = os.environ.get("GOVERNANCE_EVALUATOR_URL", "http://governance-evaluator:8090")
+AIGW_CONFIG_PATH = os.environ.get("AIGW_CONFIG_PATH", "/aigw-config/mcp-servers.json")
+AIGW_CONTAINER_NAME = os.environ.get("AIGW_CONTAINER_NAME", "gateway-aigw-run-1")
+AIGW_ADMIN_URL = os.environ.get("AIGW_ADMIN_URL", "http://aigw-run:1064")
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "gateway_backend-net")
 PORT = int(os.environ.get("PORT", "8888"))
 
@@ -237,6 +239,60 @@ def cleanup_orphaned_containers():
             log.info("Cleaned up %d orphaned inner MCP container(s)", removed)
     except Exception as e:
         log.warning("Orphan cleanup failed: %s", e)
+
+
+# --- aigw config management ---
+def read_mcp_config() -> dict:
+    """Read the aigw mcp-servers.json config file."""
+    try:
+        with open(AIGW_CONFIG_PATH, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"mcpServers": {}}
+    except Exception as e:
+        log.warning("Failed to read aigw config: %s", e)
+        return {"mcpServers": {}}
+
+
+def write_mcp_config(config: dict):
+    """Atomic write of aigw mcp-servers.json config file."""
+    tmp_path = AIGW_CONFIG_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, AIGW_CONFIG_PATH)
+
+
+def restart_aigw():
+    """Restart the aigw-run container to pick up config changes."""
+    client = get_docker_client()
+    if not client:
+        log.warning("Cannot restart aigw-run: Docker not available")
+        return
+    try:
+        container = client.containers.get(AIGW_CONTAINER_NAME)
+        container.restart(timeout=5)
+        log.info("Restarted aigw-run container")
+    except Exception as e:
+        log.warning("Failed to restart aigw-run: %s", e)
+
+
+def add_backend_to_config(service: str, url: str):
+    """Add a backend to aigw config and restart."""
+    config = read_mcp_config()
+    config.setdefault("mcpServers", {})[service] = {"url": url}
+    write_mcp_config(config)
+    restart_aigw()
+
+
+def remove_backend_from_config(service: str):
+    """Remove a backend from aigw config and restart."""
+    config = read_mcp_config()
+    servers = config.get("mcpServers", {})
+    if service in servers:
+        del servers[service]
+        write_mcp_config(config)
+        restart_aigw()
 
 
 def find_supergateway_image():
@@ -621,7 +677,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "opa": f"{OPA_URL}/health",
             "bundle_server": f"{BUNDLE_SERVER_URL}/health",
             "governance_evaluator": f"{GOVERNANCE_EVALUATOR_URL}/health",
-            "aggregator": f"{AGGREGATOR_URL}/health",
+            "aigw": f"{AIGW_ADMIN_URL}/healthz",
             "npl_engine": f"{NPL_URL}/actuator/health",
         }
         results = {}
@@ -1000,18 +1056,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             time.sleep(5)
             emit("Container ready", "done")
 
-            # Step 6: Register backend with aggregator
+            # Step 6: Register backend with AI Gateway
             backend_url = f"http://{container_name}:8000"
-            emit(f"Registering backend with aggregator...")
+            emit(f"Registering backend with AI Gateway...")
             try:
-                requests.post(
-                    f"{AGGREGATOR_URL}/backends",
-                    json={"name": service_name, "url": backend_url},
-                    timeout=10,
-                )
+                add_backend_to_config(service_name, f"{backend_url}/mcp")
                 emit(f"Registered backend: {service_name}", "done")
             except Exception as e:
-                emit(f"Aggregator registration failed: {e}", "warn")
+                emit(f"Gateway registration failed: {e}", "warn")
 
             # Step 7: Discover tools via MCP handshake
             emit("Discovering tools via MCP handshake...")
@@ -1104,10 +1156,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # Step 2: Remove the supergateway container itself
             container = client.containers.get(container_name)
             container.remove(force=True)
-            # Step 3: Remove from aggregator
+            # Step 3: Remove from AI Gateway config
             if service_name:
                 try:
-                    requests.delete(f"{AGGREGATOR_URL}/backends/{service_name}", timeout=10)
+                    remove_backend_from_config(service_name)
                 except Exception:
                     pass
             self.send_json({"ok": True})
@@ -1171,13 +1223,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return {}
         return resp.json()
 
-    # === Aggregator backends ===
+    # === Gateway backends ===
     def handle_get_backends(self):
         try:
-            resp = requests.get(f"{AGGREGATOR_URL}/backends", timeout=10)
-            self.send_json(resp.json())
+            config = read_mcp_config()
+            backends = {name: entry.get("url", "") for name, entry in config.get("mcpServers", {}).items()}
+            self.send_json(backends)
         except Exception as e:
-            self.send_error_json(502, f"Aggregator unreachable: {e}")
+            self.send_error_json(500, f"Failed to read aigw config: {e}")
 
     # === Suggestions (for form dropdowns) ===
     def handle_suggestions(self):
@@ -1302,13 +1355,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         service = params.get("service", [""])[0]
         if not service:
             return self.send_error_json(400, "service parameter required")
-        # Find backend URL from aggregator
+        # Find backend URL from aigw config
         try:
-            resp = requests.get(f"{AGGREGATOR_URL}/backends", timeout=10)
-            backends = resp.json().get("backends", resp.json()) if resp.status_code < 400 else {}
-            backend_url = backends.get(service)
-            if not backend_url:
+            config = read_mcp_config()
+            servers = config.get("mcpServers", {})
+            entry = servers.get(service)
+            if not entry:
                 return self.send_error_json(404, f"No backend for service '{service}'")
+            # aigw config stores the /mcp URL; strip /mcp suffix for _discover_tools
+            mcp_url = entry.get("url", "")
+            backend_url = mcp_url.removesuffix("/mcp")
             tools = self._discover_tools(backend_url)
             self.send_json({"service": service, "tools": tools})
         except Exception as e:
@@ -1586,7 +1642,8 @@ def main():
     log.info("MCP Gateway Dashboard starting on port %d", PORT)
     log.info("  NPL Engine:     %s", NPL_URL)
     log.info("  Keycloak:       %s", KEYCLOAK_URL)
-    log.info("  Aggregator:     %s", AGGREGATOR_URL)
+    log.info("  AIGW config:    %s", AIGW_CONFIG_PATH)
+    log.info("  AIGW container: %s", AIGW_CONTAINER_NAME)
     log.info("  Docker network: %s", DOCKER_NETWORK)
     log.info("  Docker SDK:     %s", "available" if DOCKER_AVAILABLE else "NOT AVAILABLE")
     log.info("  Static dir:     %s", STATIC_DIR)

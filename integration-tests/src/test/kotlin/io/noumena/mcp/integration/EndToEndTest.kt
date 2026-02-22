@@ -159,8 +159,8 @@ class EndToEndTest {
 
         val toolNames = tools!!.map { it.jsonObject["name"]?.jsonPrimitive?.content ?: "" }
         println("    Available tools: $toolNames")
-        assertTrue(toolNames.contains("mock-calendar.list_events"))
-        assertTrue(toolNames.contains("mock-calendar.create_event"))
+        assertTrue(toolNames.contains("mock-calendar__list_events"))
+        assertTrue(toolNames.contains("mock-calendar__create_event"))
         println("    ✓ Tools list retrieved")
     }
 
@@ -173,7 +173,7 @@ class EndToEndTest {
             header("Authorization", "Bearer $jarvisToken")
             jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(3, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(3, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
         }
 
         println("    Status: ${response.status}")
@@ -195,7 +195,7 @@ class EndToEndTest {
             header("Authorization", "Bearer $jarvisToken")
             jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(4, "tools/call", """{"name":"mock-calendar.create_event","arguments":{"title":"Test Meeting","date":"2026-02-14","time":"14:00","duration":30}}"""))
+            setBody(buildJsonRpc(4, "tools/call", """{"name":"mock-calendar__create_event","arguments":{"title":"Test Meeting","date":"2026-02-14","time":"14:00","duration":30}}"""))
         }
 
         println("    Status: ${response.status}")
@@ -220,7 +220,7 @@ class EndToEndTest {
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $aliceToken")
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(5, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(5, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
         }
 
         println("    Status: ${response.status}")
@@ -296,7 +296,7 @@ class EndToEndTest {
             header("Authorization", "Bearer $aliceToken")
             aliceSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(9, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(9, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         println("    Alice status: ${allowedResp.status}")
         assertEquals(HttpStatusCode.OK, allowedResp.status,
@@ -323,7 +323,7 @@ class EndToEndTest {
             header("Authorization", "Bearer $aliceToken")
             aliceSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(10, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(10, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         println("    Alice status: ${deniedResp.status}")
         assertEquals(HttpStatusCode.Forbidden, deniedResp.status,
@@ -357,7 +357,7 @@ class EndToEndTest {
             header("Authorization", "Bearer $jarvisToken")
             jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(11, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(11, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         assertEquals(HttpStatusCode.Forbidden, deniedResp.status)
         println("    ✓ Disabled service correctly blocked tool call")
@@ -378,7 +378,7 @@ class EndToEndTest {
             header("Authorization", "Bearer $jarvisToken")
             jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(12, "tools/call", """{"name":"mock-calendar.list_events","arguments":{"date":"2026-02-14"}}"""))
+            setBody(buildJsonRpc(12, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
         }
         assertEquals(HttpStatusCode.OK, allowedResp.status)
         println("    ✓ Disable→deny→enable→allow cycle proven E2E")

@@ -93,16 +93,16 @@ qualified_name := parsed_body.params.name if {
 	parsed_body.params.name
 }
 
-name_parts := split(qualified_name, ".") if {
+name_parts := split(qualified_name, "__") if {
 	qualified_name
-	contains(qualified_name, ".")
+	contains(qualified_name, "__")
 }
 
 service_name := name_parts[0] if {
 	name_parts
 }
 
-tool_name := concat(".", array.slice(name_parts, 1, count(name_parts))) if {
+tool_name := concat("__", array.slice(name_parts, 1, count(name_parts))) if {
 	name_parts
 }
 

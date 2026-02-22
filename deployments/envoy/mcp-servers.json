@@ -1,21 +1,10 @@
 {
   "mcpServers": {
     "duckduckgo": {
-      "url": "http://duckduckgo-mcp:8000/mcp",
-      "toolSelector": {
-        "includeRegex": [".*"]
-      }
+      "url": "http://duckduckgo-mcp:8000/mcp"
     },
-    "github": {
-      "url": "http://github-mcp:8000/mcp",
-      "toolSelector": {
-        "includeRegex": [".*"]
-      }
+    "mock-calendar": {
+      "url": "http://mock-calendar-mcp:8000/mcp"
     }
-  },
-  "listener": {
-    "address": "0.0.0.0",
-    "port": 8000,
-    "path": "/mcp"
   }
 }

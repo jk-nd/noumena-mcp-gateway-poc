@@ -146,7 +146,7 @@ case "$ACTION" in
     AUTH_TOOL="$3"
     AUTH_AGENT="$4"
     AUTH_DESC="$5"
-    bold "Creating workflow authorization: ${AUTH_SVC}.${AUTH_TOOL} for ${AUTH_AGENT}..."
+    bold "Creating workflow authorization: ${AUTH_SVC}__${AUTH_TOOL} for ${AUTH_AGENT}..."
 
     # Create ToolAuthorization instance
     AUTH_RESPONSE=$(curl -sf -X POST \
