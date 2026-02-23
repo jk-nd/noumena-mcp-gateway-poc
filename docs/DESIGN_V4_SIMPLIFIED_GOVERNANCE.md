@@ -2,15 +2,16 @@
 
 ## Status
 
-**Implemented** — Design captured 2026-02-19, implemented 2026-02-20. Updated 2026-02-23.
+**Implemented** — Design captured 2026-02-19, implemented 2026-02-20. Updated 2026-02-24.
 
 Supersedes the v3 architecture (security policy YAML, per-user grants, classifier DSL,
 contextual route groups with six policy protocols, ~1000-line OPA Rego).
 
 The v4 system is fully operational with: GatewayStore + ServiceGovernance + ApprovedRecipients
-NPL protocols, OPA Rego (~240 lines), governance evaluator sidecar, admin dashboard with
-service catalog, access rules, governance rules, approval workflows, user management,
-Docker Hub discovery, and real-time metrics panel.
+NPL protocols, OPA Rego (~490 lines), three-phase governance evaluator sidecar, admin
+dashboard with service catalog, access rules, governance rules (with auto acl→logic tag
+switching), approval workflows, user management, Docker Hub discovery, real-time metrics
+panel, and automatic orphan container cleanup.
 
 > **Implementation note**: This document uses `open`/`gated` as design-time tag names.
 > The implementation uses `acl` (= open) and `logic` (= gated) as the actual tag values.
@@ -189,6 +190,10 @@ bundle.
 
 - **`claims`**: Every key-value pair must match the caller's JWT. This is an AND within
   one rule. Multiple rules are OR'd — if any rule matches, access is granted.
+  Claim values support **comma-separated multi-values** (e.g., `"department": "sales,engineering"`)
+  — the rule matches if the caller's claim equals ANY of the listed values. This works
+  with both scalar and array-valued JWT claims (Keycloak encodes multi-valued attributes
+  as arrays).
 - **`identity`**: Matches a specific user by `email` (or `sub`) claim. Takes precedence
   alongside claim-based rules — both participate in the same OR evaluation.
 - **`services`**: List of service names. `"*"` means all services.
