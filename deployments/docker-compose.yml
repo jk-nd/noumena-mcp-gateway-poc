@@ -354,7 +354,7 @@ services:
       context: ..
       dockerfile: deployments/docker/Dockerfile.supergateway
     environment:
-      MCP_COMMAND: "docker run -i --rm mcp/duckduckgo"
+      MCP_COMMAND: "docker run -i --rm --init --label gateway.parent=gateway-duckduckgo-mcp-1 mcp/duckduckgo"
       PORT: "8000"
     volumes:
       # Docker socket for spawning MCP containers
@@ -369,7 +369,7 @@ services:
       context: ..
       dockerfile: deployments/docker/Dockerfile.supergateway
     environment:
-      MCP_COMMAND: "docker run -i --rm -e GITHUB_TOKEN mcp/github"
+      MCP_COMMAND: "docker run -i --rm --init --label gateway.parent=gateway-github-mcp-1 -e GITHUB_TOKEN mcp/github"
       PORT: "8000"
       # Credential injection at startup
       CREDENTIAL_PROXY_URL: "http://credential-proxy:9002"

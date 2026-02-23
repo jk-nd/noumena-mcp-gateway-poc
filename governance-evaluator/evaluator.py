@@ -167,7 +167,8 @@ def refresh_cache():
                 for item in ar_items:
                     instance_id = item.get("@id", "")
                     svc_name = item.get("serviceName", "")
-                    if not svc_name or not instance_id:
+                    state = item.get("@state", "active")
+                    if not svc_name or not instance_id or state != "active":
                         continue
 
                     # Fetch config, recipients, and domains
@@ -196,11 +197,17 @@ def refresh_cache():
                         )
                         domains = set(dom_resp.json()) if dom_resp.status_code < 400 else set()
 
+                        agent_id = config.get("agentIdentity", "")
+                        # Skip unconfigured bindings (no agent = not properly set up)
+                        if not agent_id:
+                            log.debug("Skipping unconfigured ApprovedRecipients for %s (no agent)", svc_name)
+                            continue
+
                         new_recipient_cache[svc_name] = {
                             "instanceId": instance_id,
                             "toolName": config.get("toolName", "send_email"),
                             "paramName": config.get("paramName", "to"),
-                            "agentIdentity": config.get("agentIdentity", ""),
+                            "agentIdentity": agent_id,
                             "approvedRecipients": recipients,
                             "approvedDomains": domains,
                         }
@@ -384,64 +391,7 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
         if not service_name:
             return self.send_json({"error": "serviceName required"}, 400)
 
-        # Check for ApprovedRecipients binding (workflow governance)
-        with _cache_lock:
-            recipient_entry = _recipient_cache.get(service_name)
-
-        if recipient_entry and tool_name == recipient_entry["toolName"]:
-            agent_id = recipient_entry.get("agentIdentity", "")
-            caller_identity = body.get("callerIdentity", "")
-
-            # If agentIdentity is set, only enforce for that specific caller
-            if agent_id and caller_identity != agent_id:
-                # Not the restricted agent — fall through to ServiceGovernance
-                pass
-            else:
-                # Parse arguments for recipient check
-                try:
-                    args = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-
-                param = recipient_entry["paramName"]
-                to_value = args.get(param, "")
-                domain = to_value.split("@")[1].lower() if "@" in to_value else ""
-
-                if domain in recipient_entry["approvedDomains"]:
-                    log.info("ApprovedRecipients allow: %s.%s — domain %s approved", service_name, tool_name, domain)
-                    return self.send_json({
-                        "decision": "allow",
-                        "requestId": "",
-                        "message": f"Internal/approved domain: {domain}",
-                    })
-                if to_value.lower() in {r.lower() for r in recipient_entry["approvedRecipients"]}:
-                    log.info("ApprovedRecipients allow: %s.%s — recipient %s approved", service_name, tool_name, to_value)
-                    return self.send_json({
-                        "decision": "allow",
-                        "requestId": "",
-                        "message": f"Approved recipient: {to_value}",
-                    })
-                log.info("ApprovedRecipients deny: %s.%s — recipient %s not approved", service_name, tool_name, to_value)
-                return self.send_json({
-                    "decision": "deny",
-                    "requestId": "",
-                    "message": f"Recipient '{to_value}' is not approved. A supervisor must approve this recipient via the NPL workflow.",
-                })
-
-        # Look up service in cache (ServiceGovernance path)
-        with _cache_lock:
-            svc_entry = _config_cache.get(service_name)
-
-        if not svc_entry:
-            # No governance instance for this service — deny (fail-closed)
-            return self.send_json({
-                "decision": "deny",
-                "requestId": "",
-                "message": f"No governance instance for service '{service_name}'",
-            })
-
-        instance_id = svc_entry["instanceId"]
-        tool_config = svc_entry["toolConfigs"].get(tool_name)
+        caller_identity = body.get("callerIdentity", "")
 
         # Parse arguments
         try:
@@ -449,61 +399,88 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, TypeError):
             arguments = {}
 
-        # If no tool config exists, auto-allow (no constraints configured)
-        if not tool_config:
-            return self.send_json({
-                "decision": "allow",
-                "requestId": "",
-                "message": "No constraints configured",
-            })
+        # --- Phase 1: Access Filters (constraints) ---
+        # These always run first regardless of workflow bindings.
+        with _cache_lock:
+            svc_entry = _config_cache.get(service_name)
 
-        # Evaluate constraints
-        constraints_pass, constraint_msg = evaluate_constraints(tool_config, arguments)
+        if svc_entry:
+            tool_config = svc_entry["toolConfigs"].get(tool_name)
+            if tool_config:
+                constraints_pass, constraint_msg = evaluate_constraints(tool_config, arguments)
+                if not constraints_pass:
+                    # Check for workflow authorization override
+                    auth = find_matching_authorization(service_name, tool_name, caller_identity)
+                    if auth:
+                        consume_authorization(auth["instanceId"])
+                        log.info("Workflow override: %s.%s by %s (auth %s: %s)",
+                                 service_name, tool_name, caller_identity,
+                                 auth["instanceId"], auth["scope"])
+                    else:
+                        log.info("Access filter denied: %s.%s — %s", service_name, tool_name, constraint_msg)
+                        return self.send_json({
+                            "decision": "deny",
+                            "requestId": "",
+                            "message": constraint_msg,
+                        })
 
-        if not constraints_pass:
-            # Check for workflow authorization override
-            auth = find_matching_authorization(
-                service_name, tool_name, body.get("callerIdentity", ""))
-            if auth:
-                consume_authorization(auth["instanceId"])
-                log.info("Workflow override: %s.%s by %s (auth %s: %s)",
-                         service_name, tool_name, body.get("callerIdentity"),
-                         auth["instanceId"], auth["scope"])
+        # --- Phase 2: Workflow Bindings (e.g. ApprovedRecipients) ---
+        with _cache_lock:
+            recipient_entry = _recipient_cache.get(service_name)
+
+        if recipient_entry and tool_name == recipient_entry["toolName"]:
+            agent_id = recipient_entry.get("agentIdentity", "")
+
+            # If agentIdentity is set, only enforce for that specific caller
+            if not agent_id or caller_identity == agent_id:
+                param = recipient_entry["paramName"]
+                to_value = arguments.get(param, "")
+                domain = to_value.split("@")[1].lower() if "@" in to_value else ""
+
+                if domain in recipient_entry["approvedDomains"]:
+                    log.info("Workflow allow: %s.%s — domain %s approved", service_name, tool_name, domain)
+                    return self.send_json({
+                        "decision": "allow",
+                        "requestId": "",
+                        "message": f"Internal/approved domain: {domain}",
+                    })
+                if to_value.lower() in {r.lower() for r in recipient_entry["approvedRecipients"]}:
+                    log.info("Workflow allow: %s.%s — recipient %s approved", service_name, tool_name, to_value)
+                    return self.send_json({
+                        "decision": "allow",
+                        "requestId": "",
+                        "message": f"Approved recipient: {to_value}",
+                    })
+                log.info("Workflow deny: %s.%s — recipient %s not approved", service_name, tool_name, to_value)
                 return self.send_json({
-                    "decision": "allow",
+                    "decision": "deny",
                     "requestId": "",
-                    "message": f"Authorized by workflow: {auth['scope']}",
+                    "message": f"Recipient '{to_value}' is not approved. A supervisor must approve this recipient.",
                 })
-            # No override — constraint violation stands
-            log.info("Constraint denied: %s.%s — %s", service_name, tool_name, constraint_msg)
-            return self.send_json({
-                "decision": "deny",
-                "requestId": "",
-                "message": constraint_msg,
-            })
 
-        # Constraints pass
-        requires_approval = tool_config.get("requiresApproval", False)
+        # --- Phase 3: Approval workflow (if configured) ---
+        if svc_entry:
+            tool_config = svc_entry["toolConfigs"].get(tool_name)
+            if tool_config:
+                requires_approval = tool_config.get("requiresApproval", False)
+                if requires_approval:
+                    try:
+                        npl_result = forward_to_npl(svc_entry["instanceId"], body)
+                        return self.send_json(npl_result)
+                    except Exception as e:
+                        log.error("NPL forward failed for %s.%s: %s", service_name, tool_name, e)
+                        return self.send_json({
+                            "decision": "deny",
+                            "requestId": "",
+                            "message": f"Governance evaluation failed: {e}",
+                        })
 
-        if not requires_approval:
-            # Auto-allow: constraints satisfied and no approval needed
-            return self.send_json({
-                "decision": "allow",
-                "requestId": "",
-                "message": "Constraints satisfied",
-            })
-
-        # Requires approval → forward to NPL
-        try:
-            npl_result = forward_to_npl(instance_id, body)
-            return self.send_json(npl_result)
-        except Exception as e:
-            log.error("NPL forward failed for %s.%s: %s", service_name, tool_name, e)
-            return self.send_json({
-                "decision": "deny",
-                "requestId": "",
-                "message": f"Governance evaluation failed: {e}",
-            })
+        # All checks passed (or no checks configured) — allow
+        return self.send_json({
+            "decision": "allow",
+            "requestId": "",
+            "message": "Allowed",
+        })
 
 
 # --- Main ---

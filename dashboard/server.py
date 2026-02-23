@@ -213,8 +213,13 @@ def get_docker_client():
         return None
 
 
+CLEANUP_INTERVAL = 60  # seconds between orphan-cleanup sweeps
+
+
 def cleanup_orphaned_containers():
-    """Remove inner MCP containers whose parent supergateway no longer exists."""
+    """Remove inner MCP containers whose parent supergateway no longer exists,
+    and remove duplicate inners when multiple exist for the same parent
+    (keep only the most recently created one)."""
     client = get_docker_client()
     if not client:
         return
@@ -224,21 +229,58 @@ def cleanup_orphaned_containers():
         if not inner:
             return
         # Build set of existing gateway container names
-        running = {c.name for c in client.containers.list(all=True)}
+        all_containers = {c.name for c in client.containers.list(all=True)}
         removed = 0
+
+        # Group inner containers by parent
+        by_parent: dict[str, list] = {}
         for c in inner:
             parent = (c.labels or {}).get("gateway.parent", "")
-            if parent and parent not in running:
-                log.info("Cleaning orphaned inner container %s (parent %s gone)", c.name, parent)
-                try:
-                    c.remove(force=True)
-                    removed += 1
-                except Exception as e:
-                    log.warning("Failed to remove orphan %s: %s", c.name, e)
+            if not parent:
+                continue
+            by_parent.setdefault(parent, []).append(c)
+
+        for parent, containers in by_parent.items():
+            if parent not in all_containers:
+                # Parent gone — remove all its inner containers
+                for c in containers:
+                    log.info("Cleaning orphaned inner container %s (parent %s gone)", c.name, parent)
+                    try:
+                        c.remove(force=True)
+                        removed += 1
+                    except Exception as e:
+                        log.warning("Failed to remove orphan %s: %s", c.name, e)
+            elif len(containers) > 1:
+                # Multiple inners for the same parent — keep only the newest
+                containers.sort(
+                    key=lambda c: c.attrs.get("Created", ""), reverse=True)
+                for c in containers[1:]:
+                    log.info("Removing duplicate inner container %s (parent %s has %d)", c.name, parent, len(containers))
+                    try:
+                        c.remove(force=True)
+                        removed += 1
+                    except Exception as e:
+                        log.warning("Failed to remove stale inner %s: %s", c.name, e)
+
         if removed:
-            log.info("Cleaned up %d orphaned inner MCP container(s)", removed)
+            log.info("Cleaned up %d orphaned/stale inner MCP container(s)", removed)
     except Exception as e:
         log.warning("Orphan cleanup failed: %s", e)
+
+
+def _start_cleanup_daemon():
+    """Run cleanup_orphaned_containers() periodically in a daemon thread."""
+    def loop():
+        while True:
+            time.sleep(CLEANUP_INTERVAL)
+            try:
+                cleanup_orphaned_containers()
+            except Exception as e:
+                log.warning("Periodic cleanup error: %s", e)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    log.info("Started inner-container cleanup daemon (every %ds)", CLEANUP_INTERVAL)
 
 
 # --- aigw config management ---
@@ -1172,7 +1214,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 sg_image,
                 name=container_name,
                 environment={
-                    "MCP_COMMAND": f"docker run -i --rm --label gateway.parent={container_name} {image}",
+                    "MCP_COMMAND": f"docker run -i --rm --init --label gateway.parent={container_name} {image}",
                     "PORT": "8000",
                 },
                 volumes={"/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}},
@@ -1767,8 +1809,9 @@ def main():
     log.info("  Docker network: %s", DOCKER_NETWORK)
     log.info("  Docker SDK:     %s", "available" if DOCKER_AVAILABLE else "NOT AVAILABLE")
     log.info("  Static dir:     %s", STATIC_DIR)
-    # Clean up orphaned inner MCP containers from previous runs
+    # Clean up orphaned inner MCP containers from previous runs, then keep cleaning
     cleanup_orphaned_containers()
+    _start_cleanup_daemon()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), DashboardHandler)
     log.info("Dashboard ready at http://localhost:%d", PORT)
     server.serve_forever()

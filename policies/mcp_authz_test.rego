@@ -768,3 +768,93 @@ test_no_pending_headers_when_allowed if {
 	not rh["x-request-id"]
 	not rh["retry-after"]
 }
+
+# ============================================================================
+# 13. Comma-separated claim values (multi-value per key in Map<Text,Text>)
+# ============================================================================
+
+# Rule with "department": "sales,engineering" should match both departments
+test_comma_claims_match_first_value if {
+	comma_rules := [
+		{
+			"id": "multi-dept",
+			"matcher": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales,engineering"}, "identity": ""},
+			"allow": {"services": ["mock-calendar"], "tools": ["*"]},
+		},
+	]
+
+	# Jarvis has department=sales → should match
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as comma_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
+
+test_comma_claims_match_second_value if {
+	comma_rules := [
+		{
+			"id": "multi-dept",
+			"matcher": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales,engineering"}, "identity": ""},
+			"allow": {"services": ["mock-calendar"], "tools": ["*"]},
+		},
+	]
+
+	# Alice has department=engineering → should match
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_alice),
+		"{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as comma_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
+
+test_comma_claims_no_match if {
+	comma_rules := [
+		{
+			"id": "multi-dept",
+			"matcher": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales,engineering"}, "identity": ""},
+			"allow": {"services": ["mock-calendar"], "tools": ["*"]},
+		},
+	]
+
+	# Unknown has department=none → should NOT match
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_unknown),
+		"{\"jsonrpc\":\"2.0\",\"id\":102,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as comma_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
+
+# Comma claims with array-valued JWT (Keycloak)
+test_comma_claims_array_jwt if {
+	comma_rules := [
+		{
+			"id": "multi-dept",
+			"matcher": {"matchType": "claims", "claims": {"organization": "acme", "department": "sales,engineering"}, "identity": ""},
+			"allow": {"services": ["mock-calendar"], "tools": ["*"]},
+		},
+	]
+
+	# Jarvis with array claims: organization=["acme"], department="sales"
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis_array_claims),
+		"{\"jsonrpc\":\"2.0\",\"id\":103,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as comma_rules
+		with revoked_subjects as mock_revoked
+		with governance_evaluator_url as mock_governance_evaluator_url
+}
