@@ -96,3 +96,68 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V13: v4 governance — GatewayStore + ServiceGovernance (three-layer model)
+  - name: mcp-13.0-v4-governance
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V14: ServiceGovernance full protocol — evaluate, approve, deny, getPendingRequests
+  - name: mcp-14.0-governance-full
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V15: Make serviceName non-private for bundle server discovery
+  - name: mcp-15.0-governance-visible-name
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V16: Governance constraints — ToolConstraint, ToolConfig, constraint CRUD,
+  #      getToolConfigs for evaluator cache, createdAt + auto-expire on PendingRequest
+  - name: mcp-16.0-governance-constraints
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V17: Multi-user approvals — add pApprover party to ServiceGovernance
+  - name: mcp-17.0-multi-user-approvals
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V18: Workflow-gated tool execution — ToolAuthorization protocol
+  - name: mcp-18.0-tool-authorization-workflow
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V19: ApprovedRecipients — workflow governance for send_email approved list
+  - name: mcp-19.0-approved-recipients
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V20: ApprovedRecipients — add agentIdentity for caller-specific enforcement
+  - name: mcp-20.0-approved-recipients-agent
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

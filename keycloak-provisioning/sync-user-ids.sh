@@ -20,7 +20,7 @@ fi
 if [ ! -f "$SERVICES_YAML" ]; then
   cp "$SERVICES_DEFAULT" "$SERVICES_YAML"
   echo "✓ Created services.yaml from default template"
-  echo "ℹ  Users list is empty - use TUI to register Keycloak users"
+  echo "ℹ  Users list is empty - use Dashboard to register Keycloak users"
 else
   echo "✓ services.yaml already exists - preserving existing configuration"
 fi

@@ -44,23 +44,24 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
 
 | Component | Role |
 |-----------|------|
-| **Envoy AI Gateway** | MCP protocol handling, JWT validation (Keycloak JWKS), routing to backends, SSE streaming |
+| **Envoy AI Gateway** | MCP protocol handling, JWT validation (Keycloak JWKS), routing to backends via aigw-run, SSE streaming, Lua response filtering (tools/list) |
 | **OPA Sidecar** | ext_authz policy evaluation via Rego; loads policy data from OPA bundles (in-memory, zero network I/O) |
-| **NPL Engine** | Policy state manager: unified PolicyStore singleton (catalog + grants + contextual routing) |
-| **Bundle Server** | Reads NPL PolicyStore, serves OPA bundles; SSE-triggered rebuild on NPL mutations |
+| **NPL Engine** | Policy state manager: GatewayStore (catalog + access rules + revocation) + ServiceGovernance (per-service workflows) |
+| **Bundle Server** | Reads NPL GatewayStore, serves OPA bundles; SSE-triggered rebuild on NPL mutations |
 | **Supergateway Sidecars** | Wrap STDIO MCP tools as Streamable HTTP endpoints |
 | **Mock Calendar MCP** | HTTP-native MCP server for bilateral streaming tests (SSE notifications) |
 | **Keycloak** | OIDC authentication provider with user/role management |
+| **Governance Evaluator** | Constraint evaluation sidecar: argument-level rules (regex, in/not_in, max_length) + NPL approval routing |
+| **Dashboard** | Admin web UI: service catalog, access rules, governance rules, approvals, user management, Docker discovery, real-time metrics |
 | **Credential Proxy** | Fetches secrets from Vault, injects into supergateway containers at startup |
 | **Vault** | Secret storage (API keys, tokens, passwords) |
-| **TUI** | Interactive CLI wizard for managing services, users, and credentials |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker & Docker Compose
-- Node.js 18+ (for TUI wizard and MCP Inspector)
+- Node.js 18+ (for MCP Inspector)
 
 ### 1. Start the Stack
 
@@ -72,27 +73,18 @@ docker compose up -d
 docker compose ps
 ```
 
-### 2. Start the TUI Wizard
+### 2. Seed the Gateway
 
 ```bash
-cd tui
-npm install
-npm start
+cd scripts
+./seed.sh
 ```
 
-Log in with admin credentials (`admin` / `Welcome123`).
+This bootstraps the GatewayStore with services, tools, access rules, and governance configuration.
 
-### 3. First-Time Setup
+### 3. Open the Dashboard
 
-The TUI guides you through:
-
-1. **NPL Bootstrap** -- Creates the PolicyStore singleton
-2. **Add a service** -- e.g., Quick Start > DuckDuckGo, or search Docker Hub
-3. **Enable the service** -- Activates it in the PolicyStore catalog
-4. **Enable tools** -- Select which tools to activate in the PolicyStore catalog
-5. **Register users** -- Add Keycloak users for gateway access
-6. **Grant tool access** -- Assign per-user tool grants in the PolicyStore
-7. **Set up credentials** (optional) -- Store API keys in Vault via TUI
+Open `http://localhost:8888` and log in with `admin` / `Welcome123`. The Dashboard provides a full admin interface for managing the service catalog, access rules, governance rules, approvals, and users.
 
 ### 4. Connect with MCP Inspector
 
@@ -110,6 +102,7 @@ npx @modelcontextprotocol/inspector
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
+| **Dashboard** | http://localhost:8888 | admin / Welcome123 |
 | Envoy Admin | http://localhost:9901 | (none) |
 | OPA API | http://localhost:8181 | (none) |
 | Keycloak Admin | http://localhost:11000 | admin / welcome |
@@ -161,9 +154,10 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 3. Envoy → OPA              ext_authz (gRPC): forwards JSON-RPC body + headers
 4. OPA                      Decodes JWT: userId=jarvis@acme.com
 5. OPA                      Parses JSON-RPC: method=tools/call, tool=duckduckgo.search
-6. OPA                      Evaluates against in-memory bundle data:
-                              - catalog: service enabled? tool enabled? not suspended?
-                              - grants: user has access to this tool?
+6. OPA                      Three-layer evaluation (in-memory bundle data):
+                              - Layer 1 (Catalog): service enabled? tool registered?
+                              - Layer 2 (Access Rules): caller matches a rule for this service/tool?
+                              - Layer 3 (NPL): if tag=logic, governance evaluator check
 7. OPA → Envoy              allow or deny (with X-OPA-Reason header)
 8. Envoy → Backend MCP      Routes to supergateway sidecar (if allowed)
 9. Backend → Envoy → Agent  SSE response streamed back
@@ -173,9 +167,11 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 
 | Request Type | Rule |
 |-------------|------|
-| `initialize`, `tools/list`, `ping`, `notifications/*` | Always allowed (non-tool methods) |
-| `GET /mcp` (stream setup) | Allowed if user has any tool grants |
-| `tools/call` | Service enabled + not suspended, tool enabled, user granted access |
+| `initialize`, `ping`, `notifications/*` | Always allowed (non-tool methods) |
+| `tools/list` | Allowed; response filtered to show only catalog-registered tools (Lua filter reads `x-visible-tools` from OPA) |
+| `GET /mcp` (stream setup) | Allowed if user has any matching access rules |
+| `tools/call` (acl tag) | Service enabled, tool in catalog, caller matches access rule |
+| `tools/call` (logic tag) | Above + governance evaluator must return allow |
 | Missing JWT or unknown user | Denied |
 
 ### Bundle Propagation
@@ -184,17 +180,26 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 - **Propagation latency**: near-instant (SSE push, not polling)
 - **No cold calls**: OPA always has data in memory after first bundle load
 
-### PolicyStore (Unified NPL Singleton)
+### GatewayStore + ServiceGovernance (v4)
 
 ```
-PolicyStore                     Single protocol, single instance
-  ├── Catalog                   Services + enabled tools (org-wide)
-  ├── Grants                    Per-user tool access (wildcard or specific)
-  ├── Revoked Subjects          Emergency kill switch
-  └── Contextual Routes         Layer 2 policy routing table (Phase 3)
+GatewayStore                    Single protocol, single instance
+  ├── Catalog                   Services + tools with acl/logic tags
+  ├── Access Rules              Claim-based and identity-based authorization
+  └── Revoked Subjects          Emergency kill switch
+
+ServiceGovernance               One instance per governed service
+  ├── Tool Configs              Per-tool constraints (regex, in/not_in, max_length)
+  ├── Pending Requests          Logic tool calls awaiting approval
+  └── Approval Settings         Per-tool approval requirements + deadlines
+
+ApprovedRecipients              Workflow governance for sensitive parameters
+  ├── Approved Recipients       Per-tool approved email addresses/domains
+  ├── Agent Identity            Caller-specific enforcement (e.g., only AI agents)
+  └── Supervisor Approval       Human-in-the-loop recipient approval workflow
 ```
 
-All policy state is managed through the PolicyStore singleton. Bundle server reads everything in 2 HTTP calls (list singleton + `getPolicyData()`), regardless of user/service count.
+Bundle server reads GatewayStore in one call (`getBundleData()`). ServiceGovernance instances are evaluated at request time by the governance evaluator for logic-tagged tools. ApprovedRecipients provides workflow governance for sensitive parameters (e.g., email recipients) with caller-specific enforcement.
 
 ## Credential Injection
 
@@ -202,7 +207,7 @@ Secrets (API keys, tokens) are stored in Vault and injected into supergateway co
 
 ### Injection Flow
 
-1. Admin stores secrets in Vault via TUI
+1. Admin stores secrets in Vault (via Vault UI or CLI)
 2. Supergateway container starts and calls Credential Proxy
 3. Credential Proxy fetches from Vault, returns injected fields
 4. Supergateway exports fields as environment variables
@@ -217,38 +222,11 @@ Secrets (API keys, tokens) are stored in Vault and injected into supergateway co
 
 See [docs/CREDENTIAL_INJECTION.md](docs/CREDENTIAL_INJECTION.md) for architecture details.
 
-## TUI Wizard
-
-The interactive CLI manages all gateway operations with atomic operations and rollback:
-
-```bash
-cd tui && npm start
-```
-
-### Capabilities
-
-- **Service management** -- Add, enable/disable, remove services (Docker Hub, NPM, custom)
-- **Tool discovery** -- Discover tools from Docker and NPM/command-based services
-- **Tool management** -- Enable/disable individual tools per service
-- **User management** -- Register/deregister Keycloak users, grant/revoke tool access
-- **Credential management** -- Create credential mappings, choose scope, store secrets in Vault
-- **Configuration management** -- View, edit, backup, import YAML config
-
-### NPL-First Operations
-
-All TUI operations that modify state follow the **NPL-first** pattern:
-
-1. Changes are written to NPL PolicyStore (source of truth) first
-2. On success, `services.yaml` is updated as a persistent cache
-3. If the NPL write fails, `services.yaml` is unchanged
-
-> **Principle**: "NPL is the source of truth. YAML is a persistent cache."
-
 ## Configuration
 
 ### services.yaml (Bootstrap Only)
 
-Defines upstream MCP services and their tools. Used by the TUI for service management and as a persistent cache of NPL state. **Not read at runtime** — OPA loads policy data from bundles built by the bundle server.
+Defines upstream MCP services and their tools. Used as a persistent cache of NPL state for bulk import/export. **Not read at runtime** — OPA loads policy data from bundles built by the bundle server.
 
 ```yaml
 services:
@@ -319,43 +297,46 @@ service_defaults:
 ```
 noumena-mcp-gateway/
 ├── policies/              # OPA Rego policies (ext_authz)
-│   ├── mcp_authz.rego     # Authorization policy: JWT decode, JSON-RPC parse, bundle data RBAC
+│   ├── mcp_authz.rego     # v4 authorization: three-layer catalog/access/governance
 │   └── mcp_authz_test.rego # Rego unit tests (opa test policies/ -v)
 │
 ├── bundle-server/          # OPA bundle server (Python)
-│   └── server.py           # Reads NPL PolicyStore, serves OPA bundles, SSE-triggered rebuild
+│   └── server.py           # Reads NPL GatewayStore, serves OPA bundles, SSE-triggered rebuild
+│
+├── dashboard/              # Admin web UI (Python + single-page HTML)
+│   ├── server.py           # API server: proxies to NPL, Keycloak, OPA, Docker, metrics
+│   └── static/index.html   # SPA: catalog, rules, approvals, users, discover, metrics
+│
+├── governance-evaluator/   # Constraint evaluation sidecar (Python)
+│   └── server.py           # Argument-level constraints + NPL approval routing
+│
 │
 ├── credential-proxy/       # Credential injection service (Kotlin/Ktor)
 │   └── src/main/kotlin/    # VaultClient, CredentialSelector
 │
-├── shared/                 # Shared config models and policy types
-│   └── src/main/kotlin/    # ServicesConfig, PolicyModels
-│
 ├── npl/                    # NPL protocol definitions
 │   └── src/main/npl-1.0/
-│       ├── policy/         # PolicyStore (unified catalog + grants + routing)
-│       └── policies/       # CredentialInjectionPolicy
-│
-├── tui/                    # Gateway Wizard (interactive CLI)
-│   └── src/
-│       ├── cli.ts          # Main wizard
-│       └── lib/            # Config, API, Docker clients
+│       ├── store/          # GatewayStore (catalog + access rules + revocation)
+│       └── governance/     # ServiceGovernance + ApprovedRecipients protocols
 │
 ├── mock-calendar-mcp/      # HTTP-native MCP server (bilateral streaming tests)
 │   └── server.js           # Express: POST /mcp + GET /mcp SSE stream
 │
 ├── configs/                # Runtime configuration
-│   ├── services.yaml       # Service definitions + user access (bootstrap/cache)
+│   ├── services.yaml       # Service definitions (bootstrap/cache)
 │   └── credentials.yaml    # Credential mappings
 │
 ├── deployments/            # Docker Compose + Envoy config
 │   ├── docker-compose.yml  # Full stack with network isolation
 │   ├── envoy/
-│   │   └── envoy-config.yaml  # Envoy static config (JWT, ext_authz → OPA, routing)
+│   │   ├── envoy-config.yaml  # Envoy static config (JWT, ext_authz → OPA, Lua filter, routing)
+│   │   └── mcp-servers.json   # aigw-run backend MCP server registry
 │   └── docker/
-│       ├── Dockerfile.supergateway   # Supergateway sidecar image
+│       ├── Dockerfile.supergateway        # Supergateway sidecar image
+│       ├── Dockerfile.dashboard           # Admin dashboard image
+│       ├── Dockerfile.governance-evaluator
 │       ├── Dockerfile.credential-proxy
-│       └── Dockerfile.mock-calendar  # HTTP-native MCP server image
+│       └── Dockerfile.mock-calendar       # HTTP-native MCP server image
 │
 ├── keycloak/               # Custom Keycloak image
 ├── keycloak-provisioning/  # Terraform for Keycloak setup
@@ -410,11 +391,12 @@ curl http://localhost:8181/v1/data
 
 | Document | Description |
 |----------|-------------|
-| [Policy Architecture v3](docs/POLICY_ARCHITECTURE_V3.md) | Two-layer architecture: OPA bundles (Layer 1) + contextual NPL evaluation (Layer 2) |
+| [Architecture Reference](docs/ARCHITECTURE.md) | Service topology, network isolation, data flow diagrams |
+| [v4 Governance Design](docs/DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) | Three-layer governance: catalog, access rules, NPL workflows |
+| [How-To Guide](docs/HOWTO.md) | Step-by-step configuration walkthrough |
+| [Approval Workflow](docs/APPROVAL_WORKFLOW.md) | Human-in-the-loop approval system deep dive |
 | [Credential Injection](docs/CREDENTIAL_INJECTION.md) | Credential injection system design and Vault integration |
-| [TUI Credential Management](docs/TUI_CREDENTIAL_MANAGEMENT.md) | Credential management via TUI |
-| [TUI Add Service Guide](docs/TUI_ADD_SERVICE_GUIDE.md) | Adding MCP services via TUI |
-| [CIQ Offer Scope](docs/CIQ_OFFER_SCOPE.md) | Phase 1/Phase 2 architecture for CIQ deployment |
+| [Security Strategy](docs/SECURITY_STRATEGY.md) | Enterprise security strategy and MCP risk framework |
 
 ## License
 

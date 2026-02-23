@@ -1,0 +1,38 @@
+package governance
+
+@api
+protocol[pUser, pGateway] ToolAuthorization() {
+    initial state pending;
+    state authorized;
+    final state consumed;
+    final state cancelled;
+
+    var serviceName: Text = "";
+    var toolName: Text = "";
+    var agentIdentity: Text = "";
+    var scope: Text = "";
+
+    // User authorizes the agent to perform a specific tool action
+    @api
+    permission[pUser] authorize(
+        svc: Text, tool: Text, agent: Text, desc: Text
+    ) | pending {
+        serviceName = svc;
+        toolName = tool;
+        agentIdentity = agent;
+        scope = desc;
+        become authorized;
+    };
+
+    // Gateway consumes the authorization after successful execution (one-shot)
+    @api
+    permission[pGateway] consume() | authorized {
+        become consumed;
+    };
+
+    // User cancels before the agent uses it
+    @api
+    permission[pUser] cancel() | authorized, pending {
+        become cancelled;
+    };
+};

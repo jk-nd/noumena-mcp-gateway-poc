@@ -20,6 +20,7 @@ volumes:
   engine-db: { }
   keycloak-db: { }
   keycloak-provisioning: { }
+  aigw-config: { }
 
 services:
   # ─────────────────────────────────────────────────────────────────────────
@@ -35,8 +36,7 @@ services:
       - ../npl/src/main/npl-1.0:/npl/npl-1.0:ro
     environment:
       ENGINE_DEV_MODE: "false"
-      # Keycloak issues tokens with iss=http://keycloak:11000/realms/mcpgateway
-      # (KC_HOSTNAME=keycloak), which the engine can resolve on the Docker network
+      # Accept tokens from both the Docker hostname and localhost issuer
       ENGINE_ALLOWED_ISSUERS: "http://keycloak:11000/realms/mcpgateway,http://localhost:11000/realms/mcpgateway"
       ENGINE_DB_URL: "jdbc:postgresql://engine-db:5432/engine"
       ENGINE_DB_USER: engine
@@ -110,7 +110,9 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 11000
       KC_HOSTNAME_STRICT: "false"
-      # Token issuer uses the Docker hostname so NPL Engine can fetch JWKS
+      # Token issuer uses Docker hostname so engine + OPA can fetch JWKS.
+      # Browser-based OAuth flows (MCP Inspector) require a hosts entry:
+      #   127.0.0.1 keycloak
       KC_HOSTNAME: keycloak
       KC_HOSTNAME_PORT: 11000
     depends_on:
@@ -218,6 +220,36 @@ services:
         condition: service_healthy
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Governance Evaluator (policy-net — constraint evaluation sidecar)
+  #
+  # Sits between OPA and NPL ServiceGovernance. Evaluates argument-level
+  # constraints (regex, contains, in/not_in, max_length) then routes to
+  # NPL for approval workflows when needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  governance-evaluator:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.governance-evaluator
+    ports:
+      - "8090:8090"
+    environment:
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      GATEWAY_USERNAME: "gateway"
+      GATEWAY_PASSWORD: "Welcome123"
+      CACHE_REFRESH_SECONDS: "30"
+      PORT: "8090"
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - policy-net
+      - public-net  # For Keycloak token requests
+
+  # ─────────────────────────────────────────────────────────────────────────
   # OPA Bundle Server (policy-net — serves NPL policy data as OPA bundle)
   #
   # Subscribes to NPL Engine SSE /api/streams/states for push notifications.
@@ -295,19 +327,19 @@ services:
       - "9901:9901"   # Envoy admin interface
     volumes:
       - ./envoy/envoy-config.yaml:/etc/envoy/envoy.yaml:ro
-      - ./envoy/mcp-servers.json:/etc/envoy/mcp-servers.json:ro
     command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
     depends_on:
       keycloak:
         condition: service_healthy
       opa:
         condition: service_started
-      mcp-aggregator:
+      aigw-run:
         condition: service_started
     networks:
-      - public-net
-      - backend-net
-      - policy-net  # For ext_authz to OPA sidecar
+      public-net:
+      backend-net:
+        ipv4_address: 172.30.0.2
+      policy-net:  # For ext_authz to OPA sidecar
 
   # ─────────────────────────────────────────────────────────────────────────
   # Backend MCP Services (supergateway sidecars)
@@ -328,7 +360,8 @@ services:
       # Docker socket for spawning MCP containers
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - backend-net
+      backend-net:
+        ipv4_address: 172.30.0.10
 
   # GitHub MCP — GitHub API access (with credential injection)
   github-mcp:
@@ -345,29 +378,45 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - backend-net
-      - secrets-net  # For credential proxy access
+      backend-net:
+        ipv4_address: 172.30.0.12
+      secrets-net:  # For credential proxy access
     profiles:
       - github  # Only enable when GitHub credentials are configured
 
   # ─────────────────────────────────────────────────────────────────────────
-  # MCP Aggregator (backend-net — multi-backend routing gateway)
-  #
-  # Sits between Envoy and backend MCP servers. Aggregates tools from all
-  # backends and routes tool calls by namespace prefix.
+  # AI Gateway Config Seed (one-shot — copies initial config into volume)
   # ─────────────────────────────────────────────────────────────────────────
-  mcp-aggregator:
-    build:
-      context: ..
-      dockerfile: deployments/docker/Dockerfile.mcp-aggregator
-    environment:
-      PORT: "8000"
-      BACKENDS: "duckduckgo:http://duckduckgo-mcp:8000,mock-calendar:http://mock-calendar-mcp:8000"
+  aigw-config-seed:
+    image: alpine:3
+    command: ["sh", "-c", "if [ ! -f /config/mcp-servers.json ]; then cp /src/mcp-servers.json /config/; fi"]
+    volumes:
+      - ./envoy/mcp-servers.json:/src/mcp-servers.json:ro
+      - aigw-config:/config
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Envoy AI Gateway (backend-net — MCP aggregation + streaming)
+  #
+  # Replaces the custom MCP aggregator with aigw-run. Provides proper
+  # streaming POST responses, SSE event ID reconstruction, and stateless
+  # encrypted session tokens.
+  #
+  # NOTE: Backend URLs in mcp-servers.json MUST use IP addresses, not
+  # Docker hostnames. aigw-run's internal Envoy Gateway (Host mode)
+  # cannot resolve Docker DNS names during xDS cluster translation.
+  # All backend services have static IPs via IPAM on backend-net.
+  # ─────────────────────────────────────────────────────────────────────────
+  aigw-run:
+    image: envoyproxy/ai-gateway-cli:latest
+    command: ["run", "--mcp-config", "/etc/aigw/mcp-servers.json", "--run-id", "0"]
+    volumes:
+      - aigw-config:/etc/aigw:ro
     depends_on:
-      - duckduckgo-mcp
-      - mock-calendar-mcp
+      aigw-config-seed:
+        condition: service_completed_successfully
     networks:
-      - backend-net
+      backend-net:
+        ipv4_address: 172.30.0.20
 
   # Mock Calendar MCP — HTTP-native Streamable HTTP (bilateral streaming)
   mock-calendar-mcp:
@@ -377,7 +426,8 @@ services:
     environment:
       PORT: "8000"
     networks:
-      - backend-net
+      backend-net:
+        ipv4_address: 172.30.0.11
 
   # ─────────────────────────────────────────────────────────────────────────
   # Integration Test Runner (on-demand)
@@ -388,7 +438,7 @@ services:
       dockerfile: integration-tests/Dockerfile
     environment:
       - NPL_URL=http://npl-engine:12000
-      - KEYCLOAK_URL=http://localhost:11000
+      - KEYCLOAK_URL=http://keycloak:11000
       - GATEWAY_URL=http://envoy-gateway:8000
     depends_on:
       npl-engine:
@@ -402,6 +452,45 @@ services:
       - policy-net
     profiles:
       - test
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Governance Dashboard (admin UI for v4 GatewayStore + ServiceGovernance)
+  # ─────────────────────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.dashboard
+    ports:
+      - "8888:8888"
+    environment:
+      NPL_URL: "http://npl-engine:12000"
+      KEYCLOAK_URL: "http://keycloak:11000"
+      KEYCLOAK_REALM: "mcpgateway"
+      ADMIN_USERNAME: "admin"
+      ADMIN_PASSWORD: "Welcome123"
+      GATEWAY_URL: "http://envoy-gateway:8000"
+      OPA_URL: "http://opa:8181"
+      BUNDLE_SERVER_URL: "http://bundle-server:8282"
+      ENVOY_ADMIN_URL: "http://envoy-gateway:9901"
+      GOVERNANCE_EVALUATOR_URL: "http://governance-evaluator:8090"
+      AIGW_CONFIG_PATH: "/aigw-config/mcp-servers.json"
+      AIGW_CONTAINER_NAME: "gateway-aigw-run-1"
+      AIGW_ADMIN_URL: "http://aigw-run:1064"
+      DOCKER_NETWORK: "gateway_backend-net"
+      PORT: "8888"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - aigw-config:/aigw-config
+    depends_on:
+      npl-engine:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      policy-net:
+      public-net:
+      backend-net:
+        ipv4_address: 172.30.0.30
 
   # CORS proxy for NPL Engine (needed for Inspector browser access)
   npl-cors-proxy:
@@ -425,3 +514,6 @@ networks:
     driver: bridge
   backend-net:
     driver: bridge
+    ipam:  # Static IPs required — aigw-run cannot resolve Docker DNS
+      config:
+        - subnet: 172.30.0.0/24

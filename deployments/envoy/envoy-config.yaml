@@ -135,6 +135,9 @@ static_resources:
                         # OAuth Authorization endpoint — redirect to Keycloak
                         # Preserves query params (client_id, redirect_uri, etc.)
                         # Must be 302 (not 301) — browsers cache 301 and break Keycloak sessions
+                        # Uses keycloak:11000 (not localhost) so cookies match the form action
+                        # hostname that Keycloak generates from KC_HOSTNAME. Requires
+                        # 127.0.0.1 keycloak in /etc/hosts for browser resolution.
                         - match:
                             path: "/authorize"
                           redirect:
@@ -282,14 +285,131 @@ static_resources:
                           requires:
                             allow_missing_or_failed: {}
 
-                  # Step 1.5: Add WWW-Authenticate header on 401 (triggers MCP OAuth flow)
+                  # Step 1.5: Response rewriting (Lua)
+                  # - 401: Add WWW-Authenticate header (triggers MCP OAuth flow)
+                  # - 403: Kept as-is; x-authz-reason header carries the denial reason.
+                  #         Lua body():setBytes() hangs on ext_authz local replies (no
+                  #         upstream body to buffer), so we don't attempt body rewriting.
                   - name: envoy.filters.http.lua
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
                       inline_code: |
+                        -- Extract individual tool objects from a JSON array using brace-depth tracking.
+                        -- Returns a list of {raw, name} where raw is the full JSON object string.
+                        function extract_tools(arr_str)
+                          local tools = {}
+                          local depth = 0
+                          local start = nil
+                          for i = 1, #arr_str do
+                            local ch = arr_str:sub(i, i)
+                            if ch == "{" then
+                              if depth == 0 then start = i end
+                              depth = depth + 1
+                            elseif ch == "}" then
+                              depth = depth - 1
+                              if depth == 0 and start then
+                                local obj = arr_str:sub(start, i)
+                                local name = obj:match('"name"%s*:%s*"([^"]+)"')
+                                tools[#tools + 1] = {raw = obj, name = name or ""}
+                                start = nil
+                              end
+                            end
+                          end
+                          return tools
+                        end
+
+                        -- Filter the tools/list JSON-RPC response body, keeping only allowed tools.
+                        function filter_tools_json(raw, allowed)
+                          -- Find "tools":[ ... ] in the response
+                          local arr_start = raw:find('"tools"%s*:%s*%[')
+                          if not arr_start then return nil end
+                          -- Find the opening bracket
+                          local bracket = raw:find("%[", arr_start)
+                          if not bracket then return nil end
+                          -- Find matching closing bracket using depth tracking
+                          local depth = 0
+                          local arr_end = nil
+                          for i = bracket, #raw do
+                            local ch = raw:sub(i, i)
+                            if ch == "[" then depth = depth + 1
+                            elseif ch == "]" then
+                              depth = depth - 1
+                              if depth == 0 then arr_end = i; break end
+                            end
+                          end
+                          if not arr_end then return nil end
+
+                          local arr_content = raw:sub(bracket + 1, arr_end - 1)
+                          local tools = extract_tools(arr_content)
+
+                          -- Keep only tools whose name is in the allowed set
+                          local kept = {}
+                          for _, t in ipairs(tools) do
+                            if allowed[t.name] then
+                              kept[#kept + 1] = t.raw
+                            end
+                          end
+
+                          local new_arr = "[" .. table.concat(kept, ",") .. "]"
+                          return raw:sub(1, bracket - 1) .. new_arr .. raw:sub(arr_end + 1)
+                        end
+
                         function envoy_on_response(response_handle)
-                          if response_handle:headers():get(":status") == "401" then
+                          local status = response_handle:headers():get(":status")
+
+                          -- Existing: 401 WWW-Authenticate
+                          if status == "401" then
                             response_handle:headers():add("WWW-Authenticate", 'Bearer resource_metadata="http://localhost:8000/.well-known/oauth-protected-resource"')
+                            return
+                          end
+
+                          -- Tools/list filtering: read x-visible-tools set by OPA
+                          local visible_csv = response_handle:headers():get("x-visible-tools")
+                          if not visible_csv then return end
+
+                          -- Remove internal header (don't leak to client)
+                          response_handle:headers():remove("x-visible-tools")
+
+                          -- Filter JSON or SSE responses containing tools/list
+                          local ct = response_handle:headers():get("content-type") or ""
+                          local is_json = ct:find("json")
+                          local is_sse = ct:find("event%-stream")
+                          if not is_json and not is_sse then return end
+
+                          -- Buffer response body
+                          local body = response_handle:body()
+                          local len = body:length()
+                          if len == 0 or len > 1048576 then return end
+
+                          local raw = body:getBytes(0, len)
+                          if not raw:find('"tools"') then return end
+
+                          -- Build allowed set from comma-separated header
+                          local allowed = {}
+                          for name in visible_csv:gmatch("[^,]+") do allowed[name] = true end
+
+                          if is_sse then
+                            -- SSE format: find "data: {json}" line and filter the JSON within
+                            local prefix, json_str, suffix = raw:match("^(.-data: )(%b{})(.*)")
+                            if json_str then
+                              local filtered = filter_tools_json(json_str, allowed)
+                              if filtered then
+                                local new_body = prefix .. filtered .. suffix
+                                body:setBytes(new_body)
+                                -- SSE uses chunked encoding; update content-length if present
+                                local cl = response_handle:headers():get("content-length")
+                                if cl then
+                                  response_handle:headers():replace("content-length", tostring(#new_body))
+                                end
+                              end
+                            end
+                          else
+                            -- Plain JSON response
+                            local filtered = filter_tools_json(raw, allowed)
+                            if filtered then
+                              body:setBytes(filtered)
+                              response_handle:headers():replace("content-length", tostring(#filtered))
+                            end
                           end
                         end
 
@@ -350,7 +470,7 @@ static_resources:
                       address: opa
                       port_value: 9191
 
-    # MCP Aggregator (multi-backend routing gateway)
+    # Envoy AI Gateway (MCP aggregation + streaming)
     - name: mcp_aggregator
       connect_timeout: 5s
       type: STRICT_DNS
@@ -362,52 +482,8 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: mcp-aggregator
-                      port_value: 8000
-
-    # Backend MCP servers (supergateway wrapping STDIO tools)
-    - name: duckduckgo_mcp
-      connect_timeout: 5s
-      type: STRICT_DNS
-      lb_policy: ROUND_ROBIN
-      load_assignment:
-        cluster_name: duckduckgo_mcp
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: duckduckgo-mcp
-                      port_value: 8000
-
-    # Mock Calendar MCP (HTTP-native, bilateral streaming)
-    - name: mock_calendar_mcp
-      connect_timeout: 5s
-      type: STRICT_DNS
-      lb_policy: ROUND_ROBIN
-      load_assignment:
-        cluster_name: mock_calendar_mcp
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: mock-calendar-mcp
-                      port_value: 8000
-
-    - name: github_mcp
-      connect_timeout: 5s
-      type: STRICT_DNS
-      lb_policy: ROUND_ROBIN
-      load_assignment:
-        cluster_name: github_mcp
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: github-mcp
-                      port_value: 8000
+                      address: aigw-run
+                      port_value: 1975
 
 admin:
   address:

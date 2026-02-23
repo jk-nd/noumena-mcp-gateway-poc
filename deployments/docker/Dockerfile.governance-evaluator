@@ -1,0 +1,14 @@
+# Governance Evaluator — constraint evaluation sidecar for Layer 3
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY governance-evaluator/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY governance-evaluator/ .
+
+EXPOSE 8090
+
+CMD ["python", "evaluator.py"]

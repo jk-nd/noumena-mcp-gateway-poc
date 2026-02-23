@@ -1,4 +1,4 @@
-# Party Automation Rules for MCP Gateway
+# Party Automation Rules for MCP Gateway (v4)
 #
 # Maps JWT claims to NPL protocol parties.
 # Party names use 'p' prefix to distinguish from JWT claim roles.
@@ -6,15 +6,12 @@
 # Hierarchy:
 # - pAdmin: Organization administrators (policy management)
 # - pGateway: Gateway system service (runtime policy enforcement)
-#
-# Note: Tool users (humans and AI) are NOT parties. They're governed by
-# grants inside the PolicyStore singleton, identified by subjectId.
 
 # ============================================================================
-# POLICY PACKAGE - Unified PolicyStore
+# V4 GOVERNANCE — GatewayStore (unified singleton for catalog + access rules)
 # ============================================================================
 
-store.PolicyStore:
+store.GatewayStore:
   pAdmin:
     set:
       claims:
@@ -27,10 +24,10 @@ store.PolicyStore:
           - gateway
 
 # ============================================================================
-# POLICIES PACKAGE - ApprovalPolicy (human-in-the-loop approval)
+# V4 GOVERNANCE — ServiceGovernance (one instance per service)
 # ============================================================================
 
-policies.ApprovalPolicy:
+governance.ServiceGovernance:
   pAdmin:
     set:
       claims:
@@ -45,18 +42,20 @@ policies.ApprovalPolicy:
     set:
       claims:
         role:
-          - admin
+          - approver
 
 # ============================================================================
-# POLICIES PACKAGE - RateLimitPolicy (automated rate limiting)
+# V4 GOVERNANCE — ToolAuthorization (workflow-gated tool execution)
 # ============================================================================
 
-policies.RateLimitPolicy:
-  pAdmin:
+governance.ToolAuthorization:
+  pUser:
     set:
       claims:
         role:
+          - user
           - admin
+          - approver
   pGateway:
     set:
       claims:
@@ -64,58 +63,10 @@ policies.RateLimitPolicy:
           - gateway
 
 # ============================================================================
-# POLICIES PACKAGE - ConstraintPolicy (tool-level budget constraints)
+# V4 GOVERNANCE — ApprovedRecipients (workflow governance for send_email)
 # ============================================================================
 
-policies.ConstraintPolicy:
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
-  pGateway:
-    set:
-      claims:
-        role:
-          - gateway
-
-# ============================================================================
-# POLICIES PACKAGE - PreconditionPolicy (system state flags)
-# ============================================================================
-
-policies.PreconditionPolicy:
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
-  pGateway:
-    set:
-      claims:
-        role:
-          - gateway
-
-# ============================================================================
-# POLICIES PACKAGE - FlowPolicy (cross-call data flow governance)
-# ============================================================================
-
-policies.FlowPolicy:
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
-  pGateway:
-    set:
-      claims:
-        role:
-          - gateway
-
-# ============================================================================
-# POLICIES PACKAGE - IdentityPolicy (identity governance)
-# ============================================================================
-
-policies.IdentityPolicy:
+governance.ApprovedRecipients:
   pAdmin:
     set:
       claims:
