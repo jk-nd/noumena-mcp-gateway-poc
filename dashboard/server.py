@@ -1520,6 +1520,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_add_constraint(self, body):
         """Add a constraint to a tool in a ServiceGovernance instance."""
         service = body.get("serviceName", "")
+        tool_name = body.get("toolName", "")
         instances = get_governance_instances()
         iid = instances.get(service)
         if not iid:
@@ -1529,7 +1530,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/addConstraint",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={
-                "toolName": body.get("toolName", ""),
+                "toolName": tool_name,
                 "paramName": body.get("paramName", ""),
                 "operator": body.get("operator", ""),
                 "values": body.get("values", []),
@@ -1537,6 +1538,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
             timeout=10,
         )
+        if resp.status_code < 400:
+            # Auto-switch tool tag to 'logic' so constraint is enforced by OPA
+            try:
+                sid = ensure_store_id()
+                self.npl_post(f"/npl/store/GatewayStore/{sid}/setTag", {
+                    "serviceName": service, "toolName": tool_name, "tag": "logic",
+                })
+            except Exception:
+                pass  # best-effort
         self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
 
     def handle_remove_constraint(self, body):

@@ -449,18 +449,13 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, TypeError):
             arguments = {}
 
-        # If no tool config exists, fall through to NPL directly (default: requires approval)
+        # If no tool config exists, auto-allow (no constraints configured)
         if not tool_config:
-            try:
-                npl_result = forward_to_npl(instance_id, body)
-                return self.send_json(npl_result)
-            except Exception as e:
-                log.error("NPL forward failed for %s.%s: %s", service_name, tool_name, e)
-                return self.send_json({
-                    "decision": "deny",
-                    "requestId": "",
-                    "message": f"Governance evaluation failed: {e}",
-                })
+            return self.send_json({
+                "decision": "allow",
+                "requestId": "",
+                "message": "No constraints configured",
+            })
 
         # Evaluate constraints
         constraints_pass, constraint_msg = evaluate_constraints(tool_config, arguments)
@@ -488,7 +483,7 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
             })
 
         # Constraints pass
-        requires_approval = tool_config.get("requiresApproval", True)
+        requires_approval = tool_config.get("requiresApproval", False)
 
         if not requires_approval:
             # Auto-allow: constraints satisfied and no approval needed

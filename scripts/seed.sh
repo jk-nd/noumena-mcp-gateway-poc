@@ -248,10 +248,7 @@ if [[ -n "$MOCK_CAL_GOV" ]]; then
       "{\"toolName\":\"${tool}\",\"tag\":\"${tag}\"}"
   done
 
-  # ── create_event: auto-allow when constraints pass ──
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setRequiresApproval" \
-    "{\"toolName\":\"create_event\",\"required\":false}"
-
+  # ── create_event: constraints ──
   # Constraint: attendees must be internal
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
     "{\"toolName\":\"create_event\",\"paramName\":\"attendees\",\"operator\":\"contains\",\"values\":[\"@acme.com\"],\"description\":\"Attendees must be Acme employees\"}"
@@ -260,10 +257,7 @@ if [[ -n "$MOCK_CAL_GOV" ]]; then
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
     "{\"toolName\":\"create_event\",\"paramName\":\"duration\",\"operator\":\"in\",\"values\":[\"15\",\"30\",\"60\",\"90\",\"120\"],\"description\":\"Meeting duration must be 15, 30, 60, 90, or 120 minutes\"}"
 
-  # ── send_email: auto-allow (ApprovedRecipients handles jarvis; humans pass through) ──
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setRequiresApproval" \
-    "{\"toolName\":\"send_email\",\"required\":false}"
-
+  # ── send_email: governed by ApprovedRecipients for jarvis; humans pass through ──
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setGovernanceDescription" \
     "{\"desc\":\"Calendar governance: create_event auto-allows with constraints (internal attendees, standard durations). send_email governed by ApprovedRecipients for jarvis; humans auto-allow.\"}"
 
@@ -273,9 +267,6 @@ fi
 if [[ -n "$DDG_GOV" ]]; then
   npl_call "${GOV_BASE}/${DDG_GOV}/registerTool" \
     "{\"toolName\":\"search\",\"tag\":\"acl\"}"
-
-  npl_call "${GOV_BASE}/${DDG_GOV}/setRequiresApproval" \
-    "{\"toolName\":\"search\",\"required\":false}"
 
   npl_call "${GOV_BASE}/${DDG_GOV}/setGovernanceDescription" \
     "{\"desc\":\"Search is a read-only action — open access, no constraints.\"}"
