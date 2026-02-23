@@ -91,13 +91,13 @@ class StoreAndForwardTest {
         storeId = NplBootstrap.ensureGatewayStore(adminToken)
         println("    ✓ GatewayStore: $storeId")
 
-        // Register mock-calendar: list_events=open, create_event=gated
+        // Register mock-calendar: list_events=acl, create_event=logic, send_email=logic
         NplBootstrap.registerServiceWithTools(
             storeId, "mock-calendar",
-            mapOf("list_events" to "open", "create_event" to "gated"),
+            mapOf("list_events" to "acl", "create_event" to "logic", "send_email" to "logic"),
             adminToken
         )
-        println("    ✓ mock-calendar registered: list_events=open, create_event=gated")
+        println("    ✓ mock-calendar registered: list_events=acl, create_event=logic, send_email=logic")
 
         // Add claim-based access rule: department=sales → mock-calendar.*
         NplBootstrap.addAccessRule(
@@ -141,29 +141,30 @@ class StoreAndForwardTest {
         assertEquals(HttpStatusCode.OK, response.status,
             "Open tools should bypass ServiceGovernance")
 
-        val body = json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val body = parseMcpResponse(response.bodyAsText())
         assertNotNull(body["result"]?.jsonObject?.get("content"))
         println("    ✓ list_events (open) allowed without governance")
     }
 
-    // ── Test 2: Gated tool → 403 + pending ────────────────────────────────
+    // ── Test 2: Logic tool → 403 + pending ──────────────────────────────
 
     @Test
     @Order(2)
-    fun `gated tool create_event returns 403 pending`() = runBlocking {
-        val params = """{"name":"mock-calendar__create_event","arguments":{"title":"Approval Test","date":"2026-02-15","time":"10:00","duration":30}}"""
+    fun `logic tool send_email returns 403 pending`() = runBlocking {
+        val params = """{"name":"mock-calendar__send_email","arguments":{"to":"colleague@acme.com","subject":"Approval Test","body":"Please review the attached proposal."}}"""
         val response = mcpPost(2, "tools/call", params)
 
         println("    Status: ${response.status}")
         assertEquals(HttpStatusCode.Forbidden, response.status,
-            "Gated tool should return 403 (pending approval via ServiceGovernance)")
+            "Logic tool (requiresApproval) should return 403 (pending approval via ServiceGovernance)")
 
         capturedRequestId = response.headers["x-request-id"]
         val retryAfter = response.headers["retry-after"]
         println("    x-request-id: $capturedRequestId")
         println("    retry-after: $retryAfter")
+        assertNotNull(capturedRequestId, "x-request-id should be present for pending decision")
 
-        println("    ✓ create_event (gated) returned 403 pending")
+        println("    ✓ send_email (logic) returned 403 pending")
     }
 
     // ── Test 3: Verify pending in ServiceGovernance ───────────────────────
@@ -192,8 +193,8 @@ class StoreAndForwardTest {
         }?.jsonObject
         assertNotNull(request, "Should find pending request with ID $capturedRequestId")
         assertEquals("pending", request!!["status"]?.jsonPrimitive?.content)
-        assertEquals("create_event", request["toolName"]?.jsonPrimitive?.content)
-        println("    ✓ Pending request verified: requestId=$capturedRequestId, tool=create_event, status=pending")
+        assertEquals("send_email", request["toolName"]?.jsonPrimitive?.content)
+        println("    ✓ Pending request verified: requestId=$capturedRequestId, tool=send_email, status=pending")
     }
 
     // ── Test 4: Approve → re-call → allowed ──────────────────────────────
@@ -216,30 +217,30 @@ class StoreAndForwardTest {
         assertTrue(approveResp.status.isSuccess(), "approve() should succeed")
         println("    ✓ Approved $requestId")
 
-        // Re-call the same gated tool → OPA calls evaluate() → returns "allow" (consumed)
-        val params = """{"name":"mock-calendar__create_event","arguments":{"title":"Approval Test","date":"2026-02-15","time":"10:00","duration":30}}"""
+        // Re-call the same tool → OPA calls evaluate() → returns "allow" (consumed)
+        val params = """{"name":"mock-calendar__send_email","arguments":{"to":"colleague@acme.com","subject":"Approval Test","body":"Please review the attached proposal."}}"""
         val response = mcpPost(4, "tools/call", params)
 
         println("    Re-call status: ${response.status}")
         assertEquals(HttpStatusCode.OK, response.status,
-            "After approval, gated tool call should succeed")
+            "After approval, logic tool call should succeed")
 
-        val body = json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val body = parseMcpResponse(response.bodyAsText())
         val content = body["result"]?.jsonObject?.get("content")?.jsonArray
         assertNotNull(content, "Should have result content")
-        println("    ✓ Approve → re-call → allowed (create_event executed)")
+        println("    ✓ Approve → re-call → allowed (send_email executed)")
     }
 
     // ── Test 5: Deny flow end-to-end ──────────────────────────────────────
 
     @Test
     @Order(5)
-    fun `deny flow - gated call denied end-to-end`() = runBlocking {
+    fun `deny flow - logic tool denied end-to-end`() = runBlocking {
         // Trigger a new pending request with different arguments
-        val params = """{"name":"mock-calendar__create_event","arguments":{"title":"Denied Meeting","date":"2026-03-01","time":"09:00","duration":60}}"""
+        val params = """{"name":"mock-calendar__send_email","arguments":{"to":"colleague@acme.com","subject":"Denied Email","body":"This should be denied."}}"""
         val triggerResp = mcpPost(5, "tools/call", params)
         assertEquals(HttpStatusCode.Forbidden, triggerResp.status)
-        println("    ✓ New gated call → 403 (pending)")
+        println("    ✓ New logic tool call → 403 (pending)")
 
         // Find the new request ID
         val pendingResp = client.post(
@@ -260,15 +261,15 @@ class StoreAndForwardTest {
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("""{"requestId": "$requestId", "reason": "Meeting not needed"}""")
+            setBody("""{"requestId": "$requestId", "reason": "Email not appropriate"}""")
         }
         assertTrue(denyResp.status.isSuccess(), "deny() should succeed")
-        println("    ✓ Denied $requestId: Meeting not needed")
+        println("    ✓ Denied $requestId: Email not appropriate")
 
         // Re-call → OPA calls evaluate() → returns "deny" → 403
         val deniedResp = mcpPost(6, "tools/call", params)
         assertEquals(HttpStatusCode.Forbidden, deniedResp.status,
-            "After denial, gated tool call should still be 403")
+            "After denial, logic tool call should still be 403")
 
         val reason = deniedResp.headers["x-authz-reason"]
         println("    Re-call status: ${deniedResp.status}, reason: $reason")

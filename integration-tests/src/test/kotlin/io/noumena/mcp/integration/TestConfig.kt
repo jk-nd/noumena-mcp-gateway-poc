@@ -113,6 +113,30 @@ fun buildJsonRpc(id: Int, method: String, params: String = "{}"): String {
 }
 
 /**
+ * Parse an MCP response body, handling both plain JSON and SSE format.
+ *
+ * aigw-run returns SSE format (text/event-stream) for non-initialize methods:
+ *   event: message
+ *   id: <uuid>
+ *   data: {"jsonrpc":"2.0",...}
+ *
+ * Initialize responses are plain JSON with content-type: application/json.
+ */
+fun parseMcpResponse(responseText: String): JsonObject {
+    val json = Json { ignoreUnknownKeys = true }
+    val trimmed = responseText.trim()
+    if (trimmed.startsWith("{")) {
+        return json.parseToJsonElement(trimmed).jsonObject
+    }
+    // SSE format — extract the first data: line
+    val dataLine = trimmed.lines()
+        .firstOrNull { it.startsWith("data: ") }
+        ?.removePrefix("data: ")
+        ?: throw IllegalArgumentException("No data: line found in SSE response: ${trimmed.take(200)}")
+    return json.parseToJsonElement(dataLine).jsonObject
+}
+
+/**
  * Idempotent NPL bootstrap helpers for v4 GatewayStore singleton (find-or-create pattern).
  *
  * GatewayStore holds:
@@ -208,6 +232,22 @@ object NplBootstrap {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"id":"$id","matchType":"$matchType","matchClaims":{$claimsJson},"matchIdentity":"$matchIdentity","allowServices":[$servicesJson],"allowTools":[$toolsJson]}""")
+            }
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Remove an access rule by ID (idempotent — ignores not-found). */
+    suspend fun removeAccessRule(storeId: String, ruleId: String, adminToken: String) {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/removeAccessRule") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"id":"$ruleId"}""")
             }
         } finally {
             client.close()

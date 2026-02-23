@@ -1,0 +1,77 @@
+package governance
+
+@api
+protocol[pAdmin, pGateway] ApprovedRecipients() {
+    initial state active;
+
+    var serviceName: Text = "";
+    var toolName: Text = "send_email";
+    var paramName: Text = "to";
+    var agentIdentity: Text = "";
+    private var approvedRecipients: Map<Text, Boolean> = mapOf<Text, Boolean>();
+    private var approvedDomains: Map<Text, Boolean> = mapOf<Text, Boolean>(
+        Pair("acme.com", true)
+    );
+
+    // --- Admin APIs (human-facing, used via NPL Inspector) ---
+
+    @api
+    permission[pAdmin] setup(name: Text, tool: Text, param: Text, agent: Text) | active {
+        require(serviceName == "", "Already initialized");
+        serviceName = name;
+        toolName = tool;
+        paramName = param;
+        agentIdentity = agent;
+        info("[ApprovedRecipients] Initialized for " + name + "." + tool + " (param: " + param + ", agent: " + agent + ")");
+    };
+
+    @api
+    permission[pAdmin] addRecipient(email: Text) | active {
+        require(serviceName != "", "Not initialized — call setup first");
+        approvedRecipients = approvedRecipients.with(email, true);
+        info("[ApprovedRecipients] Added recipient: " + email);
+    };
+
+    @api
+    permission[pAdmin] removeRecipient(email: Text) | active {
+        require(serviceName != "", "Not initialized — call setup first");
+        approvedRecipients = approvedRecipients.without(email);
+        info("[ApprovedRecipients] Removed recipient: " + email);
+    };
+
+    @api
+    permission[pAdmin] addDomain(domain: Text) | active {
+        require(serviceName != "", "Not initialized — call setup first");
+        approvedDomains = approvedDomains.with(domain, true);
+        info("[ApprovedRecipients] Added domain: " + domain);
+    };
+
+    @api
+    permission[pAdmin] removeDomain(domain: Text) | active {
+        require(serviceName != "", "Not initialized — call setup first");
+        approvedDomains = approvedDomains.without(domain);
+        info("[ApprovedRecipients] Removed domain: " + domain);
+    };
+
+    // --- Gateway APIs (evaluator-facing) ---
+
+    @api
+    permission[pGateway] getApprovedRecipients() returns Set<Text> | active {
+        return approvedRecipients.keys();
+    };
+
+    @api
+    permission[pGateway] getApprovedDomains() returns Set<Text> | active {
+        return approvedDomains.keys();
+    };
+
+    @api
+    permission[pGateway] getConfig() returns Map<Text, Text> | active {
+        return mapOf<Text, Text>(
+            Pair("serviceName", serviceName),
+            Pair("toolName", toolName),
+            Pair("paramName", paramName),
+            Pair("agentIdentity", agentIdentity)
+        );
+    };
+}

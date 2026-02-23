@@ -62,7 +62,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .panel-desc { font-size: 13px; color: var(--text3); margin-top: 2px; }
 
 /* Cards & tables */
-.card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); backdrop-filter: blur(16px); padding: 20px; margin-bottom: 16px; transition: border-color 0.2s; }
+.card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); backdrop-filter: blur(16px); padding: 20px; margin-bottom: 16px; overflow: hidden; transition: border-color 0.2s; }
 .card:hover { border-color: rgba(255, 255, 255, 0.12); }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
@@ -75,6 +75,7 @@ th { text-align: left; padding: 8px 14px; font-size: 11px; font-weight: 600; col
 td { padding: 10px 14px; border-bottom: 1px solid var(--glass-border); color: var(--text2); }
 tr:hover td { background: var(--glass-hover); }
 td:first-child { color: var(--text); }
+.table-wrap { overflow-x: auto; }
 
 /* Tags */
 .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -367,7 +368,7 @@ td:first-child { color: var(--text); }
 
     <!-- Catalog -->
     <div class="panel" id="panel-catalog">
-      <div class="panel-header"><div><div class="panel-title">Service Catalog</div><div class="panel-desc">Services and tools with governance tags. <strong>ACL</strong> = access rules sufficient. <strong>Logic</strong> = business logic / governance rules also apply.</div></div>
+      <div class="panel-header"><div><div class="panel-title">Service Catalog</div><div class="panel-desc">Services and tools with governance tags. <strong>Auto-Allow</strong> = access rules sufficient. <strong>Governed</strong> = workflow protocol enforces additional rules.</div></div>
         <div style="display:flex;gap:8px;align-items:center">
           <div class="view-toggle">
             <button class="view-btn active" id="viewCards" onclick="setCatalogView('cards')" title="Card view">&#9638;</button>
@@ -385,9 +386,10 @@ td:first-child { color: var(--text); }
 
     <!-- Governance Rules -->
     <div class="panel" id="panel-gov-rules">
-      <div class="panel-header"><div><div class="panel-title">Governance Rules</div><div class="panel-desc">Argument-level constraints for logic-gated tools. Define rules like "only search these domains" or "max 500 character queries."</div></div>
+      <div class="panel-header"><div><div class="panel-title">Governance Rules</div><div class="panel-desc">Workflow protocols and argument constraints for governed tools.</div></div>
         <button class="btn btn-primary" onclick="openRuleWizard()">+ New Rule</button>
       </div>
+      <div id="protocolBindings"></div>
       <div id="constraintsList"></div>
     </div>
 
@@ -401,14 +403,13 @@ td:first-child { color: var(--text); }
 
     <!-- Approvals -->
     <div class="panel" id="panel-approvals">
-      <div class="panel-header"><div><div class="panel-title">Pending Approvals</div><div class="panel-desc">Logic-gated tool calls awaiting human decision</div></div></div>
+      <div class="panel-header"><div><div class="panel-title">Pending Approvals</div><div class="panel-desc">Governed tool calls awaiting human decision</div></div></div>
       <div id="approvalsList"></div>
     </div>
 
     <!-- Revoked -->
     <div class="panel" id="panel-revoked">
-      <div class="panel-header"><div><div class="panel-title">Revoked Subjects</div><div class="panel-desc">Emergency access revocation</div></div>
-        <button class="btn btn-danger" onclick="showRevokeModal()">+ Revoke Subject</button>
+      <div class="panel-header"><div><div class="panel-title">Revoked Subjects</div><div class="panel-desc">Emergency access revocation <span class="tag tag-pending" style="margin-left:6px;font-size:10px">Coming Soon</span></div></div>
       </div>
       <div class="card"><div id="revokedList"></div></div>
     </div>
@@ -449,7 +450,7 @@ td:first-child { color: var(--text); }
 
 <script>
 /* === State === */
-let state = { status: {}, bundle: {}, approvals: [], users: [], governance: {}, backends: {}, suggestions: {}, constraints: {} };
+let state = { status: {}, bundle: {}, approvals: [], users: [], governance: {}, backends: {}, suggestions: {}, constraints: {}, protocols: [] };
 let currentUser = null;
 let countdown = 30;
 let discoverTab = 'docker';
@@ -536,11 +537,23 @@ async function fetchGovernance() { try { state.governance = (await api('GET', '/
 async function fetchBackends() { try { state.backends = (await api('GET', '/api/backends')).backends || {}; } catch(e) { state.backends = {}; } }
 async function fetchSuggestions() { try { state.suggestions = await api('GET', '/api/suggestions'); } catch(e) {} }
 async function fetchConstraints() { try { state.constraints = (await api('GET', '/api/constraints')).configs || {}; } catch(e) { state.constraints = {}; } }
+async function fetchProtocols() { try { state.protocols = (await api('GET', '/api/governance/protocols')).protocols || []; } catch(e) { state.protocols = []; } }
 
 async function refreshAll() {
   countdown = 30;
-  await Promise.all([fetchStatus(), fetchBundle(), fetchApprovals(), fetchUsers(), fetchGovernance(), fetchBackends(), fetchSuggestions(), fetchConstraints()]);
+  await Promise.all([fetchStatus(), fetchBundle(), fetchApprovals(), fetchUsers(), fetchGovernance(), fetchBackends(), fetchSuggestions(), fetchConstraints(), fetchProtocols()]);
   renderAll();
+}
+
+/* === Protocol helpers === */
+function getProtocolBinding(serviceName, toolName) {
+  for (const p of (state.protocols || [])) {
+    if (p.type === 'ApprovedRecipients' && p.serviceName === serviceName && p.toolName === toolName) return p;
+  }
+  return null;
+}
+function getServiceProtocols(serviceName) {
+  return (state.protocols || []).filter(p => p.serviceName === serviceName);
 }
 
 /* === Rendering === */
@@ -600,6 +613,7 @@ function renderCatalog() {
     <div style="max-height:300px;overflow-y:auto">${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
     ${tools.map(([t,info]) => {
       const isLogic = info.tag === 'logic';
+      const proto = getProtocolBinding(name, t);
       const svcConstraints = state.constraints[name] || [];
       const toolCfg = Array.isArray(svcConstraints) ? svcConstraints.find(c => c.toolName === t) : null;
       const cCount = toolCfg ? (toolCfg.constraints||[]).length : 0;
@@ -608,11 +622,13 @@ function renderCatalog() {
         const toolMatch = (r.allow?.tools||[]).includes('*') || (r.allow?.tools||[]).includes(t);
         return svcMatch && toolMatch;
       }).length;
+      // Protocol-aware tag label
+      let govLabel, govBg, govColor;
+      if (!isLogic) { govLabel = 'AUTO-ALLOW'; govBg = 'var(--green-dim)'; govColor = 'var(--green)'; }
+      else if (proto) { govLabel = 'APPROVED RECIPIENTS'; govBg = 'var(--amber-dim)'; govColor = 'var(--amber)'; }
+      else { govLabel = 'APPROVAL REQUIRED'; govBg = 'var(--amber-dim)'; govColor = 'var(--amber)'; }
       return `<div class="tool-row"><span class="tool-name"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3)">${esc(t)}</a></span><div class="tool-badges">${ruleCount?`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent)">${ruleCount} access</span>`:''}</div><div class="tool-actions">
-      <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${isLogic?'var(--amber-dim)':'rgba(255,255,255,0.04)'};color:${isLogic?'var(--amber)':'var(--text3)'}">${cCount} gov</span>
-      <label class="toggle-label" title="${isLogic?'Governance enabled — click to disable':'Governance disabled — click to enable'}">
-        <label class="toggle"><input type="checkbox" ${isLogic?'checked':''} onchange="toggleTagUpdate(this,'${esc(name)}','${esc(t)}')" /><span class="toggle-slider"></span></label>
-      </label>
+      <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${govBg};color:${govColor}">${govLabel}</span>
       <button class="btn btn-sm btn-danger" onclick="confirmRemoveTool('${esc(name)}','${esc(t)}')" style="padding:4px 8px" title="Remove tool">&#10005;</button>
     </div></div>`;
     }).join('')}</div>
@@ -670,18 +686,20 @@ function renderCatalogList() {
       html += `<table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>`;
       for (const [t, info] of tools) {
         const isLogic = info.tag === 'logic';
-        const svcC = state.constraints[name] || [];
-        const toolCfg = Array.isArray(svcC) ? svcC.find(c => c.toolName === t) : null;
-        const cCount = toolCfg ? (toolCfg.constraints||[]).length : 0;
+        const proto = getProtocolBinding(name, t);
         const ruleCount = (state.bundle.accessRules || []).filter(r => {
           const svcMatch = (r.allow?.services||[]).includes('*') || (r.allow?.services||[]).includes(name);
           const toolMatch = (r.allow?.tools||[]).includes('*') || (r.allow?.tools||[]).includes(t);
           return svcMatch && toolMatch;
         }).length;
+        let govLabel, govBg, govColor;
+        if (!isLogic) { govLabel = 'AUTO-ALLOW'; govBg = 'var(--green-dim)'; govColor = 'var(--green)'; }
+        else if (proto) { govLabel = 'APPROVED RECIPIENTS'; govBg = 'var(--amber-dim)'; govColor = 'var(--amber)'; }
+        else { govLabel = 'APPROVAL REQUIRED'; govBg = 'var(--amber-dim)'; govColor = 'var(--amber)'; }
         html += `<tr style="border-top:1px solid var(--glass-border)">
           <td style="padding:8px 16px 8px 42px;color:var(--text);width:35%"><a href="#" onclick="showToolDetailModal('${esc(name)}','${esc(t)}');return false;" style="color:var(--text);text-decoration:none;border-bottom:1px dotted var(--text3);font-family:'SF Mono','Fira Code',monospace">${esc(t)}</a></td>
           <td style="padding:8px 12px;width:15%">${ruleCount?`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent)">${ruleCount} access</span>`:''}</td>
-          <td style="padding:8px 12px;width:30%"><label class="toggle-label" style="justify-content:flex-start;gap:8px"><span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${isLogic?'var(--amber-dim)':'rgba(255,255,255,0.04)'};color:${isLogic?'var(--amber)':'var(--text3)'}">${cCount} gov</span><label class="toggle"><input type="checkbox" ${isLogic?'checked':''} onchange="toggleTagUpdate(this,'${esc(name)}','${esc(t)}')" /><span class="toggle-slider"></span></label></label></td>
+          <td style="padding:8px 12px;width:30%"><span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${govBg};color:${govColor}">${govLabel}</span></td>
           <td style="padding:8px 16px 8px 8px;text-align:right;width:10%"><button class="btn btn-sm btn-danger" onclick="confirmRemoveTool('${esc(name)}','${esc(t)}')" style="padding:4px 8px">&#10005;</button></td>
         </tr>`;
       }
@@ -765,10 +783,7 @@ function renderApprovals() {
 }
 
 function renderRevoked() {
-  const subjects = state.bundle.revokedSubjects || [];
-  if (!subjects.length) { document.getElementById('revokedList').innerHTML = '<div class="empty"><div class="empty-icon">&#10003;</div><div class="empty-text">No revoked subjects</div></div>'; return; }
-  document.getElementById('revokedList').innerHTML = `<table><tr><th>Subject</th><th></th></tr>
-    ${subjects.map(s => `<tr><td>${esc(s)}</td><td><button class="btn btn-sm btn-success" onclick="reinstateSubject('${esc(s)}')">Reinstate</button></td></tr>`).join('')}</table>`;
+  document.getElementById('revokedList').innerHTML = '<div class="empty"><div class="empty-icon">&#128274;</div><div class="empty-text">Subject revocation is not yet available in the dashboard.<br><span style="color:var(--text3);font-size:12px">Use the NPL API directly for emergency revocation.</span></div></div>';
 }
 
 function renderUsers() {
@@ -807,16 +822,12 @@ function showDeleteServiceModal(name, toolCount) {
   setTimeout(() => document.getElementById('deleteConfirmInput')?.focus(), 100);
 }
 async function toggleTag(s,t,tag) {
-  if(tag==='acl'&&!confirm(`Set "${t}" to ACL? It will no longer go through governance logic.`))return;
+  if(tag==='acl'&&!confirm(`Set "${t}" to Auto-Allow? It will no longer require governance.`))return;
   // Auto-create governance instance when first tool is set to logic
   if(tag==='logic' && !state.governance[s]) {
     try { await api('POST','/api/governance/create',{serviceName:s}); } catch(e) { /* may already exist */ }
   }
-  await act(()=>api('POST','/api/tools/set-tag',{serviceName:s,toolName:t,tag}), `${t} set to ${tag}`);
-}
-function toggleTagUpdate(cb, svc, tool) {
-  const newTag = cb.checked ? 'logic' : 'acl';
-  toggleTag(svc, tool, newTag);
+  await act(()=>api('POST','/api/tools/set-tag',{serviceName:s,toolName:t,tag}), `${t} set to ${tag === 'logic' ? 'governed' : 'auto-allow'}`);
 }
 async function removeTool(s,t) { await act(()=>api('POST','/api/tools/remove',{serviceName:s,toolName:t}), 'Tool removed'); }
 function confirmRemoveTool(s,t) {
@@ -1400,8 +1411,39 @@ function renderConstraints() {
   Object.values(allConstraints).forEach(cfgs => {
     if (Array.isArray(cfgs)) cfgs.forEach(c => { totalCount += (c.constraints||[]).length; });
   });
-  if (totalCount > 0) { badge.textContent = totalCount; badge.style.display = 'inline'; }
+  // Include protocol bindings in badge count
+  const arProtocols = (state.protocols || []).filter(p => p.type === 'ApprovedRecipients');
+  const badgeTotal = totalCount + arProtocols.length;
+  if (badgeTotal > 0) { badge.textContent = badgeTotal; badge.style.display = 'inline'; }
   else { badge.style.display = 'none'; }
+
+  // Render protocol bindings section
+  const pbEl = document.getElementById('protocolBindings');
+  if (pbEl) {
+    if (arProtocols.length) {
+      let pbHtml = '<h4 style="font-size:13px;color:var(--text3);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.05em">Workflow Protocol Bindings</h4>';
+      for (const p of arProtocols) {
+        const rCount = (p.approvedRecipients || []).length;
+        const dCount = (p.approvedDomains || []).length;
+        pbHtml += `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="svc-name">${esc(p.serviceName)}.${esc(p.toolName)}</span>
+              <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">APPROVED RECIPIENTS</span>
+            </div>
+          </div>
+          <div style="font-size:12px;color:var(--text2)">
+            <span style="margin-right:16px">${dCount} approved domain${dCount!==1?'s':''}</span>
+            <span>${rCount} approved recipient${rCount!==1?'s':''}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">Manage via NPL Inspector</div>
+        </div>`;
+      }
+      pbEl.innerHTML = pbHtml;
+    } else {
+      pbEl.innerHTML = '';
+    }
+  }
 
   const entries = Object.entries(allConstraints);
   if (!entries.length || totalCount === 0) {
@@ -1420,7 +1462,7 @@ function renderConstraints() {
       const orphTag = (svcOrph || toolOrph) ? ` <span class="tag tag-inactive" title="Will reactivate if service/tool is re-added to catalog">inactive</span>` : '';
       html += `<div class="card"><div class="svc-header"><div style="display:flex;align-items:center;gap:8px">
         <span class="svc-name">${esc(svc)}.${esc(cfg.toolName)}</span>
-        <span class="tag ${reqApproval?'tag-logic':'tag-acl'}">${reqApproval?'approval required':'auto-allow'}</span>${orphTag}
+        ${reqApproval?'<span class="tag tag-logic">approval required</span>':''}${orphTag}
       </div><div style="display:flex;gap:6px">
         <button class="btn btn-sm btn-ghost" onclick="toggleToolApproval('${esc(svc)}','${esc(cfg.toolName)}',${!reqApproval})">${reqApproval?'Set Auto-Allow':'Require Approval'}</button>
         <button class="btn btn-sm btn-danger" onclick="clearToolConstraints('${esc(svc)}','${esc(cfg.toolName)}')">Clear All</button>
@@ -1540,7 +1582,7 @@ function renderWizardStep2() {
     const sel = wizardState.tool === t.name ? 'selected' : '';
     const params = Object.keys((t.inputSchema || {}).properties || {});
     return `<div class="selectable-card ${sel}" onclick="wizardSelectTool('${esc(t.name)}')">
-      <div class="sc-title" style="display:flex;align-items:center;gap:8px">${esc(t.name)} <span class="tag ${t.tag==='logic'?'tag-logic':'tag-acl'}" style="font-size:10px">${t.tag}</span></div>
+      <div class="sc-title" style="display:flex;align-items:center;gap:8px">${esc(t.name)} ${t.tag==='logic'?'<span class="tag tag-logic" style="font-size:10px">approval required</span>':''}</div>
       ${t.description ? `<div class="sc-desc">${esc(t.description)}</div>` : ''}
       ${params.length ? `<div class="sc-meta">Parameters: ${params.map(p => `<code>${esc(p)}</code>`).join(', ')}</div>` : '<div class="sc-meta">No parameters</div>'}
     </div>`;
@@ -1768,48 +1810,93 @@ function showToolDetailModal(service, toolName) {
   }
   html += `</div></div>`;
 
-  // Governance section — interactive
-  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
-  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Governance (${constraints.length} constraint${constraints.length!==1?'s':''})</h4>`;
-  html += `<div style="display:flex;gap:8px;align-items:center">`;
-  if (toolCfg) {
-    html += `<button class="btn btn-sm ${reqApproval?'btn-success':'btn-ghost'}" onclick="toggleApprovalInToolContext('${esc(service)}','${esc(toolName)}',${!reqApproval})" title="${reqApproval?'Click to set auto-allow':'Click to require approval'}">${reqApproval?'approval required':'auto-allow'}</button>`;
-  }
-  html += `<button class="btn btn-sm btn-ghost" onclick="showAddConstraintInline('${esc(service)}','${esc(toolName)}')">+ Add Constraint</button>`;
-  html += `</div></div>`;
-  if (constraints.length) {
-    for (const c of constraints) {
-      html += `<div class="constraint-card" style="margin-bottom:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div class="constraint-desc" style="font-size:13px">${esc(c.description||'No description')}</div>
-          <button class="btn-icon" onclick="removeConstraintInToolContext('${esc(service)}','${esc(toolName)}','${esc(c.paramName)}')" title="Remove constraint">&#10005;</button>
-        </div>
-        <div class="constraint-detail" style="font-size:12px;color:var(--text2);margin-top:4px">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
-      </div>`;
-    }
-  } else {
-    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:16px">No governance constraints defined for this tool</div>`;
-  }
+  // Governance section — protocol-aware
+  const proto = getProtocolBinding(service, toolName);
 
-  // Inline add constraint form (hidden by default)
-  html += `<div id="addConstraintForm" style="display:none;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px">
-    <h4 style="font-size:13px;margin-bottom:12px">Add Constraint</h4>
-    <div class="form-row">
-      <div class="form-group"><label>Parameter</label><input id="cParamName" placeholder="e.g. attendees" /></div>
-      <div class="form-group"><label>Operator</label><select id="cOperator">
-        <option value="in">in</option><option value="notIn">notIn</option>
-        <option value="eq">eq</option><option value="neq">neq</option>
-        <option value="lt">lt</option><option value="lte">lte</option>
-        <option value="gt">gt</option><option value="gte">gte</option>
-      </select></div>
-    </div>
-    <div class="form-group" style="margin-bottom:12px"><label>Values (comma-separated)</label><input id="cValues" placeholder="e.g. @acme.com, @partner.com" /></div>
-    <div class="form-group" style="margin-bottom:12px"><label>Description</label><input id="cDesc" placeholder="e.g. Only internal meetings" /></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('addConstraintForm').style.display='none'">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="submitInlineConstraint('${esc(service)}','${esc(toolName)}')">Add Constraint</button>
-    </div>
-  </div>`;
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+  html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Governance</h4>`;
+  html += `</div>`;
+
+  if (tag === 'acl') {
+    // No governance — offer to enable
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:12px;padding:16px;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);text-align:center">
+      <div style="margin-bottom:8px">This tool has no governance protocol.</div>
+      <div style="display:flex;gap:8px;justify-content:center">
+        <button class="btn btn-sm btn-primary" onclick="enableGovernanceForTool('${esc(service)}','${esc(toolName)}','ServiceGovernance')">Enable Manual Approval</button>
+        <button class="btn btn-sm btn-ghost" onclick="enableGovernanceForTool('${esc(service)}','${esc(toolName)}','ApprovedRecipients')">Bind Approved Recipients</button>
+      </div>
+    </div>`;
+  } else if (proto) {
+    // ApprovedRecipients binding
+    html += `<div style="background:var(--amber-dim);border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px">`;
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--amber-dim);color:var(--amber);text-transform:uppercase;letter-spacing:0.04em">Approved Recipients</span>
+      <button class="btn btn-sm btn-ghost" onclick="unbindProtocolFromTool('${esc(service)}','${esc(toolName)}','${esc(proto.instanceId)}')">Unbind Protocol</button>
+    </div>`;
+    html += `<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Checks <code style="font-size:11px">${esc(proto.paramName||'to')}</code> against approved recipients/domains. Manage the list via NPL Inspector.</div>`;
+    // Approved domains
+    const domains = proto.approvedDomains || [];
+    html += `<div style="margin-bottom:6px"><span style="font-size:11px;font-weight:600;color:var(--text3)">Approved Domains (${domains.length}):</span>`;
+    if (domains.length) {
+      html += ` ${domains.map(d => `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:var(--green-dim);color:var(--green);margin-left:4px">@${esc(d)}</span>`).join('')}`;
+    } else {
+      html += ` <span style="font-size:11px;color:var(--text3)">none</span>`;
+    }
+    html += `</div>`;
+    // Approved recipients
+    const recipients = proto.approvedRecipients || [];
+    html += `<div><span style="font-size:11px;font-weight:600;color:var(--text3)">Approved Recipients (${recipients.length}):</span>`;
+    if (recipients.length) {
+      html += ` ${recipients.map(r => `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent);margin-left:4px">${esc(r)}</span>`).join('')}`;
+    } else {
+      html += ` <span style="font-size:11px;color:var(--text3)">none</span>`;
+    }
+    html += `</div>`;
+    html += `</div>`;
+  } else {
+    // ServiceGovernance (existing behavior)
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+    html += `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--amber-dim);color:var(--amber);text-transform:uppercase;letter-spacing:0.04em">Manual Approval</span>`;
+    html += `<div style="display:flex;gap:8px;align-items:center">`;
+    if (toolCfg) {
+      html += `<button class="btn btn-sm ${reqApproval?'btn-success':'btn-ghost'}" onclick="toggleApprovalInToolContext('${esc(service)}','${esc(toolName)}',${!reqApproval})" title="${reqApproval?'Click to set auto-allow':'Click to require approval'}">${reqApproval?'approval required':'auto-allow'}</button>`;
+    }
+    html += `<button class="btn btn-sm btn-ghost" onclick="showAddConstraintInline('${esc(service)}','${esc(toolName)}')">+ Add Constraint</button>`;
+    html += `</div></div>`;
+    if (constraints.length) {
+      for (const c of constraints) {
+        html += `<div class="constraint-card" style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div class="constraint-desc" style="font-size:13px">${esc(c.description||'No description')}</div>
+            <button class="btn-icon" onclick="removeConstraintInToolContext('${esc(service)}','${esc(toolName)}','${esc(c.paramName)}')" title="Remove constraint">&#10005;</button>
+          </div>
+          <div class="constraint-detail" style="font-size:12px;color:var(--text2);margin-top:4px">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
+        </div>`;
+      }
+    } else {
+      html += `<div style="color:var(--text3);font-size:13px;margin-bottom:12px">No constraints defined</div>`;
+    }
+
+    // Inline add constraint form (hidden by default)
+    html += `<div id="addConstraintForm" style="display:none;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px">
+      <h4 style="font-size:13px;margin-bottom:12px">Add Constraint</h4>
+      <div class="form-row">
+        <div class="form-group"><label>Parameter</label><input id="cParamName" placeholder="e.g. attendees" /></div>
+        <div class="form-group"><label>Operator</label><select id="cOperator">
+          <option value="in">in</option><option value="notIn">notIn</option>
+          <option value="eq">eq</option><option value="neq">neq</option>
+          <option value="lt">lt</option><option value="lte">lte</option>
+          <option value="gt">gt</option><option value="gte">gte</option>
+        </select></div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px"><label>Values (comma-separated)</label><input id="cValues" placeholder="e.g. @acme.com, @partner.com" /></div>
+      <div class="form-group" style="margin-bottom:12px"><label>Description</label><input id="cDesc" placeholder="e.g. Only internal meetings" /></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('addConstraintForm').style.display='none'">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="submitInlineConstraint('${esc(service)}','${esc(toolName)}')">Add Constraint</button>
+      </div>
+    </div>`;
+  }
 
   html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="_currentToolContext=null;closeModal()">Close</button></div>`;
   showModal(html);
@@ -1969,6 +2056,39 @@ async function submitInlineConstraint(service, toolName) {
   } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
 }
 
+/* === Protocol Binding === */
+async function enableGovernanceForTool(service, toolName, protocolType) {
+  try {
+    // Set tag to logic
+    await api('POST', '/api/tools/set-tag', { serviceName: service, toolName: toolName, tag: 'logic' });
+
+    if (protocolType === 'ApprovedRecipients') {
+      // Create ApprovedRecipients binding
+      await api('POST', '/api/governance/bind-recipients', { serviceName: service, toolName: toolName, paramName: 'to' });
+      toast('Approved Recipients protocol bound', 'success');
+    } else {
+      // Ensure ServiceGovernance instance exists
+      if (!state.governance[service]) {
+        await api('POST', '/api/governance/create', { serviceName: service });
+      }
+      toast('Manual approval enabled', 'success');
+    }
+    await refreshAll();
+    showToolDetailModal(service, toolName);
+  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+}
+
+async function unbindProtocolFromTool(service, toolName, instanceId) {
+  if (!confirm(`Unbind the Approved Recipients protocol from ${service}.${toolName}? The tool will revert to manual approval.`)) return;
+  try {
+    // We can't delete NPL instances, but we revert the tag to acl to disable governance
+    await api('POST', '/api/tools/set-tag', { serviceName: service, toolName: toolName, tag: 'acl' });
+    toast('Protocol unbound — tool set to auto-allow', 'success');
+    await refreshAll();
+    showToolDetailModal(service, toolName);
+  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+}
+
 /* === User Access View === */
 function computeUserAccess(user) {
   const rules = state.bundle.accessRules || [];
@@ -2038,7 +2158,7 @@ function showUserAccessModal(userId) {
     for (const svc of access) {
       html += `<div class="card" style="margin-bottom:12px"><div class="svc-header"><span class="svc-name">${esc(svc.service)}</span></div>`;
       for (const tool of svc.tools) {
-        html += `<div class="tool-row"><span class="tool-name">${esc(tool.name)}</span><span class="tag ${tool.tag==='logic'?'tag-logic':'tag-acl'}">${tool.tag}</span></div>`;
+        html += `<div class="tool-row"><span class="tool-name">${esc(tool.name)}</span>${tool.tag==='logic'?'<span class="tag tag-logic">approval required</span>':''}</div>`;
       }
       html += `<div style="margin-top:8px;font-size:12px;color:var(--text3)">Granted by: ${svc.rules.map(r => `<span class="tag ${(r.matcher?.matchType||'claims')==='claims'?'tag-claims':'tag-identity'}" style="font-size:10px">${esc(r.id)}</span>`).join(' ')}</div></div>`;
     }
@@ -2154,7 +2274,8 @@ function renderGovMetrics(m) {
   const g = m.governance_evaluator || {};
   if (g.error) return `<div style="color:var(--text3);padding:8px">Governance evaluator unreachable: ${esc(g.error)}</div>`;
   return metricItem('Status', g.status || 'ok', {color:'var(--green)'})
-    + metricItem('Cached Services', g.cached_services != null ? g.cached_services : '—');
+    + metricItem('Cached Services', g.cached_services != null ? g.cached_services : '—')
+    + metricItem('Recipient Bindings', g.recipient_bindings != null ? g.recipient_bindings : '—');
 }
 
 function renderAggMetrics(m) {

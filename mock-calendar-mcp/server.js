@@ -102,10 +102,32 @@ const TOOLS = [
       required: ['to', 'subject', 'body'],
     },
   },
+  {
+    name: 'generate_report',
+    description: 'Generate a multi-step calendar analytics report (streams progress via SSE)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        period: { type: 'string', description: 'Report period: "week", "month", or "quarter"' },
+      },
+      required: ['period'],
+    },
+  },
 ];
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(express.json());
+
+// ── Helper: send JSON-RPC response as SSE or plain JSON ────────────────────
+function sendJsonRpc(req, res, data) {
+  const accept = req.headers.accept || '';
+  if (accept.includes('text/event-stream')) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write(`event: message\ndata: ${JSON.stringify(data)}\n\n`);
+    return res.end();
+  }
+  return res.json(data);
+}
 
 // ── POST /mcp — JSON-RPC request handler ───────────────────────────────────
 app.post('/mcp', (req, res) => {
@@ -125,7 +147,7 @@ app.post('/mcp', (req, res) => {
       console.log(`[session ${sessionId}] initialized`);
 
       res.setHeader('Mcp-Session-Id', sessionId);
-      return res.json({
+      return sendJsonRpc(req, res, {
         jsonrpc: '2.0',
         id,
         result: {
@@ -137,14 +159,14 @@ app.post('/mcp', (req, res) => {
     }
 
     case 'notifications/initialized': {
-      // Client acknowledges initialization — no response needed for notifications
+      // Client acknowledges initialization — return 202 Accepted per MCP Streamable HTTP spec
       console.log(`[session ${sessionId || 'unknown'}] client initialized`);
-      return res.status(204).send();
+      return res.status(202).send();
     }
 
     case 'tools/list': {
       if (sessionId) res.setHeader('Mcp-Session-Id', sessionId);
-      return res.json({
+      return sendJsonRpc(req, res, {
         jsonrpc: '2.0',
         id,
         result: { tools: TOOLS },
@@ -153,8 +175,14 @@ app.post('/mcp', (req, res) => {
 
     case 'tools/call': {
       if (sessionId) res.setHeader('Mcp-Session-Id', sessionId);
+
+      // generate_report streams multiple SSE events (progress + final result)
+      if (params?.name === 'generate_report') {
+        return handleStreamingReport(req, res, id, params.arguments || {});
+      }
+
       const result = handleToolCall(params);
-      return res.json({
+      return sendJsonRpc(req, res, {
         jsonrpc: '2.0',
         id,
         result,
@@ -191,7 +219,7 @@ app.get('/mcp', (req, res) => {
   // Send initial keepalive
   res.write(': keepalive\n\n');
 
-  // Push mock notifications every 10 seconds
+  // Push mock notifications every 2 seconds (fast enough for integration tests)
   let notifIndex = 0;
   const interval = setInterval(() => {
     const message = NOTIFICATION_MESSAGES[notifIndex % NOTIFICATION_MESSAGES.length];
@@ -208,7 +236,7 @@ app.get('/mcp', (req, res) => {
     res.write(`event: message\ndata: ${JSON.stringify(notification)}\n\n`);
     console.log(`[SSE] sent notification: ${message}`);
     notifIndex++;
-  }, 10000);
+  }, 2000);
 
   // Cleanup on disconnect
   req.on('close', () => {
@@ -222,6 +250,68 @@ app.get('/mcp', (req, res) => {
 app.get('/health', (_req, res) => {
   res.json({ status: 'healthy', service: 'mock-calendar-mcp' });
 });
+
+// ── Streaming report handler (multi-event SSE response) ───────────────────
+function handleStreamingReport(req, res, id, args) {
+  const period = args.period || 'week';
+  const steps = [
+    `Analyzing ${period} calendar data...`,
+    `Processing ${MOCK_EVENTS.length} events...`,
+    `Calculating meeting load and availability...`,
+    `Generating recommendations...`,
+  ];
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  // Build progress notifications and final result, then stream them
+  const totalHours = MOCK_EVENTS.reduce((sum, e) => {
+    const start = new Date(e.start);
+    const end = new Date(e.end);
+    return sum + (end - start) / 3600000;
+  }, 0);
+  const report = {
+    period,
+    totalEvents: MOCK_EVENTS.length,
+    totalMeetingHours: totalHours.toFixed(1),
+    busiestDay: '2026-02-13',
+    recommendation: totalHours > 4
+      ? 'Consider blocking focus time — meeting load is high.'
+      : 'Meeting load is manageable.',
+  };
+
+  let step = 0;
+  const sendNext = () => {
+    if (step < steps.length) {
+      const notification = {
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+        params: { level: 'info', logger: 'report-generator', data: steps[step] },
+      };
+      res.write(`event: message\ndata: ${JSON.stringify(notification)}\n\n`);
+      console.log(`[stream] progress: ${steps[step]}`);
+      step++;
+      setTimeout(sendNext, 150);
+    } else {
+      // Send final result (with id — this is the JSON-RPC response)
+      const result = {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(report, null, 2) }],
+        },
+      };
+      res.write(`event: message\ndata: ${JSON.stringify(result)}\n\n`);
+      console.log(`[stream] report complete`);
+      res.end();
+    }
+  };
+  // Start streaming immediately
+  sendNext();
+}
 
 // ── Tool call handler ──────────────────────────────────────────────────────
 function handleToolCall(params) {
@@ -299,6 +389,12 @@ function handleToolCall(params) {
         ],
       };
     }
+
+    case 'generate_report':
+      // Non-streaming fallback (streaming is handled separately in tools/call)
+      return {
+        content: [{ type: 'text', text: 'Report generation requires streaming (Accept: text/event-stream)' }],
+      };
 
     default:
       return {

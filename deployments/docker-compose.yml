@@ -336,9 +336,10 @@ services:
       aigw-run:
         condition: service_started
     networks:
-      - public-net
-      - backend-net
-      - policy-net  # For ext_authz to OPA sidecar
+      public-net:
+      backend-net:
+        ipv4_address: 172.30.0.2
+      policy-net:  # For ext_authz to OPA sidecar
 
   # ─────────────────────────────────────────────────────────────────────────
   # Backend MCP Services (supergateway sidecars)
@@ -359,7 +360,8 @@ services:
       # Docker socket for spawning MCP containers
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - backend-net
+      backend-net:
+        ipv4_address: 172.30.0.10
 
   # GitHub MCP — GitHub API access (with credential injection)
   github-mcp:
@@ -376,8 +378,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - backend-net
-      - secrets-net  # For credential proxy access
+      backend-net:
+        ipv4_address: 172.30.0.12
+      secrets-net:  # For credential proxy access
     profiles:
       - github  # Only enable when GitHub credentials are configured
 
@@ -397,18 +400,23 @@ services:
   # Replaces the custom MCP aggregator with aigw-run. Provides proper
   # streaming POST responses, SSE event ID reconstruction, and stateless
   # encrypted session tokens.
+  #
+  # NOTE: Backend URLs in mcp-servers.json MUST use IP addresses, not
+  # Docker hostnames. aigw-run's internal Envoy Gateway (Host mode)
+  # cannot resolve Docker DNS names during xDS cluster translation.
+  # All backend services have static IPs via IPAM on backend-net.
   # ─────────────────────────────────────────────────────────────────────────
   aigw-run:
-    image: envoyproxy/ai-gateway-cli:v0.5.0
-    command: ["run", "--mcp-config", "/etc/aigw/mcp-servers.json"]
+    image: envoyproxy/ai-gateway-cli:latest
+    command: ["run", "--mcp-config", "/etc/aigw/mcp-servers.json", "--run-id", "0"]
     volumes:
       - aigw-config:/etc/aigw:ro
     depends_on:
-      - aigw-config-seed
-      - duckduckgo-mcp
-      - mock-calendar-mcp
+      aigw-config-seed:
+        condition: service_completed_successfully
     networks:
-      - backend-net
+      backend-net:
+        ipv4_address: 172.30.0.20
 
   # Mock Calendar MCP — HTTP-native Streamable HTTP (bilateral streaming)
   mock-calendar-mcp:
@@ -418,7 +426,8 @@ services:
     environment:
       PORT: "8000"
     networks:
-      - backend-net
+      backend-net:
+        ipv4_address: 172.30.0.11
 
   # ─────────────────────────────────────────────────────────────────────────
   # Integration Test Runner (on-demand)
@@ -429,7 +438,7 @@ services:
       dockerfile: integration-tests/Dockerfile
     environment:
       - NPL_URL=http://npl-engine:12000
-      - KEYCLOAK_URL=http://localhost:11000
+      - KEYCLOAK_URL=http://keycloak:11000
       - GATEWAY_URL=http://envoy-gateway:8000
     depends_on:
       npl-engine:
@@ -478,9 +487,10 @@ services:
       keycloak:
         condition: service_healthy
     networks:
-      - policy-net
-      - public-net
-      - backend-net
+      policy-net:
+      public-net:
+      backend-net:
+        ipv4_address: 172.30.0.30
 
   # CORS proxy for NPL Engine (needed for Inspector browser access)
   npl-cors-proxy:
@@ -504,3 +514,6 @@ networks:
     driver: bridge
   backend-net:
     driver: bridge
+    ipam:  # Static IPs required — aigw-run cannot resolve Docker DNS
+      config:
+        - subnet: 172.30.0.0/24

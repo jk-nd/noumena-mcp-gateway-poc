@@ -94,13 +94,15 @@ class EndToEndTest {
         storeId = NplBootstrap.ensureGatewayStore(adminToken)
         println("    ✓ GatewayStore: $storeId")
 
-        // Register mock-calendar with tools: list_events=open, create_event=gated
+        // Register mock-calendar with tools using OPA policy tags:
+        //   acl = auto-allow (catalog + access rules sufficient)
+        //   logic = requires NPL governance evaluation
         NplBootstrap.registerServiceWithTools(
             storeId, "mock-calendar",
-            mapOf("list_events" to "open", "create_event" to "gated"),
+            mapOf("list_events" to "acl", "create_event" to "logic"),
             adminToken
         )
-        println("    ✓ mock-calendar registered: list_events=open, create_event=gated")
+        println("    ✓ mock-calendar registered: list_events=acl, create_event=logic")
 
         // Add claim-based access rule: department=sales → mock-calendar.*
         NplBootstrap.addAccessRule(
@@ -111,6 +113,11 @@ class EndToEndTest {
             adminToken = adminToken
         )
         println("    ✓ Access rule: department=sales → mock-calendar.*")
+
+        // Remove the seed-data "engineering-calendar" rule that would let Alice
+        // (department=engineering) access mock-calendar — tests need her denied.
+        NplBootstrap.removeAccessRule(storeId, "engineering-calendar", adminToken)
+        println("    ✓ Removed engineering-calendar access rule (Alice must be denied)")
 
         // Wait for SSE-triggered bundle rebuild
         println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for OPA bundle rebuild via SSE...")
@@ -132,7 +139,7 @@ class EndToEndTest {
         println("    Status: ${response.status}")
         assertEquals(HttpStatusCode.OK, response.status, "Initialize should succeed")
 
-        val body = json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val body = parseMcpResponse(response.bodyAsText())
         assertEquals("2.0", body["jsonrpc"]?.jsonPrimitive?.content)
         assertNotNull(body["result"]?.jsonObject?.get("serverInfo"))
 
@@ -153,7 +160,7 @@ class EndToEndTest {
 
         assertEquals(HttpStatusCode.OK, response.status, "tools/list should succeed")
 
-        val body = json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val body = parseMcpResponse(response.bodyAsText())
         val tools = body["result"]?.jsonObject?.get("tools")?.jsonArray
         assertNotNull(tools)
 
@@ -179,65 +186,48 @@ class EndToEndTest {
         println("    Status: ${response.status}")
         assertEquals(HttpStatusCode.OK, response.status, "Open tool should be allowed for authorized user")
 
-        val body = json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val body = parseMcpResponse(response.bodyAsText())
         val content = body["result"]?.jsonObject?.get("content")?.jsonArray
         assertNotNull(content)
         assertTrue(content!!.isNotEmpty())
         println("    ✓ list_events (open) allowed for jarvis (sales)")
     }
 
-    // ── Gated tool: create_event → 403 + x-request-id ────────────────────
+    // ── Logic tool: send_email → 403 + x-request-id (requires approval) ──
 
     @Test
     @Order(4)
-    fun `gated tool create_event returns 403 with request-id`() = runBlocking {
+    fun `logic tool send_email returns 403 with request-id`() = runBlocking {
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $jarvisToken")
             jarvisSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(4, "tools/call", """{"name":"mock-calendar__create_event","arguments":{"title":"Test Meeting","date":"2026-02-14","time":"14:00","duration":30}}"""))
+            // send_email has requiresApproval=true → governance returns "pending" → 403
+            setBody(buildJsonRpc(4, "tools/call", """{"name":"mock-calendar__send_email","arguments":{"to":"colleague@acme.com","subject":"Test Meeting","body":"Can we meet tomorrow?"}}"""))
         }
 
         println("    Status: ${response.status}")
         assertEquals(HttpStatusCode.Forbidden, response.status,
-            "Gated tool should return 403 (pending approval)")
+            "Logic tool (requiresApproval) should return 403 (pending approval)")
 
         val requestId = response.headers["x-request-id"]
         val retryAfter = response.headers["retry-after"]
         println("    x-request-id: $requestId")
         println("    retry-after: $retryAfter")
-
-        // x-request-id should be present (from NPL ServiceGovernance pending response)
-        // Note: this depends on ServiceGovernance instance existing and evaluate() returning pending
-        println("    ✓ create_event (gated) returned 403")
-    }
-
-    // ── Alice denied at Layer 2 (no matching access rule) ─────────────────
-
-    @Test
-    @Order(5)
-    fun `OPA denies tool call for user without matching access rule`() = runBlocking {
-        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
-            header("Authorization", "Bearer $aliceToken")
-            contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(5, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
-        }
-
-        println("    Status: ${response.status}")
-        assertEquals(HttpStatusCode.Forbidden, response.status,
-            "OPA should deny: alice (engineering) has no matching access rule for mock-calendar")
-        println("    ✓ Alice denied at Layer 2 (no matching access rule)")
+        assertNotNull(requestId, "x-request-id should be present for pending governance decision")
+        println("    ✓ send_email (logic, requiresApproval) returned 403 pending")
     }
 
     // ── Non-tool-call methods still allowed ───────────────────────────────
+    // Alice must initialize first — aigw-run requires a valid session for all methods.
 
     @Test
-    @Order(6)
+    @Order(5)
     fun `OPA allows initialize for user without tool access`() = runBlocking {
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $aliceToken")
             contentType(ContentType.Application.Json)
-            setBody(buildJsonRpc(6, "initialize", """{"protocolVersion":"2024-11-05","clientInfo":{"name":"test-client","version":"1.0.0"},"capabilities":{}}"""))
+            setBody(buildJsonRpc(5, "initialize", """{"protocolVersion":"2024-11-05","clientInfo":{"name":"test-client","version":"1.0.0"},"capabilities":{}}"""))
         }
 
         assertEquals(HttpStatusCode.OK, response.status,
@@ -246,11 +236,30 @@ class EndToEndTest {
         println("    ✓ Alice allowed for initialize (non-tool-call bypass)")
     }
 
+    // ── Alice denied at Layer 2 (no matching access rule) ─────────────────
+
+    @Test
+    @Order(6)
+    fun `OPA denies tool call for user without matching access rule`() = runBlocking {
+        val response = client.post("${TestConfig.gatewayUrl}/mcp") {
+            header("Authorization", "Bearer $aliceToken")
+            aliceSessionId?.let { header("Mcp-Session-Id", it) }
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonRpc(6, "tools/call", """{"name":"mock-calendar__list_events","arguments":{"date":"2026-02-14"}}"""))
+        }
+
+        println("    Status: ${response.status}")
+        assertEquals(HttpStatusCode.Forbidden, response.status,
+            "OPA should deny: alice (engineering) has no matching access rule for mock-calendar")
+        println("    ✓ Alice denied at Layer 2 (no matching access rule)")
+    }
+
     @Test
     @Order(7)
     fun `OPA allows tools list for user without access rules`() = runBlocking {
         val response = client.post("${TestConfig.gatewayUrl}/mcp") {
             header("Authorization", "Bearer $aliceToken")
+            aliceSessionId?.let { header("Mcp-Session-Id", it) }
             contentType(ContentType.Application.Json)
             setBody(buildJsonRpc(7, "tools/list"))
         }

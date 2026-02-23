@@ -145,3 +145,19 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V19: ApprovedRecipients — workflow governance for send_email approved list
+  - name: mcp-19.0-approved-recipients
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V20: ApprovedRecipients — add agentIdentity for caller-specific enforcement
+  - name: mcp-20.0-approved-recipients-agent
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

@@ -482,6 +482,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self.handle_get_users()
             if path == "/api/governance":
                 return self.handle_get_governance()
+            if path == "/api/governance/protocols":
+                return self.handle_get_protocols()
             if path == "/api/dockerhub/search":
                 return self.handle_dockerhub_search(params)
             if path == "/api/registry/search":
@@ -555,6 +557,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/approvals/approve": self.handle_approve,
             "/api/approvals/deny": self.handle_deny,
             "/api/governance/create": self.handle_create_governance,
+            "/api/governance/bind-recipients": self.handle_bind_recipients,
+            "/api/governance/unbind-recipients": self.handle_unbind_recipients,
             "/api/docker/pull": self.handle_docker_pull,
             "/api/docker/wire": self.handle_docker_wire,
             "/api/docker/stop": self.handle_docker_stop,
@@ -812,6 +816,132 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"ok": True, "instanceId": instance_id})
 
+    # === Governance Protocols ===
+    def handle_get_protocols(self):
+        """Discover all governance protocol instances across all protocol types."""
+        protocols = []
+        token = get_admin_token()
+        gw_token = _get_gateway_token()
+
+        # ServiceGovernance instances
+        try:
+            resp = requests.get(
+                f"{NPL_URL}/npl/governance/ServiceGovernance/",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if resp.status_code < 400:
+                for item in resp.json().get("items", []):
+                    svc = item.get("serviceName", "")
+                    iid = item.get("@id", "")
+                    if svc and iid:
+                        protocols.append({
+                            "type": "ServiceGovernance",
+                            "instanceId": iid,
+                            "serviceName": svc,
+                        })
+        except Exception as e:
+            log.warning("Failed to list ServiceGovernance instances: %s", e)
+
+        # ApprovedRecipients instances
+        try:
+            resp = requests.get(
+                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if resp.status_code < 400:
+                for item in resp.json().get("items", []):
+                    iid = item.get("@id", "")
+                    svc = item.get("serviceName", "")
+                    if not iid or not svc:
+                        continue
+                    entry = {
+                        "type": "ApprovedRecipients",
+                        "instanceId": iid,
+                        "serviceName": svc,
+                        "toolName": item.get("toolName", "send_email"),
+                        "paramName": item.get("paramName", "to"),
+                        "agentIdentity": item.get("agentIdentity", ""),
+                    }
+                    # Fetch recipients and domains
+                    try:
+                        r_resp = requests.post(
+                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{iid}/getApprovedRecipients",
+                            headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
+                            json={}, timeout=10,
+                        )
+                        entry["approvedRecipients"] = r_resp.json() if r_resp.status_code < 400 else []
+                    except Exception:
+                        entry["approvedRecipients"] = []
+                    try:
+                        d_resp = requests.post(
+                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{iid}/getApprovedDomains",
+                            headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
+                            json={}, timeout=10,
+                        )
+                        entry["approvedDomains"] = d_resp.json() if d_resp.status_code < 400 else []
+                    except Exception:
+                        entry["approvedDomains"] = []
+                    protocols.append(entry)
+        except Exception as e:
+            log.warning("Failed to list ApprovedRecipients instances: %s", e)
+
+        self.send_json({"protocols": protocols})
+
+    def handle_bind_recipients(self, body):
+        """Create and setup an ApprovedRecipients instance for a service/tool."""
+        svc = body.get("serviceName", "")
+        tool = body.get("toolName", "send_email")
+        param = body.get("paramName", "to")
+        agent = body.get("agentIdentity", "")
+        if not svc:
+            return self.send_error_json(400, "serviceName required")
+
+        token = get_admin_token()
+        # Check if binding already exists
+        try:
+            resp = requests.get(
+                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if resp.status_code < 400:
+                for item in resp.json().get("items", []):
+                    if item.get("serviceName") == svc:
+                        return self.send_json({"ok": True, "instanceId": item["@id"], "existing": True})
+        except Exception:
+            pass
+
+        # Create new instance
+        try:
+            resp = requests.post(
+                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"@parties": {}}, timeout=10,
+            )
+            resp.raise_for_status()
+            instance_id = resp.json()["@id"]
+
+            # Call setup with agent identity
+            requests.post(
+                f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/setup",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"name": svc, "tool": tool, "param": param, "agent": agent}, timeout=10,
+            )
+            self.send_json({"ok": True, "instanceId": instance_id})
+        except Exception as e:
+            self.send_error_json(500, f"Failed to create ApprovedRecipients: {e}")
+
+    def handle_unbind_recipients(self, body):
+        """Remove an ApprovedRecipients binding (archive the protocol instance)."""
+        instance_id = body.get("instanceId", "")
+        if not instance_id:
+            return self.send_error_json(400, "instanceId required")
+        # NPL doesn't support deletion, but we can note this is a no-op for now
+        # In practice the evaluator just won't find a matching binding if the protocol is archived
+        self.send_json({"ok": True, "message": "Protocol unbinding is not yet supported. Remove the tool's 'logic' tag to disable governance."})
+
     # === Approvals ===
     def handle_get_approvals(self):
         instances = get_governance_instances()
@@ -1057,7 +1187,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             emit("Container ready", "done")
 
             # Step 6: Register backend with AI Gateway
-            backend_url = f"http://{container_name}:8000"
+            # Use container IP (not hostname) because aigw-run's internal
+            # Envoy Gateway Host mode cannot resolve Docker DNS names.
+            container_info = client.containers.get(container_name)
+            container_ip = container_info.attrs["NetworkSettings"]["Networks"][DOCKER_NETWORK]["IPAddress"]
+            backend_url = f"http://{container_ip}:8000"
             emit(f"Registering backend with AI Gateway...")
             try:
                 add_backend_to_config(service_name, f"{backend_url}/mcp")
@@ -1073,40 +1207,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 emit(f"Tool discovery failed (service may need configuration): {e}", "warn")
 
-            # Step 8: Register service + tools in GatewayStore
+            # Step 8: Register service + tools in GatewayStore (default to acl)
             emit("Registering in governance catalog...")
             sid = ensure_store_id()
             self.npl_post(f"/npl/store/GatewayStore/{sid}/registerService", {"serviceName": service_name})
             self.npl_post(f"/npl/store/GatewayStore/{sid}/enableService", {"serviceName": service_name})
             for tool in tools:
                 self.npl_post(f"/npl/store/GatewayStore/{sid}/registerTool", {
-                    "serviceName": service_name, "toolName": tool["name"], "tag": "logic",
+                    "serviceName": service_name, "toolName": tool["name"], "tag": "acl",
                 })
-            emit(f"Registered {service_name} with {len(tools)} tools (all gated) in catalog", "done")
-
-            # Step 9: Auto-create governance instance for approval workflow
-            emit("Creating governance instance...")
-            try:
-                token = get_admin_token()
-                instances = get_governance_instances()
-                if service_name not in instances:
-                    resp = requests.post(
-                        f"{NPL_URL}/npl/governance/ServiceGovernance/",
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json={"@parties": {}}, timeout=10,
-                    )
-                    resp.raise_for_status()
-                    instance_id = resp.json()["@id"]
-                    requests.post(
-                        f"{NPL_URL}/npl/governance/ServiceGovernance/{instance_id}/setup",
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json={"name": service_name}, timeout=10,
-                    )
-                    emit(f"Governance enabled for {service_name}", "done")
-                else:
-                    emit("Governance already active", "done")
-            except Exception as e:
-                emit(f"Governance creation failed: {e}", "warn")
+            emit(f"Registered {service_name} with {len(tools)} tools in catalog (auto-allow)", "done")
 
             # Final success message
             emit(f"Service \"{service_name}\" wired successfully!", "complete")

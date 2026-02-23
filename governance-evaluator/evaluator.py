@@ -81,10 +81,14 @@ _config_cache: dict[str, dict] = {}
 # Each entry: {instanceId, serviceName, toolName, agentIdentity, scope}
 _auth_cache: list[dict] = []
 
+# Cache: serviceName → ApprovedRecipients binding
+# {instanceId, toolName, paramName, approvedRecipients: set, approvedDomains: set}
+_recipient_cache: dict[str, dict] = {}
+
 
 def refresh_cache():
-    """Fetch all ServiceGovernance instances and their tool configs, plus ToolAuthorizations."""
-    global _config_cache, _auth_cache
+    """Fetch all ServiceGovernance instances and their tool configs, plus ToolAuthorizations and ApprovedRecipients."""
+    global _config_cache, _auth_cache, _recipient_cache
     try:
         headers = auth_header()
 
@@ -150,14 +154,71 @@ def refresh_cache():
         except Exception as e:
             log.warning("Failed to fetch ToolAuthorization instances: %s", e)
 
+        # Discover ApprovedRecipients instances
+        new_recipient_cache: dict[str, dict] = {}
+        try:
+            ar_resp = requests.get(
+                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
+                headers=headers,
+                timeout=10,
+            )
+            if ar_resp.status_code < 400:
+                ar_items = ar_resp.json().get("items", [])
+                for item in ar_items:
+                    instance_id = item.get("@id", "")
+                    svc_name = item.get("serviceName", "")
+                    if not svc_name or not instance_id:
+                        continue
+
+                    # Fetch config, recipients, and domains
+                    try:
+                        cfg_resp = requests.post(
+                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/getConfig",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={},
+                            timeout=10,
+                        )
+                        config = cfg_resp.json() if cfg_resp.status_code < 400 else {}
+
+                        recip_resp = requests.post(
+                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/getApprovedRecipients",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={},
+                            timeout=10,
+                        )
+                        recipients = set(recip_resp.json()) if recip_resp.status_code < 400 else set()
+
+                        dom_resp = requests.post(
+                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/getApprovedDomains",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={},
+                            timeout=10,
+                        )
+                        domains = set(dom_resp.json()) if dom_resp.status_code < 400 else set()
+
+                        new_recipient_cache[svc_name] = {
+                            "instanceId": instance_id,
+                            "toolName": config.get("toolName", "send_email"),
+                            "paramName": config.get("paramName", "to"),
+                            "agentIdentity": config.get("agentIdentity", ""),
+                            "approvedRecipients": recipients,
+                            "approvedDomains": domains,
+                        }
+                    except Exception as e:
+                        log.warning("Failed to fetch ApprovedRecipients data for %s: %s", svc_name, e)
+        except Exception as e:
+            log.warning("Failed to fetch ApprovedRecipients instances: %s", e)
+
         with _cache_lock:
             _config_cache = new_cache
             _auth_cache = new_auth_cache
+            _recipient_cache = new_recipient_cache
         log.info(
-            "Cache refreshed: %d services, %d tool configs, %d workflow authorizations",
+            "Cache refreshed: %d services, %d tool configs, %d workflow authorizations, %d recipient bindings",
             len(new_cache),
             sum(len(v["toolConfigs"]) for v in new_cache.values()),
             len(new_auth_cache),
+            len(new_recipient_cache),
         )
     except Exception as e:
         log.error("Cache refresh failed: %s", e)
@@ -302,7 +363,8 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             with _cache_lock:
                 svc_count = len(_config_cache)
-            self.send_json({"status": "healthy", "cached_services": svc_count})
+                recipient_count = len(_recipient_cache)
+            self.send_json({"status": "healthy", "cached_services": svc_count, "recipient_bindings": recipient_count})
         else:
             self.send_json({"error": "Not found"}, 404)
 
@@ -322,7 +384,51 @@ class EvaluatorHandler(BaseHTTPRequestHandler):
         if not service_name:
             return self.send_json({"error": "serviceName required"}, 400)
 
-        # Look up service in cache
+        # Check for ApprovedRecipients binding (workflow governance)
+        with _cache_lock:
+            recipient_entry = _recipient_cache.get(service_name)
+
+        if recipient_entry and tool_name == recipient_entry["toolName"]:
+            agent_id = recipient_entry.get("agentIdentity", "")
+            caller_identity = body.get("callerIdentity", "")
+
+            # If agentIdentity is set, only enforce for that specific caller
+            if agent_id and caller_identity != agent_id:
+                # Not the restricted agent — fall through to ServiceGovernance
+                pass
+            else:
+                # Parse arguments for recipient check
+                try:
+                    args = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+
+                param = recipient_entry["paramName"]
+                to_value = args.get(param, "")
+                domain = to_value.split("@")[1].lower() if "@" in to_value else ""
+
+                if domain in recipient_entry["approvedDomains"]:
+                    log.info("ApprovedRecipients allow: %s.%s — domain %s approved", service_name, tool_name, domain)
+                    return self.send_json({
+                        "decision": "allow",
+                        "requestId": "",
+                        "message": f"Internal/approved domain: {domain}",
+                    })
+                if to_value.lower() in {r.lower() for r in recipient_entry["approvedRecipients"]}:
+                    log.info("ApprovedRecipients allow: %s.%s — recipient %s approved", service_name, tool_name, to_value)
+                    return self.send_json({
+                        "decision": "allow",
+                        "requestId": "",
+                        "message": f"Approved recipient: {to_value}",
+                    })
+                log.info("ApprovedRecipients deny: %s.%s — recipient %s not approved", service_name, tool_name, to_value)
+                return self.send_json({
+                    "decision": "deny",
+                    "requestId": "",
+                    "message": f"Recipient '{to_value}' is not approved. A supervisor must approve this recipient via the NPL workflow.",
+                })
+
+        # Look up service in cache (ServiceGovernance path)
         with _cache_lock:
             svc_entry = _config_cache.get(service_name)
 

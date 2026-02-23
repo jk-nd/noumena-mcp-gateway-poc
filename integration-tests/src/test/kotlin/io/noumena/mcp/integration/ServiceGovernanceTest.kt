@@ -74,20 +74,20 @@ class ServiceGovernanceTest {
     @Test
     @Order(1)
     fun `register tools with tags`() = runBlocking {
-        callAdmin("registerTool", """{"toolName": "read_data", "tag": "open"}""")
-        callAdmin("registerTool", """{"toolName": "write_data", "tag": "gated"}""")
-        println("    ✓ Registered tools: read_data=open, write_data=gated")
+        callAdmin("registerTool", """{"toolName": "read_data", "tag": "acl"}""")
+        callAdmin("registerTool", """{"toolName": "write_data", "tag": "logic"}""")
+        println("    ✓ Registered tools: read_data=acl, write_data=logic")
     }
 
     @Test
     @Order(2)
     fun `set tag changes tool governance`() = runBlocking {
-        callAdmin("setTag", """{"toolName": "read_data", "tag": "gated"}""")
-        println("    ✓ read_data tag changed to gated")
+        callAdmin("setTag", """{"toolName": "read_data", "tag": "logic"}""")
+        println("    ✓ read_data tag changed to logic")
 
         // Change back
-        callAdmin("setTag", """{"toolName": "read_data", "tag": "open"}""")
-        println("    ✓ read_data tag restored to open")
+        callAdmin("setTag", """{"toolName": "read_data", "tag": "acl"}""")
+        println("    ✓ read_data tag restored to acl")
     }
 
     // ── Evaluate: gated → pending ─────────────────────────────────────────

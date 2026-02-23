@@ -149,25 +149,15 @@ add_rule() {
   echo "   ${id}"
 }
 
-add_rule "acme-all-search" \
+# All Acme employees can use all services
+add_rule "acme-all" \
   "claims" '{"organization":"acme"}' "" \
-  '["duckduckgo"]' '["*"]'
-
-add_rule "engineering-calendar" \
-  "claims" '{"department":"engineering"}' "" \
-  '["mock-calendar"]' '["*"]'
-
-add_rule "sales-search-only" \
-  "claims" '{"department":"sales"}' "" \
-  '["duckduckgo"]' '["*"]'
-
-add_rule "jarvis-calendar" \
-  "identity" '{}' "jarvis@acme.com" \
-  '["mock-calendar"]' '["*"]'
-
-add_rule "compliance-all" \
-  "claims" '{"role":"approver"}' "" \
   '["*"]' '["*"]'
+
+# Jarvis (AI agent) can use mock-calendar and duckduckgo
+add_rule "jarvis-agent" \
+  "identity" '{}' "jarvis@acme.com" \
+  '["mock-calendar","duckduckgo"]' '["*"]'
 
 green "   Access rules added"
 
@@ -258,72 +248,104 @@ if [[ -n "$MOCK_CAL_GOV" ]]; then
       "{\"toolName\":\"${tool}\",\"tag\":\"${tag}\"}"
   done
 
-  # ── create_event: workflow-gated for external attendees ──
-  # No post-hoc approval — internal invites auto-allow, external require workflow authorization
+  # ── create_event: auto-allow when constraints pass ──
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setRequiresApproval" \
     "{\"toolName\":\"create_event\",\"required\":false}"
 
-  # Constraint: attendees must be internal — external invites require workflow authorization
+  # Constraint: attendees must be internal
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
-    "{\"toolName\":\"create_event\",\"paramName\":\"attendees\",\"operator\":\"contains\",\"values\":[\"@acme.com\"],\"description\":\"Attendees must be Acme employees — external invites require workflow authorization\"}"
+    "{\"toolName\":\"create_event\",\"paramName\":\"attendees\",\"operator\":\"contains\",\"values\":[\"@acme.com\"],\"description\":\"Attendees must be Acme employees\"}"
 
-  # Guardrail: only standard meeting durations (avoid 7-hour blocks)
+  # Guardrail: only standard meeting durations
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
     "{\"toolName\":\"create_event\",\"paramName\":\"duration\",\"operator\":\"in\",\"values\":[\"15\",\"30\",\"60\",\"90\",\"120\"],\"description\":\"Meeting duration must be 15, 30, 60, 90, or 120 minutes\"}"
 
-  # Guardrail: block sensitive meeting types that need manual scheduling
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
-    "{\"toolName\":\"create_event\",\"paramName\":\"title\",\"operator\":\"not_contains\",\"values\":[\"Board Meeting\",\"M&A\",\"Termination\",\"Disciplinary\"],\"description\":\"Sensitive meetings (board, M&A, HR) must be scheduled manually\"}"
-
-  # ── send_email: human must confirm before agent sends ──
-  # Gate: approval required — agent drafts, human confirms before sending
+  # ── send_email: auto-allow (ApprovedRecipients handles jarvis; humans pass through) ──
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setRequiresApproval" \
-    "{\"toolName\":\"send_email\",\"required\":true}"
-
-  # Guardrail: internal recipients only
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
-    "{\"toolName\":\"send_email\",\"paramName\":\"to\",\"operator\":\"contains\",\"values\":[\"@acme.com\"],\"description\":\"Recipients must be Acme employees — no external emails\"}"
-
-  # Guardrail: block sensitive content patterns
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
-    "{\"toolName\":\"send_email\",\"paramName\":\"subject\",\"operator\":\"not_contains\",\"values\":[\"CONFIDENTIAL\",\"NDA\",\"salary\",\"offer letter\"],\"description\":\"Sensitive topics (NDA, salary, offers) must not be sent by AI agents\"}"
-
-  # Guardrail: no SSN patterns in email body
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
-    "{\"toolName\":\"send_email\",\"paramName\":\"body\",\"operator\":\"regex\",\"values\":[\"^((?!\\\\d{3}-\\\\d{2}-\\\\d{4}).)*$\"],\"description\":\"Email body must not contain SSN patterns (XXX-XX-XXXX)\"}"
+    "{\"toolName\":\"send_email\",\"required\":false}"
 
   npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setGovernanceDescription" \
-    "{\"desc\":\"Calendar governance with two models: create_event uses workflow-gated authorization (internal auto-allow, external requires ToolAuthorization), send_email uses post-hoc approval (human confirms every send). Constraints enforce internal-only recipients, standard durations, and block sensitive content.\"}"
+    "{\"desc\":\"Calendar governance: create_event auto-allows with constraints (internal attendees, standard durations). send_email governed by ApprovedRecipients for jarvis; humans auto-allow.\"}"
 
-  green "   mock-calendar governance configured (gated: create_event, send_email)"
+  green "   mock-calendar governance configured (create_event: constrained, send_email: auto-allow)"
 fi
 
 if [[ -n "$DDG_GOV" ]]; then
   npl_call "${GOV_BASE}/${DDG_GOV}/registerTool" \
     "{\"toolName\":\"search\",\"tag\":\"acl\"}"
 
-  # Search is open (Phase 1 read action) — no gate, just guardrails
   npl_call "${GOV_BASE}/${DDG_GOV}/setRequiresApproval" \
     "{\"toolName\":\"search\",\"required\":false}"
 
-  # Guardrail: block competitive intelligence queries
-  npl_call "${GOV_BASE}/${DDG_GOV}/addConstraint" \
-    "{\"toolName\":\"search\",\"paramName\":\"query\",\"operator\":\"not_contains\",\"values\":[\"competitor pricing\",\"salary benchmark\",\"SEC filing\",\"insider\"],\"description\":\"AI agents must not perform competitive intelligence or insider searches\"}"
-
-  # Guardrail: reasonable query length
-  npl_call "${GOV_BASE}/${DDG_GOV}/addConstraint" \
-    "{\"toolName\":\"search\",\"paramName\":\"query\",\"operator\":\"max_length\",\"values\":[\"500\"],\"description\":\"Search query max 500 characters\"}"
-
   npl_call "${GOV_BASE}/${DDG_GOV}/setGovernanceDescription" \
-    "{\"desc\":\"Search is a read-only action (Phase 1) — open access with guardrails against competitive intelligence queries.\"}"
+    "{\"desc\":\"Search is a read-only action — open access, no constraints.\"}"
 
   green "   duckduckgo governance configured (open: search)"
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Demo ToolAuthorization (workflow-gated override)
+# 8. ApprovedRecipients workflow governance (send_email)
 # ---------------------------------------------------------------------------
-bold "8. Creating demo ToolAuthorization..."
+bold "8. Creating ApprovedRecipients binding for send_email..."
+
+find_or_create_approved_recipients() {
+  local svc_name="$1"
+
+  # List existing instances
+  local list_response
+  list_response=$(curl -sf \
+    "${NPL_URL}/npl/governance/ApprovedRecipients/" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo '{"items":[]}')
+
+  # Look for one that matches the service name
+  local existing_id
+  existing_id=$(echo "$list_response" | jq -r \
+    --arg name "$svc_name" \
+    '.items[] | select(.serviceName == $name) | .["@id"] // empty' 2>/dev/null | head -1)
+
+  if [[ -n "$existing_id" ]]; then
+    echo "$existing_id"
+    return
+  fi
+
+  # Create new instance
+  local create_response
+  create_response=$(npl_call_response "/npl/governance/ApprovedRecipients/" '{"@parties":{}}')
+  local new_id
+  new_id=$(echo "$create_response" | jq -r '.["@id"] // empty')
+
+  if [[ -n "$new_id" ]]; then
+    # Initialize: bind to mock-calendar / send_email / "to" param / jarvis only
+    npl_call "/npl/governance/ApprovedRecipients/${new_id}/setup" \
+      "{\"name\":\"${svc_name}\",\"tool\":\"send_email\",\"param\":\"to\",\"agent\":\"jarvis@acme.com\"}"
+  fi
+
+  echo "$new_id"
+}
+
+AR_ID=$(find_or_create_approved_recipients "mock-calendar")
+if [[ -n "$AR_ID" ]]; then
+  green "   ApprovedRecipients instance: ${AR_ID}"
+
+  # acme.com is already an approved domain by default in the protocol.
+  # Add a few demo approved external recipients:
+  npl_call "/npl/governance/ApprovedRecipients/${AR_ID}/addRecipient" \
+    '{"email":"dave@external-vendor.com"}'
+  echo "   Added approved recipient: dave@external-vendor.com"
+
+  npl_call "/npl/governance/ApprovedRecipients/${AR_ID}/addRecipient" \
+    '{"email":"partner@consulting-firm.com"}'
+  echo "   Added approved recipient: partner@consulting-firm.com"
+
+  green "   ApprovedRecipients configured (acme.com domain + 2 external recipients)"
+else
+  yellow "   WARNING: Could not create ApprovedRecipients instance"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Demo ToolAuthorization (workflow-gated override)
+# ---------------------------------------------------------------------------
+bold "9. Creating demo ToolAuthorization..."
 
 # Alice authorizes jarvis to invite an external party (one-shot workflow override)
 ALICE_TOKEN=$(get_token "alice" "${PASSWORD}")
@@ -353,7 +375,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Summary
+# 10. Summary
 # ---------------------------------------------------------------------------
 echo ""
 bold "=== Seed Complete ==="
@@ -363,29 +385,28 @@ echo "  - duckduckgo    (search [acl])"
 echo "  - mock-calendar (list_events [acl], read_inbox [acl], create_event [logic], send_email [logic])"
 echo ""
 echo "Access rules:"
-echo "  - acme-all-search       org=acme            -> duckduckgo__*"
-echo "  - engineering-calendar   dept=engineering     -> mock-calendar__*"
-echo "  - sales-search-only      dept=sales           -> duckduckgo__*"
-echo "  - jarvis-calendar        jarvis@acme.com      -> mock-calendar__*"
-echo "  - compliance-all         role=approver         -> *__*"
+echo "  - acme-all        org=acme             -> *__*  (all Acme employees, all services)"
+echo "  - jarvis-agent    jarvis@acme.com      -> mock-calendar__*, duckduckgo__*"
 echo ""
 echo "Governance models:"
 echo "  READ (acl):    list_events, read_inbox, search — auto-allow"
-echo "  WRITE (logic): two models coexist:"
+echo "  WRITE (logic):"
 echo ""
 if [[ -n "$MOCK_CAL_GOV" ]]; then
-  echo "  mock-calendar: ${MOCK_CAL_GOV}"
-  echo "    create_event [WORKFLOW-GATED] internal=auto-allow, external=requires ToolAuthorization"
-  echo "    send_email   [APPROVAL-GATED] all sends require human approval"
+  echo "  mock-calendar ServiceGovernance: ${MOCK_CAL_GOV}"
+  echo "    create_event [CONSTRAINED] auto-allow when constraints pass (internal attendees, standard durations)"
+  echo "    send_email   [AUTO-ALLOW]  no constraints (ApprovedRecipients handles jarvis)"
+fi
+if [[ -n "$AR_ID" ]]; then
+  echo "  mock-calendar ApprovedRecipients: ${AR_ID} (jarvis@acme.com only)"
+  echo "    send_email   [APPROVED-RECIPIENTS] @acme.com auto-allow, pre-approved externals auto-allow, rest denied"
+  echo "    Approved domains:    acme.com (default)"
+  echo "    Approved recipients: dave@external-vendor.com, partner@consulting-firm.com"
+  echo "    Human users bypass ApprovedRecipients (only jarvis is restricted)"
 fi
 if [[ -n "$DDG_GOV" ]]; then
-  echo "  duckduckgo:    ${DDG_GOV}"
-  echo "    search       [OPEN] auto-allow with guardrails"
+  echo "  duckduckgo ServiceGovernance:    ${DDG_GOV}"
+  echo "    search       [OPEN] auto-allow, no constraints"
 fi
 echo ""
-echo "Workflow authorization (one-shot):"
-echo "  1. User creates ToolAuthorization: ./scripts/approve.sh authorize <svc> <tool> <agent> \"desc\""
-echo "  2. Agent calls tool -> constraint fails -> evaluator finds authorization -> allow"
-echo "  3. Authorization consumed (one-shot, gate closes)"
-echo ""
-green "Done! Dashboard: http://localhost:13000"
+green "Done! Dashboard: http://localhost:8888"

@@ -61,3 +61,19 @@ governance.ToolAuthorization:
       claims:
         role:
           - gateway
+
+# ============================================================================
+# V4 GOVERNANCE — ApprovedRecipients (workflow governance for send_email)
+# ============================================================================
+
+governance.ApprovedRecipients:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway

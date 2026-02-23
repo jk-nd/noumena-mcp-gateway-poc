@@ -90,7 +90,7 @@ class NplIntegrationTest {
 
         NplBootstrap.registerServiceWithTools(
             storeId, "mock-calendar",
-            mapOf("list_events" to "open", "create_event" to "gated"),
+            mapOf("list_events" to "acl", "create_event" to "logic"),
             adminToken
         )
         println("    ✓ mock-calendar registered with tools")
@@ -105,10 +105,10 @@ class NplIntegrationTest {
 
         val tools = mockCal["tools"]?.jsonObject
         assertNotNull(tools, "Should have tools")
-        assertEquals("open", tools!!["list_events"]?.jsonObject?.get("tag")?.jsonPrimitive?.content)
-        assertEquals("gated", tools["create_event"]?.jsonObject?.get("tag")?.jsonPrimitive?.content)
+        assertEquals("acl", tools!!["list_events"]?.jsonObject?.get("tag")?.jsonPrimitive?.content)
+        assertEquals("logic", tools["create_event"]?.jsonObject?.get("tag")?.jsonPrimitive?.content)
 
-        println("    ✓ getBundleData confirms: list_events=open, create_event=gated")
+        println("    ✓ getBundleData confirms: list_events=acl, create_event=logic")
     }
 
     // ── Tool CRUD with Tags ─────────────────────────────────────────────────
@@ -118,13 +118,13 @@ class NplIntegrationTest {
     fun `tag switching open to gated`() = runBlocking {
         Assumptions.assumeTrue(::storeId.isInitialized, "GatewayStore not created")
 
-        // Switch list_events from open to gated
+        // Switch list_events from acl to logic
         val resp = client.post(
             "${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/setTag"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events", "tag": "gated"}""")
+            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events", "tag": "logic"}""")
         }
         assertTrue(resp.status.isSuccess(), "setTag should succeed")
 
@@ -134,16 +134,16 @@ class NplIntegrationTest {
             ?.get("tools")?.jsonObject
             ?.get("list_events")?.jsonObject
             ?.get("tag")?.jsonPrimitive?.content
-        assertEquals("gated", tag, "list_events should now be gated")
-        println("    ✓ list_events tag switched to gated")
+        assertEquals("logic", tag, "list_events should now be logic")
+        println("    ✓ list_events tag switched to logic")
 
-        // Switch back to open
+        // Switch back to acl
         client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/setTag") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events", "tag": "open"}""")
+            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events", "tag": "acl"}""")
         }
-        println("    ✓ list_events tag restored to open")
+        println("    ✓ list_events tag restored to acl")
     }
 
     @Test
@@ -172,7 +172,7 @@ class NplIntegrationTest {
         client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/registerTool") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "mock-calendar", "toolName": "create_event", "tag": "gated"}""")
+            setBody("""{"serviceName": "mock-calendar", "toolName": "create_event", "tag": "logic"}""")
         }
 
         bundleData = getBundleData()
@@ -181,8 +181,8 @@ class NplIntegrationTest {
             ?.get("tools")?.jsonObject
             ?.get("create_event")?.jsonObject
             ?.get("tag")?.jsonPrimitive?.content
-        assertEquals("gated", tag, "create_event should be re-added as gated")
-        println("    ✓ create_event re-added as gated")
+        assertEquals("logic", tag, "create_event should be re-added as logic")
+        println("    ✓ create_event re-added as logic")
     }
 
     // ── Disable/Enable Service ──────────────────────────────────────────────

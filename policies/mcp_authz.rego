@@ -407,6 +407,14 @@ access_rule_matches_caller(rule) if {
 	rule.matcher.identity == user_id
 }
 
+# --- Visible tools computation (for tools/list response filtering) ---
+
+visible_tool_names contains qualified if {
+	some svc in granted_service_names
+	some tool_name_entry, _ in catalog[svc].tools
+	qualified := concat("__", [svc, tool_name_entry])
+}
+
 # --- Structured decision for OPA envoy plugin ---
 
 result := {"allowed": true, "headers": headers, "response_headers_to_add": response_headers} if {
@@ -461,4 +469,10 @@ response_headers["x-request-id"] := npl_decision.requestId if {
 response_headers["retry-after"] := "30" if {
 	npl_decision
 	npl_decision.decision == "pending"
+}
+
+# Visible tools for tools/list response filtering (Lua reads this on response path)
+response_headers["x-visible-tools"] := concat(",", sort(visible_tool_names)) if {
+	jsonrpc_method == "tools/list"
+	count(visible_tool_names) > 0
 }
