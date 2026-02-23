@@ -388,7 +388,7 @@ MCP server metadata ────────────────────
 | Tool risk annotations | MCP server metadata | JSON (MCP spec standard) | Server authors |
 | Annotation/verb/label evaluation | OPA (Rego) | Rego | Ships with gateway (nobody edits) |
 | Stateful decisions | NPL protocols | NPL | Ships with gateway (nobody edits) |
-| Approval state | NPL on-ledger | NPL state machine | Managed via TUI / API |
+| Approval state | NPL on-ledger | NPL state machine | Managed via Dashboard / API |
 | Audit trail | OPA decision logs + bundle metadata | Structured JSON | Monitoring / SIEM |
 
 ---
@@ -526,7 +526,7 @@ Profiles to be developed for:
 
 **Files:** `policies/mcp_authz.rego`, `mcp-aggregator/server.js`
 
-**Test:** Disable a service for a user in TUI → verify `tools/list` no longer returns that service's tools in MCP Inspector.
+**Test:** Disable a service for a user in Dashboard → verify `tools/list` no longer returns that service's tools in MCP Inspector.
 
 ---
 
@@ -581,13 +581,13 @@ Profiles to be developed for:
 
 ---
 
-### Step 4: Wire End-to-End + TUI Integration
+### Step 4: Wire End-to-End + Dashboard Integration
 
-**Goal:** Complete flow from YAML policy through to approval in the TUI.
+**Goal:** Complete flow from YAML policy through to approval in the Dashboard.
 
 **Tasks:**
-1. TUI: add "Pending Approvals" screen (list pending, approve/deny with reason)
-2. TUI: add "Security Policy" screen (view active policies, import YAML, export YAML)
+1. Dashboard: "Pending Approvals" screen (list pending, approve/deny with reason)
+2. Dashboard: "Security Policy" screen (view active policies, import YAML, export YAML)
 3. Envoy: handle `pending` response (return 403 with `Retry-After` header and `x-approval-id`)
 4. Bundle metadata: include security policy version in `_bundle_metadata` for traceability
 
@@ -595,7 +595,7 @@ Profiles to be developed for:
 1. Apply `mcp-security.yaml` with "approve destructive operations" policy
 2. Call a `destructiveHint: true` tool via MCP Inspector
 3. Verify 403 response with approval ID
-4. Approve in TUI
+4. Approve in Dashboard
 5. Retry the call → verify 200
 
 ---
@@ -647,7 +647,7 @@ Profiles to be developed for:
 **Tasks:**
 1. OPA decision logs: include resolved annotations, verb, labels, matched policy rule, and bundle revision in every log entry
 2. Build audit query endpoint or forward to SIEM
-3. TUI dashboard: recent decisions, error rates, approval latency
+3. Dashboard: recent decisions, error rates, approval latency
 
 **Test:** Make 10 tool calls → query audit log → verify each entry contains policy revision, matched rule, and classification.
 

@@ -303,7 +303,7 @@ NPL protocol not bootstrapped (expert mode):
 curl http://localhost:12000/npl/policies/CredentialInjectionPolicy/
 ```
 
-Bootstrap via TUI: `System > NPL Bootstrap`
+Bootstrap via seed script: `cd scripts && ./seed.sh`
 
 ## See Also
 

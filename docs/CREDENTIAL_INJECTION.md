@@ -146,15 +146,14 @@ The `tenant` field specifies the default tenant for Vault path resolution. The `
 
 ### Configuration
 
-1. Set mode in docker-compose or via TUI:
+1. Set mode in docker-compose:
 ```bash
 CREDENTIAL_MODE=expert
 ```
 
-2. Bootstrap NPL with credential rules (via TUI or API):
+2. Bootstrap NPL with credential rules (via API):
 ```bash
-# TUI: System > Credential Mode > Expert
-# Or via NPL API:
+# Via NPL API:
 POST /npl/policies/CredentialInjectionPolicy/addInjectionRule
 {
   "serviceName": "github",
@@ -363,13 +362,6 @@ X-API-Key: sk_xxx
 
 ### 1. Choose Mode
 
-**Via TUI:**
-```bash
-cd tui
-npm start
-# Select: System > Credential Mode > Simple or Expert
-```
-
 **Via Environment:**
 ```bash
 export CREDENTIAL_MODE=simple  # or expert
@@ -499,9 +491,8 @@ curl http://localhost:9002/health
 # Check if NPL protocol is bootstrapped
 curl http://localhost:12000/npl/policies/CredentialInjectionPolicy/
 
-# Bootstrap if needed
-cd tui && npm start
-# Select: System > NPL Bootstrap
+# Bootstrap if needed via seed script or Dashboard
+cd scripts && ./seed.sh
 ```
 
 ---
@@ -585,10 +576,10 @@ The Vault path convention needs further analysis and standardization. Currently,
 
 - Should all service-level credentials follow `tenants/{tenant}/services/{service}/{credential_name}`?
 - Should user-level credentials follow `tenants/{tenant}/users/{user}/{service}/{credential_name}`?
-- How should the TUI's credential onboarding flow map service names to Vault paths consistently?
+- How should the credential onboarding flow map service names to Vault paths consistently?
 - Should the `service_defaults` mapping in `credentials.yaml` match credential names exactly, or should there be a fuzzy lookup?
 
-This analysis should align the TUI onboarding flow, the Credential Proxy's path resolution, and the Vault storage conventions.
+This analysis should align the onboarding flow, the Credential Proxy's path resolution, and the Vault storage conventions.
 
 ### Planned for V3 (Enterprise)
 

@@ -2,15 +2,22 @@
 
 ## Status
 
-**Implemented** — Design captured 2026-02-19, implemented 2026-02-20.
+**Implemented** — Design captured 2026-02-19, implemented 2026-02-20. Updated 2026-02-23.
 
 Supersedes the v3 architecture (security policy YAML, per-user grants, classifier DSL,
 contextual route groups with six policy protocols, ~1000-line OPA Rego).
 
-The v4 system is fully operational with: GatewayStore + ServiceGovernance NPL protocols,
-simplified OPA Rego (~240 lines), governance evaluator sidecar, admin dashboard with
+The v4 system is fully operational with: GatewayStore + ServiceGovernance + ApprovedRecipients
+NPL protocols, OPA Rego (~240 lines), governance evaluator sidecar, admin dashboard with
 service catalog, access rules, governance rules, approval workflows, user management,
 Docker Hub discovery, and real-time metrics panel.
+
+> **Implementation note**: This document uses `open`/`gated` as design-time tag names.
+> The implementation uses `acl` (= open) and `logic` (= gated) as the actual tag values.
+> The MCP Aggregator described here has been replaced by **Envoy AI Gateway (aigw-run)**.
+> Additionally, `tools/list` responses are now filtered by an Envoy Lua filter using
+> `x-visible-tools` computed by OPA, and **ApprovedRecipients** provides caller-specific
+> workflow governance for sensitive parameters (e.g., restricting AI agents but not humans).
 
 ---
 
@@ -352,7 +359,8 @@ On confirmation, the gateway replays that exact payload to the upstream MCP serv
 
 ## OPA Rego (Simplified)
 
-The entire OPA policy reduces to ~60 lines:
+The OPA policy concept reduces to ~60 lines (the actual implementation is ~240 lines with
+response headers, tools/list filtering, governance evaluator integration, and edge cases):
 
 ```rego
 package envoy.authz
@@ -572,12 +580,12 @@ for open tools. Gated tools make one synchronous HTTP call to NPL.
 
 ### What stays
 
-- Envoy AI Gateway (JWT + ext_authz + MCP routing) — unchanged
+- Envoy AI Gateway (JWT + ext_authz + MCP routing + Lua response filtering) — enhanced
 - OPA sidecar (ext_authz gRPC) — unchanged, just simpler policy
 - NPL Engine — unchanged infrastructure, new protocol design
 - Bundle Server — simplified (reads GatewayStore instead of PolicyStore)
 - Keycloak — unchanged
-- MCP Aggregator — unchanged
+- AI Gateway (aigw-run) — replaces the custom MCP Aggregator for multi-backend routing
 
 ### Migration steps
 

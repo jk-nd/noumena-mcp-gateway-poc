@@ -45,10 +45,10 @@ This document describes the MCP Gateway's service topology, network isolation de
                         ┌─────────▼───────────────────────────────────────┐
                         │                backend-net                       │
                         │                                                  │
-                        │  ┌────────────────┐                              │
-                        │  │ MCP Aggregator │                              │
-                        │  │     :8000      │                              │
-                        │  └───────┬────────┘                              │
+                        │  ┌──────────────────┐                            │
+                        │  │ AI Gateway       │                            │
+                        │  │ (aigw-run) :8001 │                            │
+                        │  └───────┬──────────┘                            │
                         │          │                                       │
                         │  ┌───────┼─────────────────┐                    │
                         │  │       │                  │                    │
@@ -79,7 +79,7 @@ This document describes the MCP Gateway's service topology, network isolation de
 | Bundle Server | Python | 8282 | policy, public | SSE-driven OPA bundle builder and server |
 | NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (GatewayStore + ServiceGovernance) |
 | Engine DB | PostgreSQL | 5432 | policy | NPL Engine persistence |
-| MCP Aggregator | Node.js | 8000 | backend | Multi-backend MCP request routing |
+| AI Gateway (aigw-run) | Go | 8001 | backend | Multi-backend MCP aggregation and routing (Envoy AI Gateway) |
 | DuckDuckGo MCP | Node.js | 8000 | backend | Supergateway sidecar for DuckDuckGo search |
 | GitHub MCP | Node.js | 8000 | backend, secrets | Supergateway sidecar for GitHub (needs credentials) |
 | Mock Calendar MCP | Node.js | 8000 | backend | Streamable HTTP MCP server for testing |
@@ -98,7 +98,7 @@ This document describes the MCP Gateway's service topology, network isolation de
 A tool call flows through the following services:
 
 ```
-Agent                 Envoy              OPA              NPL Engine        MCP Aggregator     Backend
+Agent                 Envoy              OPA              NPL Engine        aigw-run           Backend
   │                    │                  │                    │                  │                │
   │ POST /mcp          │                  │                    │                  │                │
   │ (Bearer JWT)       │                  │                    │                  │                │
@@ -112,7 +112,7 @@ Agent                 Envoy              OPA              NPL Engine        MCP 
   │                    │                  │ Layer 2: Access    │                  │                │
   │                    │                  │ (~1ms, in-memory)  │                  │                │
   │                    │                  │                    │                  │                │
-  │                    │                  │ [if tag == gated]  │                  │                │
+  │                    │                  │ [if tag == logic]  │                  │                │
   │                    │                  │ Layer 3: NPL       │                  │                │
   │                    │                  │ http.send ────────►│ Gov. Evaluator   │                │
   │                    │                  │   evaluate()       │   → NPL Engine   │                │
@@ -129,15 +129,18 @@ Agent                 Envoy              OPA              NPL Engine        MCP 
   │                    │                  │                    │                  │───────────────►│
   │                    │                  │                    │                  │◄───────────────│
   │                    │◄────────────────────────────────────────────────────────│                │
-  │◄───────────────────│                  │                    │                  │                │
-  │ JSON-RPC response  │                  │                    │                  │                │
+  │◄───────────────────│  Lua filter:     │                    │                  │                │
+  │ JSON-RPC response  │  tools/list      │                    │                  │                │
+  │ (filtered)         │  body filtering  │                    │                  │                │
 ```
 
 ### Three-Layer Evaluation (v4)
 
 - **Layer 1 — Catalog** (~0.5ms): Is the service enabled and tool registered? In-memory bundle check.
 - **Layer 2 — Access Rules** (~0.5ms): Does any access rule (claim-based or identity-based) grant this caller access? In-memory bundle check.
-- **Layer 3 — NPL Governance** (~60ms): For `gated` tools only, OPA calls the governance evaluator which checks argument constraints and routes to NPL for approval workflows. `Open` tools skip this layer entirely.
+- **Layer 3 — NPL Governance** (~60ms): For `logic` tools only, OPA calls the governance evaluator which checks argument constraints, ApprovedRecipients, and routes to NPL for approval workflows. `acl` tools skip this layer entirely.
+
+**tools/list Response Filtering**: On `tools/list` requests, OPA computes `visible_tool_names` from the catalog and sets an `x-visible-tools` response header. The Envoy Lua filter reads this header on the response path and removes any tools not in the set — ensuring agents only see catalog-registered tools, even though aigw-run discovers all tools from backends.
 
 ---
 
@@ -216,7 +219,7 @@ The four Docker networks provide defense-in-depth:
 |---------|---------|------------------------|
 | **public-net** | Agent-facing services. Only Envoy, Keycloak, and Inspector are reachable from external clients. | Yes (ports 8000, 11000, 8080) |
 | **policy-net** | Policy evaluation. OPA, Bundle Server, NPL Engine, and Credential Proxy communicate here. Not reachable from agents. | No (internal only) |
-| **backend-net** | Tool execution. MCP servers run here, isolated from policy infrastructure. Only the Aggregator and Envoy can reach them. | No (internal only) |
+| **backend-net** | Tool execution. MCP servers run here, isolated from policy infrastructure. Only aigw-run and Envoy can reach them. | No (internal only) |
 | **secrets-net** | Credential storage. Only Vault and the Credential Proxy live here. Minimal attack surface. | No (except Vault dev UI at :8200) |
 
 **Key isolation properties:**

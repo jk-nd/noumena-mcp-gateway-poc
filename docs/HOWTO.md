@@ -69,63 +69,39 @@ curl http://localhost:9000/health
 
 ## 2. First-Time Setup
 
-There are two ways to configure the gateway: the **Dashboard** (web UI) or the **TUI** (CLI wizard).
+Open the **Dashboard** at `http://localhost:8888` and log in with `admin` / `Welcome123`. The Dashboard provides a full admin interface for managing the gateway.
 
-### Option A: Dashboard (recommended)
-
-Open `http://localhost:8888` and log in with `admin` / `Welcome123`. The dashboard provides a full admin interface for managing the gateway.
-
-### Option B: TUI Wizard
-
-```bash
-cd tui
-npm install   # first time only
-npm start
-```
-
-Log in with `admin` / `Welcome123`.
+Alternatively, run `scripts/seed.sh` to bootstrap the gateway with services, tools, access rules, and governance configuration from the command line.
 
 ### NPL Bootstrap
 
 On first use, the system creates a **GatewayStore singleton** — the single source of truth for all policy data. This happens automatically.
 
 The GatewayStore holds:
-- **Catalog** — registered services and tools with open/gated tags
+- **Catalog** — registered services and tools with acl/logic tags
 - **Access Rules** — claim-based and identity-based authorization rules
 - **Revoked Subjects** — emergency kill switch entries
 
 **ServiceGovernance** instances (one per governed service) hold:
 - **Tool Configs** — argument-level constraints (regex, in/not_in, max_length)
-- **Pending Requests** — gated tool calls awaiting approval
+- **Pending Requests** — logic-tagged tool calls awaiting approval
 - **Approval Settings** — per-tool approval requirements and deadlines
 
 ---
 
 ## 3. Adding an MCP Service
 
-There are three ways to add a service.
+There are two ways to add a service.
 
-### Option A: TUI Wizard (recommended)
-
-From the main menu:
-
-1. Select **+ Search Docker Hub** to browse the `mcp/*` namespace
-2. Or select **+ Add MCP service** to enter a custom Docker command, NPM package, or template
-
-The TUI will:
-- Register the service in the GatewayStore catalog
-- Discover available tools from the MCP server
-- Let you enable/disable individual tools with open/gated tags
-
-### Option B: Dashboard
+### Option A: Dashboard
 
 In the Dashboard (http://localhost:8888):
 1. Go to **Catalog** > **+ Add Service**
 2. Enter the service name or select from running backends
-3. Use **+ Tool** to register tools with open/gated tags
+3. Use **+ Tool** to register tools with acl/logic tags
 4. Or use **Discover** to search Docker Hub and wire services automatically
 
-### Option C: Manual via NPL API
+### Option B: Manual via NPL API
 
 Register and configure a service using curl:
 
@@ -152,11 +128,11 @@ curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/enableS
   -H "Content-Type: application/json" \
   -d '{"serviceName": "my-service"}'
 
-# Register a tool (with open or gated tag)
+# Register a tool (with acl or logic tag)
 curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/registerTool" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"serviceName": "my-service", "toolName": "my-tool", "tag": "open"}'
+  -d '{"serviceName": "my-service", "toolName": "my-tool", "tag": "acl"}'
 ```
 
 ### Option C: Bulk import from services.yaml
@@ -189,7 +165,7 @@ user_access:
           - "*"
 ```
 
-Then import via TUI: **Import / Export > Import from YAML**.
+Then import via the Dashboard: **Catalog > Import**.
 
 ### Adding a backend container
 
@@ -208,12 +184,14 @@ To run a new MCP server as part of the Docker stack, add a supergateway sidecar 
       - backend-net
 ```
 
-Then register it in the MCP aggregator's `BACKENDS` environment variable:
+Then register it in the AI Gateway's backend configuration (`deployments/envoy/mcp-servers.json`):
 
-```yaml
-  mcp-aggregator:
-    environment:
-      BACKENDS: "duckduckgo:http://duckduckgo-mcp:8000,my-service:http://my-service-mcp:8000"
+```json
+{
+  "my-service": {
+    "url": "http://my-service-mcp:8000/mcp"
+  }
+}
 ```
 
 Restart the stack: `docker compose up -d`.
@@ -225,8 +203,6 @@ Restart the stack: `docker compose up -d`.
 ### Creating users
 
 **Via Dashboard:** Go to **Users** > **+ Create User**. Set username, email, role, organization, and department.
-
-**Via TUI:** Main menu > **Manage users & tool access** > Register a new user.
 
 **Via Keycloak Admin UI:**
 1. Go to `http://localhost:11000`
@@ -299,16 +275,16 @@ Typical propagation time: **2-6 seconds**. The bundle server subscribes to SSE p
 
 ## 5. Governance Rules & Approval Workflows
 
-Governance rules add fine-grained argument-level constraints and approval workflows on top of the access rules layer. They apply to tools tagged as **gated** in the catalog.
+Governance rules add fine-grained argument-level constraints and approval workflows on top of the access rules layer. They apply to tools tagged as **logic** in the catalog.
 
-### 5.1 Open vs Gated Tags
+### 5.1 ACL vs Logic Tags
 
 Each tool in the catalog has a tag:
 
 | Tag | Meaning | OPA behavior |
 |-----|---------|--------------|
-| `open` | Stateless check — access rules sufficient | Allow if catalog + access rules pass |
-| `gated` | Stateful check — requires governance evaluation | Allow only if catalog + access rules + governance evaluator returns allow |
+| `acl` | Stateless check — access rules sufficient | Allow if catalog + access rules pass |
+| `logic` | Stateful check — requires governance evaluation | Allow only if catalog + access rules + governance evaluator returns allow |
 
 Toggle tags in the Dashboard via the **Catalog** panel, or via API:
 
@@ -316,12 +292,12 @@ Toggle tags in the Dashboard via the **Catalog** panel, or via API:
 curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/setTag" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"serviceName": "duckduckgo", "toolName": "search", "tag": "gated"}'
+  -d '{"serviceName": "duckduckgo", "toolName": "search", "tag": "logic"}'
 ```
 
 ### 5.2 Argument-Level Constraints
 
-For gated tools, you can define argument-level constraints that are evaluated before the request reaches NPL. These are managed through the governance evaluator.
+For logic-tagged tools, you can define argument-level constraints that are evaluated before the request reaches NPL. These are managed through the governance evaluator.
 
 **Via Dashboard:** Go to **Gov Rules** > **+ New Rule**. The wizard guides you through:
 1. Select a service (must have governance enabled)
@@ -358,9 +334,9 @@ curl -s -X POST "http://localhost:12000/npl/governance/ServiceGovernance/$INSTAN
 
 ### 5.3 Approval Workflows
 
-When a gated tool call passes constraint checks but still requires human approval, the governance evaluator routes to NPL's ServiceGovernance protocol. The approval flow:
+When a logic-tagged tool call passes constraint checks but still requires human approval, the governance evaluator routes to NPL's ServiceGovernance protocol. The approval flow:
 
-1. Agent calls a gated tool
+1. Agent calls a logic-tagged tool
 2. OPA calls governance evaluator
 3. Evaluator checks argument constraints
 4. If constraints pass and approval is required, a pending request is created
@@ -377,6 +353,36 @@ For tools where constraints alone are sufficient (no human approval needed), set
 
 When auto-allow is set, calls that pass all constraints are allowed immediately without creating a pending approval request.
 
+### 5.5 ApprovedRecipients (Workflow Governance)
+
+The **ApprovedRecipients** protocol provides caller-specific governance for sensitive parameters like email recipients. Unlike ServiceGovernance constraints (which apply to all callers), ApprovedRecipients can target specific callers — e.g., restricting an AI agent while allowing human users to send freely.
+
+**Key concepts:**
+
+- **Agent Identity**: The protocol can be bound to a specific caller (e.g., `jarvis@acme.com`). Only that caller is subject to the recipient restriction; other callers fall through to ServiceGovernance.
+- **Approved Recipients**: A list of explicitly approved email addresses.
+- **Approved Domains**: A list of approved email domains (e.g., `acme.com` for internal emails).
+- **Supervisor Approval**: When the recipient is not pre-approved, a supervisor can approve via the dashboard, which adds the recipient to the approved list.
+
+**Via Dashboard:** Go to **Protocols** to view and manage ApprovedRecipients bindings. Use the setup form to bind a recipient restriction to a service/tool/parameter/agent combination.
+
+**Via seed script:**
+
+```bash
+# Bind ApprovedRecipients to jarvis for send_email's "to" parameter
+npl_call ".../ApprovedRecipients/$ID/setup" \
+  '{"name":"mock-calendar","tool":"send_email","param":"to","agent":"jarvis@acme.com"}'
+```
+
+**Enforcement flow:**
+
+1. Agent calls `send_email(to: "someone@external.com")`
+2. OPA routes to governance evaluator (logic tag)
+3. Evaluator checks if caller matches `agentIdentity` — if not, falls through to ServiceGovernance
+4. If caller matches, evaluator checks recipient against approved list/domains
+5. If not approved: 403 with reason "Recipient not approved. A supervisor must approve."
+6. Supervisor approves via dashboard → recipient added to approved list → next call succeeds
+
 ---
 
 ## 6. Dashboard
@@ -390,10 +396,10 @@ The admin dashboard at `http://localhost:8888` provides a full web interface for
 | **Overview** | System health status, key stats, aggregator backends |
 | **Activity Log** | Real-time NPL Engine state changes via SSE stream |
 | **Metrics** | Real-time operational metrics from all components (auto-refreshes every 5s) |
-| **Catalog** | Service and tool management with open/gated toggles |
+| **Catalog** | Service and tool management with acl/logic toggles |
 | **Access Rules** | Claim-based and identity-based authorization rules |
-| **Gov Rules** | Argument-level constraints for gated tools |
-| **Approvals** | Pending approval requests for gated tool calls |
+| **Gov Rules** | Argument-level constraints for logic-tagged tools |
+| **Approvals** | Pending approval requests for logic-tagged tool calls |
 | **Revoked** | Emergency subject revocation |
 | **Users** | Keycloak user directory and management |
 | **Discover** | Search Docker Hub and MCP Registry, wire services into the gateway |
@@ -406,7 +412,7 @@ The Metrics panel shows real-time data from all gateway components in collapsibl
 - **OPA Policy Engine** — health status, decision counts, bundle revision
 - **Bundle Server** — revision, bundle age, SSE connection, rebuild count/errors
 - **Governance Evaluator** — health status, cached services count
-- **MCP Aggregator** — active sessions, registered backends
+- **AI Gateway (aigw-run)** — active sessions, registered backends
 
 ---
 
@@ -496,7 +502,7 @@ Template variables `{tenant}` and `{user}` are replaced at runtime.
 
 ### How it works
 
-1. Admin stores secrets in Vault (via TUI or Vault UI)
+1. Admin stores secrets in Vault (via Vault UI or CLI)
 2. Supergateway sidecar calls the credential proxy at startup
 3. Credential proxy looks up `configs/credentials.yaml`, resolves the vault path, fetches from Vault
 4. Supergateway exports the values as environment variables
@@ -563,13 +569,13 @@ Every request through the gateway gets tracing headers in the response:
 
 | Header | Value | When |
 |--------|-------|------|
-| `x-authz-reason` | Denial reason | On 403 |
-| `x-governance-action` | `allow`, `deny`, `pending_approval` | When governance layer evaluates |
-| `x-governance-rule` | Name of matched governance rule | When governance rule matched |
-| `x-approval-id` | `APR-N` | When approval is pending |
+| `x-authz-reason` | Authorization reason or denial reason | On every ext_authz response |
 | `x-user-id` | User identity from JWT | On every authorized request |
-| `x-granted-services` | CSV of granted services | On tools/list requests |
+| `x-mcp-service` | Target service name | On tools/call requests |
 | `x-bundle-revision` | Bundle hash | On every request |
+| `x-granted-services` | CSV of granted services | On tools/list requests |
+| `x-visible-tools` | CSV of visible tool names (internal, stripped by Lua) | Used by Lua filter for tools/list response filtering |
+| `x-approval-id` | `APR-N` | When approval is pending |
 
 **Example — inspecting a denied request:**
 
@@ -584,7 +590,7 @@ curl -v -X POST http://localhost:8000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"gmail.send_email","arguments":{"to":"external@other.com","subject":"test"}}}'
 ```
 
-Look for `x-governance-action`, `x-governance-rule`, and `x-authz-reason` in the response headers.
+Look for `x-authz-reason`, `x-mcp-service`, and `x-bundle-revision` in the response headers.
 
 ### Common issues
 
@@ -601,7 +607,7 @@ Look for `x-governance-action`, `x-governance-rule`, and `x-authz-reason` in the
 **Governance rules not taking effect:**
 - Verify catalog data in OPA: `curl -s http://localhost:8181/v1/data/catalog | jq .`
 - Check if the bundle was rebuilt after changes: compare `x-bundle-revision` header with `curl -s http://localhost:8282/health | jq .revision`
-- For gated tools, check the governance evaluator: `curl -s http://localhost:8090/health | jq .`
+- For logic-tagged tools, check the governance evaluator: `curl -s http://localhost:8090/health | jq .`
 
 **Approval workflow not working:**
 - Verify the ServiceGovernance instance exists for the service

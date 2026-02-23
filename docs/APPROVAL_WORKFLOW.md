@@ -364,7 +364,7 @@ POST /npl/policies/ApprovalPolicy/{id}/evaluate
 
 ### approve()
 
-**Called by:** Admin or Approver (TUI or API)
+**Called by:** Admin or Approver (Dashboard or API)
 **Permission:** `pApprover | pAdmin`
 
 ```
@@ -389,7 +389,7 @@ POST /npl/policies/ApprovalPolicy/{id}/approve
 
 ### deny()
 
-**Called by:** Admin or Approver (TUI or API)
+**Called by:** Admin or Approver (Dashboard or API)
 **Permission:** `pApprover | pAdmin`
 
 ```
@@ -472,7 +472,7 @@ POST /npl/policies/ApprovalPolicy/{id}/recordExecution
 
 ### getExecutionResult()
 
-**Called by:** Admin, Approver, or via TUI
+**Called by:** Admin, Approver, or via Dashboard
 **Permission:** `pGateway | pAdmin | pApprover`
 
 ```
