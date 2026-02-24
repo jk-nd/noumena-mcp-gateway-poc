@@ -51,8 +51,8 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
 | **Supergateway Sidecars** | Wrap STDIO MCP tools as Streamable HTTP endpoints |
 | **Mock Calendar MCP** | HTTP-native MCP server for bilateral streaming tests (SSE notifications) |
 | **Keycloak** | OIDC authentication provider with user/role management |
-| **Governance Evaluator** | Constraint evaluation sidecar: argument-level rules (regex, in/not_in, max_length) + NPL approval routing |
-| **Dashboard** | Admin web UI: service catalog, access rules, governance rules, approvals, user management, Docker discovery, real-time metrics |
+| **Governance Evaluator** | Three-phase constraint evaluation sidecar: access filters (regex, in/not_in, max_length) → workflow bindings (ApprovedRecipients) → NPL approval routing |
+| **Dashboard** | Admin web UI: service catalog, access rules, governance rules, approvals, user management, Docker discovery, real-time metrics, automatic orphan container cleanup |
 | **Credential Proxy** | Fetches secrets from Vault, injects into supergateway containers at startup |
 | **Vault** | Secret storage (API keys, tokens, passwords) |
 
@@ -201,6 +201,11 @@ ApprovedRecipients              Workflow governance for sensitive parameters
 
 Bundle server reads GatewayStore in one call (`getBundleData()`). ServiceGovernance instances are evaluated at request time by the governance evaluator for logic-tagged tools. ApprovedRecipients provides workflow governance for sensitive parameters (e.g., email recipients) with caller-specific enforcement.
 
+The governance evaluator uses a **three-phase evaluation** for logic-tagged tools:
+1. **Phase 1 — Access Filters**: Check argument-level constraints (regex, in/not_in, max_length) from ServiceGovernance
+2. **Phase 2 — Workflow Bindings**: Check caller-specific workflows like ApprovedRecipients (e.g., restrict AI agent email recipients)
+3. **Phase 3 — Approval Routing**: Route to NPL for approval workflows if required, or auto-allow if all constraints pass
+
 ## Credential Injection
 
 Secrets (API keys, tokens) are stored in Vault and injected into supergateway containers at startup.
@@ -234,7 +239,7 @@ services:
     displayName: "DuckDuckGo"
     type: "MCP_STDIO"
     enabled: true
-    command: "docker run -i --rm mcp/duckduckgo"
+    command: "docker run -i --rm --init mcp/duckduckgo"
     tools:
       - name: "search"
         enabled: true
@@ -308,7 +313,7 @@ noumena-mcp-gateway/
 │   └── static/index.html   # SPA: catalog, rules, approvals, users, discover, metrics
 │
 ├── governance-evaluator/   # Constraint evaluation sidecar (Python)
-│   └── server.py           # Argument-level constraints + NPL approval routing
+│   └── evaluator.py        # Three-phase: access filters → workflow bindings → NPL approval
 │
 │
 ├── credential-proxy/       # Credential injection service (Kotlin/Ktor)

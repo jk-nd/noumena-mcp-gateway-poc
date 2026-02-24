@@ -308,5 +308,5 @@ Bootstrap via seed script: `cd scripts && ./seed.sh`
 ## See Also
 
 - [Full documentation](../docs/CREDENTIAL_INJECTION.md)
-- [Architecture V2](../docs/ARCHITECTURE_V2.md)
+- [Architecture Reference](../docs/ARCHITECTURE.md)
 - [credentials.yaml example](../configs/credentials.yaml)

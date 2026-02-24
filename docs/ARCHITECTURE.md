@@ -84,8 +84,8 @@ This document describes the MCP Gateway's service topology, network isolation de
 | GitHub MCP | Node.js | 8000 | backend, secrets | Supergateway sidecar for GitHub (needs credentials) |
 | Mock Calendar MCP | Node.js | 8000 | backend | Streamable HTTP MCP server for testing |
 | Governance Evaluator | Python | 8090 | policy, public | Argument-level constraint evaluation + NPL approval routing |
-| Dashboard | Python | 8888 | policy, public, backend | Admin web UI: catalog, rules, approvals, users, metrics |
-| Credential Proxy | Python | 9002 | secrets, policy | Vault-to-env credential injection |
+| Dashboard | Python | 8888 | policy, public, backend | Admin web UI: catalog, rules, approvals, users, metrics, orphan container cleanup daemon |
+| Credential Proxy | Kotlin/Ktor | 9002 | secrets, policy | Vault-to-env credential injection |
 | Vault | Go | 8200 | secrets | Secret storage (dev mode) |
 | NPL Inspector | React | 8080 | policy, public | NPL state inspection UI |
 | NPL CORS Proxy | Nginx | 12001 | policy, public | CORS proxy for Inspector browser access to NPL |
@@ -138,7 +138,11 @@ Agent                 Envoy              OPA              NPL Engine        aigw
 
 - **Layer 1 — Catalog** (~0.5ms): Is the service enabled and tool registered? In-memory bundle check.
 - **Layer 2 — Access Rules** (~0.5ms): Does any access rule (claim-based or identity-based) grant this caller access? In-memory bundle check.
-- **Layer 3 — NPL Governance** (~60ms): For `logic` tools only, OPA calls the governance evaluator which checks argument constraints, ApprovedRecipients, and routes to NPL for approval workflows. `acl` tools skip this layer entirely.
+- **Layer 3 — NPL Governance** (~60ms): For `logic` tools only, OPA calls the governance evaluator sidecar, which runs a **three-phase evaluation**:
+  - Phase 1: Access filter constraints (regex, in/not_in, max_length) from ServiceGovernance
+  - Phase 2: Workflow bindings (ApprovedRecipients — caller-specific recipient validation)
+  - Phase 3: NPL approval routing (pending/approve/deny workflows)
+  `acl` tools skip this layer entirely.
 
 **tools/list Response Filtering**: On `tools/list` requests, OPA computes `visible_tool_names` from the catalog and sets an `x-visible-tools` response header. The Envoy Lua filter reads this header on the response path and removes any tools not in the set — ensuring agents only see catalog-registered tools, even though aigw-run discovers all tools from backends.
 

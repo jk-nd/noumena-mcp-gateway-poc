@@ -145,7 +145,7 @@ services:
     displayName: "My Service"
     type: "MCP_STDIO"
     enabled: true
-    command: "docker run -i --rm mcp/my-service"
+    command: "docker run -i --rm --init mcp/my-service"
     requiresCredentials: false
     description: "Description of my service"
     tools:
@@ -177,12 +177,14 @@ To run a new MCP server as part of the Docker stack, add a supergateway sidecar 
       context: ..
       dockerfile: deployments/docker/Dockerfile.supergateway
     environment:
-      MCP_COMMAND: "docker run -i --rm mcp/my-service"
+      MCP_COMMAND: "docker run -i --rm --init --label gateway.parent=gateway-my-service-mcp-1 mcp/my-service"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - backend-net
 ```
+
+> **Note:** The `--init` flag ensures proper signal propagation so inner containers exit cleanly when the parent supergateway stops. The `--label gateway.parent=<container-name>` label links the inner container to its parent for automatic orphan cleanup by the Dashboard's cleanup daemon.
 
 Then register it in the AI Gateway's backend configuration (`deployments/envoy/mcp-servers.json`):
 
@@ -246,6 +248,29 @@ curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/addAcce
   }'
 ```
 
+### Multi-value claims
+
+Access rules support **multi-value claims** for matching multiple values on the same claim key. Use comma-separated values in the claim value:
+
+```bash
+# Rule matching users in EITHER sales OR engineering department
+curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/addAccessRule" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "sales-and-engineering-calendar",
+    "matchType": "claims",
+    "matchClaims": {"department": "sales,engineering", "organization": "acme"},
+    "matchIdentity": "",
+    "allowServices": ["mock-calendar"],
+    "allowTools": ["*"]
+  }'
+```
+
+The comma-separated value `"sales,engineering"` means the rule matches if the caller's `department` claim equals `"sales"` OR `"engineering"`. This works with both scalar JWT claims and array-valued claims (as Keycloak encodes multi-valued attributes).
+
+In the Dashboard, simply add multiple rows with the same claim key and different values — they are automatically merged into a comma-separated value.
+
 ### Emergency kill switch
 
 `revokeSubject` blocks ALL access for a user instantly — across every service:
@@ -275,7 +300,7 @@ Typical propagation time: **2-6 seconds**. The bundle server subscribes to SSE p
 
 ## 5. Governance Rules & Approval Workflows
 
-Governance rules add fine-grained argument-level constraints and approval workflows on top of the access rules layer. They apply to tools tagged as **logic** in the catalog.
+Governance rules add fine-grained access filters (argument-level constraints) and approval workflows on top of the access rules layer. They apply to tools tagged as **logic** in the catalog. The governance evaluator runs a three-phase evaluation: access filters → workflow bindings (ApprovedRecipients) → NPL approval routing.
 
 ### 5.1 ACL vs Logic Tags
 
@@ -294,6 +319,8 @@ curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/setTag"
   -H "Content-Type: application/json" \
   -d '{"serviceName": "duckduckgo", "toolName": "search", "tag": "logic"}'
 ```
+
+> **Auto-switching:** When you add an access filter to an `acl` tool via the Dashboard, the tag automatically switches to `logic` when the filter is saved. You don't need to manually change the tag first — just click "Add Access Filters" on any tool and save a filter.
 
 ### 5.2 Argument-Level Constraints
 

@@ -1,10 +1,8 @@
 # Approval Workflow Deep Dive
 
+> **v3 Legacy Document.** This document describes the v3 `ApprovalPolicy` protocol which has been superseded by **ServiceGovernance** (access filters + approval workflows) and **ApprovedRecipients** (caller-specific workflow governance) in v4. The core concepts (state machine, store-and-forward, one-time consumption) remain valid as design patterns. For current configuration, see the [How-To Guide](HOWTO.md#5-governance-rules--approval-workflows).
+
 Technical reference for the human-in-the-loop approval system, including the ApprovalPolicy state machine, store-and-forward replay, and the NPL protocol API.
-
-> **Context:** ApprovalPolicy is one implementation of the gateway's generic [contextual routing framework](HOWTO.md#6-contextual-routing-protocols). The framework supports any protocol that implements `evaluate()` returning `"allow"`, `"deny"`, or `"pending:<id>"`. For a contrasting example, see [RateLimitPolicy](HOWTO.md#62-ratelimitpolicy-automated-rate-limiting) — a fully automated protocol that returns immediate allow/deny decisions based on per-user call counters.
-
-> This is a reference companion to the [How-To Guide](HOWTO.md). See [Section 6](HOWTO.md#6-contextual-routing-protocols) for setup instructions.
 
 ---
 
@@ -545,7 +543,6 @@ Removes all non-pending approvals from the list. Pending approvals are preserved
 ---
 
 **See also:**
-- [How-To Guide](HOWTO.md) — step-by-step setup instructions
+- [How-To Guide](HOWTO.md) — step-by-step setup instructions (v4 governance in Section 5)
 - [Architecture Reference](ARCHITECTURE.md) — system topology and data flow
-- [Security Policy Reference](SECURITY_POLICY_REFERENCE.md) — writing `npl_evaluate` rules
-- [OPA Policy Internals](OPA_POLICY_INTERNALS.md) — how OPA triggers Layer 2 evaluation
+- [v4 Governance Design](DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) — three-layer architecture that supersedes this document

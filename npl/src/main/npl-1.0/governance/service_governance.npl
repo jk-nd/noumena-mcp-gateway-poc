@@ -115,7 +115,7 @@ protocol[pAdmin, pGateway, pApprover] ServiceGovernance() {
             var newConfig = ToolConfig(
                 toolName = toolName,
                 constraints = listOf<ToolConstraint>(constraint),
-                requiresApproval = true
+                requiresApproval = false
             );
             toolConfigs = toolConfigs.with(toolName, newConfig);
         };

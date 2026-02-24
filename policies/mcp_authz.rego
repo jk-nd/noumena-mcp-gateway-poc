@@ -131,6 +131,8 @@ tool_tag := catalog[service_name].tools[tool_name].tag
 # Match a JWT claim value against a rule's expected value.
 # Handles both scalar ("acme") and array (["acme"]) JWT claims,
 # since Keycloak encodes multi-valued attributes as arrays.
+# Also handles comma-separated expected values (e.g. "sales,engineering")
+# so that a single Map<Text,Text> key can match multiple allowed values.
 claim_value_matches(jwt_val, expected) if {
 	jwt_val == expected
 }
@@ -138,6 +140,19 @@ claim_value_matches(jwt_val, expected) if {
 claim_value_matches(jwt_val, expected) if {
 	is_array(jwt_val)
 	expected in jwt_val
+}
+
+claim_value_matches(jwt_val, expected) if {
+	contains(expected, ",")
+	some part in split(expected, ",")
+	trim_space(part) == jwt_val
+}
+
+claim_value_matches(jwt_val, expected) if {
+	is_array(jwt_val)
+	contains(expected, ",")
+	some part in split(expected, ",")
+	trim_space(part) in jwt_val
 }
 
 caller_authorized if {
