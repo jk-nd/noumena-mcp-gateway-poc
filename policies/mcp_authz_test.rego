@@ -2,10 +2,10 @@
 #
 # Run with: opa test policies/ -v
 #
-# Tests the three-layer governance model:
-#   Layer 1 — Catalog (acl/logic tags)
-#   Layer 2 — Access Rules (claim-based + identity-based)
-#   Layer 3 — In-memory constraints, recipients, and approval workflows
+# Tests the three-tier governance model:
+#   Tier 1 — Access (catalog + access rules)
+#   Tier 2 — Guardrails (constraints + allowlists, in-memory)
+#   Tier 3 — Workflow (approval state machine, NPL call)
 
 package envoy.authz
 
@@ -70,27 +70,27 @@ mock_jwt_unknown := token if {
 
 mock_bearer(jwt) := sprintf("Bearer %s", [jwt])
 
-# --- Mock v4 catalog (services + tools with tags) ---
+# --- Mock v5 catalog (services + tools, no tags) ---
 
 mock_catalog := {
 	"mock-calendar": {
 		"enabled": true,
 		"tools": {
-			"list_events": {"tag": "acl"},
-			"create_event": {"tag": "logic"},
-			"send_email": {"tag": "logic"},
+			"list_events": {},
+			"create_event": {},
+			"send_email": {},
 		},
 	},
 	"duckduckgo": {
 		"enabled": true,
 		"tools": {
-			"search": {"tag": "acl"},
-			"fetch_page": {"tag": "acl"},
+			"search": {},
+			"fetch_page": {},
 		},
 	},
 }
 
-# --- Mock v4 access rules ---
+# --- Mock v5 access rules ---
 
 mock_access_rules := [
 	{
@@ -114,9 +114,11 @@ mock_revoked := []
 
 # --- Mock governance data (empty defaults for most tests) ---
 
-mock_tool_configs_empty := {}
+mock_guardrails_empty := {}
 
-mock_recipient_bindings_empty := {}
+mock_workflow_config_empty := {}
+
+mock_workflow_instances_empty := {}
 
 mock_tool_authorizations_empty := []
 
@@ -198,7 +200,7 @@ test_deny_tool_call_disabled_service if {
 	disabled_catalog := {
 		"mock-calendar": {
 			"enabled": false,
-			"tools": {"list_events": {"tag": "acl"}},
+			"tools": {"list_events": {}},
 		},
 	}
 
@@ -227,7 +229,7 @@ test_deny_tool_call_empty_catalog if {
 # 3. Access rules: claim match, identity match, wildcard, no match, OR, revoked
 # ============================================================================
 
-# Jarvis (sales) matches "sales-calendar" rule -> allowed on mock-calendar open tools
+# Jarvis (sales) matches "sales-calendar" rule -> allowed on mock-calendar
 test_access_rule_claim_match if {
 	allow with input as mock_input(
 		"POST", "/mcp",
@@ -251,7 +253,7 @@ test_access_rule_identity_match if {
 		with revoked_subjects as mock_revoked
 }
 
-# Alice (engineering) matches "engineering-all" -> allowed on duckduckgo open tools
+# Alice (engineering) matches "engineering-all" -> allowed on duckduckgo
 test_access_rule_wildcard_tool if {
 	allow with input as mock_input(
 		"POST", "/mcp",
@@ -320,10 +322,10 @@ test_revoked_subject_denied if {
 }
 
 # ============================================================================
-# 4. ACL tool path: allowed, denied by access rules
+# 4. Simple tool path: no guardrails, no workflow → access sufficient
 # ============================================================================
 
-test_acl_tool_allowed if {
+test_simple_tool_allowed if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -334,7 +336,7 @@ test_acl_tool_allowed if {
 		with revoked_subjects as mock_revoked
 }
 
-test_acl_tool_denied_no_rule if {
+test_simple_tool_denied_no_rule if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
@@ -346,10 +348,11 @@ test_acl_tool_denied_no_rule if {
 }
 
 # ============================================================================
-# 5. Logic tool path: no constraints, no bindings, no approval -> allow
+# 5. Tool with workflow: approval paths
 # ============================================================================
 
-test_logic_tool_no_governance_allow if {
+# No guardrails, no workflow → allow (simple tool)
+test_tool_no_governance_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -358,13 +361,14 @@ test_logic_tool_no_governance_allow if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# Logic tool + approval workflow returns allow -> allowed
-test_logic_tool_approval_allow if {
+# Workflow returns allow -> allowed
+test_tool_workflow_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -373,14 +377,15 @@ test_logic_tool_approval_allow if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as {"mock-calendar": {"create_event": true}}
+		with workflow_instances as {"mock-calendar": "wf-1"}
 		with tool_authorizations as mock_tool_authorizations_empty
-		with npl_approval_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
+		with npl_workflow_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
 }
 
-# Logic tool + approval workflow returns deny -> denied
-test_logic_tool_approval_deny if {
+# Workflow returns deny -> denied
+test_tool_workflow_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -389,14 +394,15 @@ test_logic_tool_approval_deny if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as {"mock-calendar": {"create_event": true}}
+		with workflow_instances as {"mock-calendar": "wf-1"}
 		with tool_authorizations as mock_tool_authorizations_empty
-		with npl_approval_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
+		with npl_workflow_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
 }
 
-# Logic tool + approval workflow returns pending -> denied
-test_logic_tool_approval_pending if {
+# Workflow returns pending -> denied
+test_tool_workflow_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -405,10 +411,11 @@ test_logic_tool_approval_pending if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as {"mock-calendar": {"create_event": true}}
+		with workflow_instances as {"mock-calendar": "wf-1"}
 		with tool_authorizations as mock_tool_authorizations_empty
-		with npl_approval_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
+		with npl_workflow_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
 }
 
 # ============================================================================
@@ -426,8 +433,9 @@ test_constraint_in_pass if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -440,8 +448,9 @@ test_constraint_in_fail if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -456,8 +465,9 @@ test_constraint_not_in_pass if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -470,8 +480,9 @@ test_constraint_not_in_fail if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -486,8 +497,9 @@ test_constraint_contains_pass if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Must be Acme email"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Must be Acme email"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -500,8 +512,9 @@ test_constraint_contains_fail if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Must be Acme email"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Must be Acme email"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -516,8 +529,9 @@ test_constraint_not_contains_pass if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "notes", "operator": "not_contains", "values": ["confidential", "restricted"], "description": "No sensitive content"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "notes", "operator": "not_contains", "values": ["confidential", "restricted"], "description": "No sensitive content"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -530,8 +544,9 @@ test_constraint_not_contains_fail if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "notes", "operator": "not_contains", "values": ["confidential", "restricted"], "description": "No sensitive content"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "notes", "operator": "not_contains", "values": ["confidential", "restricted"], "description": "No sensitive content"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -546,8 +561,9 @@ test_constraint_regex_pass if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "email", "operator": "regex", "values": ["^[a-zA-Z0-9._%+-]+@acme\\.com$"], "description": "Must be Acme email"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "email", "operator": "regex", "values": ["^[a-zA-Z0-9._%+-]+@acme\\.com$"], "description": "Must be Acme email"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -560,8 +576,9 @@ test_constraint_regex_fail if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "email", "operator": "regex", "values": ["^[a-zA-Z0-9._%+-]+@acme\\.com$"], "description": "Must be Acme email"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "email", "operator": "regex", "values": ["^[a-zA-Z0-9._%+-]+@acme\\.com$"], "description": "Must be Acme email"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -576,8 +593,9 @@ test_constraint_max_length_pass if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "title", "operator": "max_length", "values": ["50"], "description": "Title max 50 chars"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "title", "operator": "max_length", "values": ["50"], "description": "Title max 50 chars"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -590,8 +608,9 @@ test_constraint_max_length_fail if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "title", "operator": "max_length", "values": ["50"], "description": "Title max 50 chars"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "title", "operator": "max_length", "values": ["50"], "description": "Title max 50 chars"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -609,13 +628,14 @@ test_constraint_missing_arg_passes if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "nonexistent_arg", "operator": "in", "values": ["a", "b"], "description": "Only when present"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "nonexistent_arg", "operator": "in", "values": ["a", "b"], "description": "Only when present"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# No tool config exists -> pass (no constraints)
-test_constraint_no_tool_config_passes if {
+# No guardrails exists -> pass (no constraints)
+test_constraint_no_guardrails_passes if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -624,8 +644,9 @@ test_constraint_no_tool_config_passes if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -639,20 +660,21 @@ test_constraint_multiple_one_fails if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [
 			{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Valid priority"},
 			{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"},
-		], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
 # ============================================================================
-# 8. Approved Recipients
+# 8. Allowlists (replaces Approved Recipients)
 # ============================================================================
 
 # Domain match -> allow
-test_recipient_domain_match_allow if {
+test_allowlist_domain_match_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -661,13 +683,14 @@ test_recipient_domain_match_allow if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with guardrails as {"mock-calendar": {"send_email": {"constraints": [], "allowlists": [{"paramName": "to", "matchMode": "domain", "callerScope": "jarvis@acme.com", "allowedValues": [], "allowedPatterns": ["acme.com"], "description": "Approved domains"}]}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
 # Exact email match -> allow
-test_recipient_email_match_allow if {
+test_allowlist_email_match_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -676,13 +699,14 @@ test_recipient_email_match_allow if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": ["dave@external-vendor.com"], "approvedDomains": ["acme.com"]}}
+		with guardrails as {"mock-calendar": {"send_email": {"constraints": [], "allowlists": [{"paramName": "to", "matchMode": "domain", "callerScope": "jarvis@acme.com", "allowedValues": ["dave@external-vendor.com"], "allowedPatterns": ["acme.com"], "description": "Approved recipients"}]}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
 # Not approved -> deny
-test_recipient_not_approved_deny if {
+test_allowlist_not_approved_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -691,13 +715,14 @@ test_recipient_not_approved_deny if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": ["dave@external-vendor.com"], "approvedDomains": ["acme.com"]}}
+		with guardrails as {"mock-calendar": {"send_email": {"constraints": [], "allowlists": [{"paramName": "to", "matchMode": "domain", "callerScope": "jarvis@acme.com", "allowedValues": ["dave@external-vendor.com"], "allowedPatterns": ["acme.com"], "description": "Approved recipients"}]}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# Agent-specific: different caller bypasses binding -> allow (Path A: no binding applies)
-test_recipient_different_agent_bypasses if {
+# Agent-specific: different caller bypasses allowlist -> allow (no allowlist applies)
+test_allowlist_different_agent_bypasses if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_alice),
@@ -706,13 +731,14 @@ test_recipient_different_agent_bypasses if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with guardrails as {"mock-calendar": {"send_email": {"constraints": [], "allowlists": [{"paramName": "to", "matchMode": "domain", "callerScope": "jarvis@acme.com", "allowedValues": [], "allowedPatterns": ["acme.com"], "description": "Approved domains"}]}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# No binding for service -> no effect (Path A passes)
-test_recipient_no_binding_allows if {
+# No allowlist for service -> no effect (simple tool passes)
+test_allowlist_no_guardrails_allows if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -721,8 +747,9 @@ test_recipient_no_binding_allows if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {}
+		with guardrails as {}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
@@ -740,8 +767,9 @@ test_tool_authorization_override_allows if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as [{"instanceId": "auth-1", "serviceName": "mock-calendar", "toolName": "create_event", "agentIdentity": "jarvis@acme.com", "scope": "one-shot"}]
 		with has_tool_authorization_override as true
 }
@@ -756,8 +784,9 @@ test_constraint_fail_no_override_denies if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as []
 }
 
@@ -765,7 +794,7 @@ test_constraint_fail_no_override_denies if {
 # 10. Combined paths
 # ============================================================================
 
-# Constraints pass + no approval + no binding -> allow (fully in-memory)
+# Constraints pass + no workflow + no allowlist -> allow (fully in-memory)
 test_combined_constraints_pass_no_governance if {
 	allow with input as mock_input(
 		"POST", "/mcp",
@@ -775,16 +804,17 @@ test_combined_constraints_pass_no_governance if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [
 			{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Valid priority"},
 			{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Acme only"},
-		], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# Constraints pass + recipient denied -> deny
-test_combined_constraints_pass_recipient_denied if {
+# Constraints pass + allowlist denied -> deny
+test_combined_constraints_pass_allowlist_denied if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -793,13 +823,14 @@ test_combined_constraints_pass_recipient_denied if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with guardrails as {"mock-calendar": {"send_email": {"constraints": [], "allowlists": [{"paramName": "to", "matchMode": "domain", "callerScope": "jarvis@acme.com", "allowedValues": [], "allowedPatterns": ["acme.com"], "description": "Approved domains"}]}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# Constraints pass + approval pending -> pending with headers
-test_combined_constraints_pass_approval_pending if {
+# Constraints pass + workflow pending -> pending with headers
+test_combined_constraints_pass_workflow_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -808,10 +839,11 @@ test_combined_constraints_pass_approval_pending if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as {"mock-calendar": {"create_event": true}}
+		with workflow_instances as {"mock-calendar": "wf-1"}
 		with tool_authorizations as mock_tool_authorizations_empty
-		with npl_approval_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
+		with npl_workflow_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
 }
 
 # ============================================================================
@@ -855,10 +887,11 @@ test_pending_headers if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as {"mock-calendar": {"create_event": true}}
+		with workflow_instances as {"mock-calendar": "wf-1"}
 		with tool_authorizations as mock_tool_authorizations_empty
-		with npl_approval_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
+		with npl_workflow_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
 
 	rh["x-request-id"] == "REQ-42"
 	rh["retry-after"] == "30"
@@ -900,15 +933,16 @@ test_constraint_denied_reason_header if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "allowlists": []}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as []
 
 	contains(r, "Constraint violated")
 }
 
-# Recipient denied — reason header
-test_recipient_denied_reason_header if {
+# Allowlist denied — reason header
+test_allowlist_denied_reason_header if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -917,11 +951,12 @@ test_recipient_denied_reason_header if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as mock_tool_configs_empty
-		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with guardrails as {"mock-calendar": {"send_email": {"constraints": [], "allowlists": [{"paramName": "to", "matchMode": "domain", "callerScope": "jarvis@acme.com", "allowedValues": [], "allowedPatterns": ["acme.com"], "description": "Approved domains"}]}}}
+		with workflow_config as mock_workflow_config_empty
+		with workflow_instances as mock_workflow_instances_empty
 		with tool_authorizations as mock_tool_authorizations_empty
 
-	contains(r, "Recipient not approved")
+	contains(r, "Allowlist denied")
 }
 
 test_no_pending_headers_when_allowed if {
@@ -933,10 +968,11 @@ test_no_pending_headers_when_allowed if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
-		with recipient_bindings as mock_recipient_bindings_empty
+		with guardrails as mock_guardrails_empty
+		with workflow_config as {"mock-calendar": {"create_event": true}}
+		with workflow_instances as {"mock-calendar": "wf-1"}
 		with tool_authorizations as mock_tool_authorizations_empty
-		with npl_approval_decision as {"decision": "allow", "requestId": "REQ-1", "message": "OK"}
+		with npl_workflow_decision as {"decision": "allow", "requestId": "REQ-1", "message": "OK"}
 
 	not rh["x-request-id"]
 	not rh["retry-after"]
@@ -1000,8 +1036,8 @@ test_tool_name_from_qualified_tool if {
 
 test_granted_services_excludes_disabled if {
 	disabled_catalog := {
-		"mock-calendar": {"enabled": true, "tools": {"list_events": {"tag": "acl"}}},
-		"duckduckgo": {"enabled": false, "tools": {"search": {"tag": "acl"}}},
+		"mock-calendar": {"enabled": true, "tools": {"list_events": {}}},
+		"duckduckgo": {"enabled": false, "tools": {"search": {}}},
 	}
 
 	wildcard_rules := [

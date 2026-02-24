@@ -161,3 +161,19 @@ changesets:
           sources:
             - ../npl-1.0
           rules: rules.yml
+
+  # V21: Three-tier governance — Guardrails + Workflow protocols, tag-free ToolEntry
+  - name: mcp-21.0-three-tier-governance
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml
+
+  # V22: Delete legacy ServiceGovernance + ApprovedRecipients protocols
+  - name: mcp-22.0-remove-legacy-protocols
+    changes:
+      - migrate:
+          sources:
+            - ../npl-1.0
+          rules: rules.yml

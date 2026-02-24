@@ -100,12 +100,12 @@ def auth_header() -> dict:
     return {"Authorization": f"Bearer {token_manager.get_token()}"}
 
 
-# --- NPL data fetching (v4: GatewayStore + ServiceGovernance + constraints/recipients/authorizations) ---
+# --- NPL data fetching (v5: GatewayStore + Guardrails + Workflow + ToolAuthorization) ---
 def fetch_npl_data() -> dict:
-    """Fetch all policy data from NPL GatewayStore singleton + governance data for OPA bundle.
+    """Fetch all policy data from NPL for OPA bundle.
 
-    Fetches: catalog, access_rules, revoked_subjects, governance_instances,
-    tool_configs (constraints), recipient_bindings, tool_authorizations.
+    Fetches: catalog, access_rules, revoked_subjects, guardrails,
+    workflow_config, workflow_instances, tool_authorizations.
     """
     headers = auth_header()
 
@@ -121,9 +121,9 @@ def fetch_npl_data() -> dict:
             "catalog": {},
             "access_rules": [],
             "revoked_subjects": [],
-            "governance_instances": {},
-            "tool_configs": {},
-            "recipient_bindings": {},
+            "guardrails": {},
+            "workflow_config": {},
+            "workflow_instances": {},
             "tool_authorizations": [],
             "npl_url": NPL_URL,
             "gateway_token": token_manager.get_token(),
@@ -141,12 +141,12 @@ def fetch_npl_data() -> dict:
     data_resp.raise_for_status()
     bundle_data = data_resp.json()
 
-    # Transform catalog: CatalogEntry → {enabled, tools: {name: {tag}}}
+    # Transform catalog: CatalogEntry → {enabled, tools: {name: {}}}
     catalog = {}
     for svc_name, entry in bundle_data.get("catalog", {}).items():
         tools = {}
         for tool_name, tool_entry in entry.get("tools", {}).items():
-            tools[tool_name] = {"tag": tool_entry.get("tag", "acl")}
+            tools[tool_name] = {}
         catalog[svc_name] = {
             "enabled": entry.get("enabled", False),
             "tools": tools,
@@ -170,105 +170,76 @@ def fetch_npl_data() -> dict:
 
     revoked_subjects = list(bundle_data.get("revokedSubjects", []))
 
-    # 3. Discover ServiceGovernance instances + fetch tool configs
-    governance_instances = {}
-    tool_configs = {}
+    # 3. Discover Guardrails instances → build guardrails dict
+    guardrails = {}
     try:
-        gov_resp = requests.get(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/",
+        gr_resp = requests.get(
+            f"{NPL_URL}/npl/governance/Guardrails/",
             headers=headers,
             timeout=10,
         )
-        gov_resp.raise_for_status()
-        gov_items = gov_resp.json().get("items", [])
-        for item in gov_items:
-            instance_id = item.get("@id", "")
-            svc_name = item.get("serviceName", "")
-            if not svc_name or not instance_id:
-                continue
-            governance_instances[svc_name] = instance_id
-
-            # Fetch tool configs (constraints + requiresApproval) for this service
-            try:
-                cfg_resp = requests.post(
-                    f"{NPL_URL}/npl/governance/ServiceGovernance/{instance_id}/getToolConfigs",
-                    headers={**headers, "Content-Type": "application/json"},
-                    json={},
-                    timeout=10,
-                )
-                if cfg_resp.status_code < 400:
-                    svc_tools = {}
-                    for tc in cfg_resp.json():
-                        t_name = tc.get("toolName", "")
-                        if t_name:
-                            svc_tools[t_name] = {
-                                "constraints": tc.get("constraints", []),
-                                "requiresApproval": tc.get("requiresApproval", False),
-                            }
-                    if svc_tools:
-                        tool_configs[svc_name] = svc_tools
-            except Exception as e:
-                log.warning("Failed to fetch tool configs for %s: %s", svc_name, e)
-    except Exception as e:
-        log.warning("Failed to discover ServiceGovernance instances: %s", e)
-
-    # 4. Fetch ApprovedRecipients instances
-    recipient_bindings = {}
-    try:
-        ar_resp = requests.get(
-            f"{NPL_URL}/npl/governance/ApprovedRecipients/",
-            headers=headers,
-            timeout=10,
-        )
-        if ar_resp.status_code < 400:
-            ar_items = ar_resp.json().get("items", [])
-            for item in ar_items:
+        if gr_resp.status_code < 400:
+            gr_items = gr_resp.json().get("items", [])
+            for item in gr_items:
                 instance_id = item.get("@id", "")
                 svc_name = item.get("serviceName", "")
-                state = item.get("@state", "active")
-                if not svc_name or not instance_id or state != "active":
+                if not svc_name or not instance_id:
                     continue
                 try:
-                    cfg_resp = requests.post(
-                        f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/getConfig",
+                    data_resp2 = requests.post(
+                        f"{NPL_URL}/npl/governance/Guardrails/{instance_id}/getGuardrailsData",
                         headers={**headers, "Content-Type": "application/json"},
                         json={},
                         timeout=10,
                     )
-                    config = cfg_resp.json() if cfg_resp.status_code < 400 else {}
-
-                    recip_resp = requests.post(
-                        f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/getApprovedRecipients",
-                        headers={**headers, "Content-Type": "application/json"},
-                        json={},
-                        timeout=10,
-                    )
-                    recipients = list(recip_resp.json()) if recip_resp.status_code < 400 else []
-
-                    dom_resp = requests.post(
-                        f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/getApprovedDomains",
-                        headers={**headers, "Content-Type": "application/json"},
-                        json={},
-                        timeout=10,
-                    )
-                    domains = list(dom_resp.json()) if dom_resp.status_code < 400 else []
-
-                    agent_id = config.get("agentIdentity", "")
-                    if not agent_id:
-                        log.debug("Skipping unconfigured ApprovedRecipients for %s (no agent)", svc_name)
-                        continue
-
-                    recipient_bindings[svc_name] = {
-                        "toolName": config.get("toolName", "send_email"),
-                        "paramName": config.get("paramName", "to"),
-                        "agentIdentity": agent_id,
-                        "approvedRecipients": recipients,
-                        "approvedDomains": domains,
-                    }
+                    if data_resp2.status_code < 400:
+                        svc_guardrails = {}
+                        for tg in data_resp2.json():
+                            t_name = tg.get("toolName", "")
+                            if t_name:
+                                svc_guardrails[t_name] = {
+                                    "constraints": tg.get("constraints", []),
+                                    "allowlists": tg.get("allowlists", []),
+                                }
+                        if svc_guardrails:
+                            guardrails[svc_name] = svc_guardrails
                 except Exception as e:
-                    log.warning("Failed to fetch ApprovedRecipients data for %s: %s", svc_name, e)
+                    log.warning("Failed to fetch guardrails data for %s: %s", svc_name, e)
     except Exception as e:
-        log.warning("Failed to fetch ApprovedRecipients instances: %s", e)
+        log.warning("Failed to discover Guardrails instances: %s", e)
+
+    # 4. Discover Workflow instances → build workflow_config + workflow_instances
+    workflow_config = {}
+    workflow_instances = {}
+    try:
+        wf_resp = requests.get(
+            f"{NPL_URL}/npl/governance/Workflow/",
+            headers=headers,
+            timeout=10,
+        )
+        if wf_resp.status_code < 400:
+            wf_items = wf_resp.json().get("items", [])
+            for item in wf_items:
+                instance_id = item.get("@id", "")
+                svc_name = item.get("serviceName", "")
+                if not svc_name or not instance_id:
+                    continue
+                workflow_instances[svc_name] = instance_id
+                try:
+                    cfg_resp = requests.post(
+                        f"{NPL_URL}/npl/governance/Workflow/{instance_id}/getWorkflowConfig",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={},
+                        timeout=10,
+                    )
+                    if cfg_resp.status_code < 400:
+                        wf_tools = cfg_resp.json()
+                        if wf_tools:
+                            workflow_config[svc_name] = wf_tools
+                except Exception as e:
+                    log.warning("Failed to fetch workflow config for %s: %s", svc_name, e)
+    except Exception as e:
+        log.warning("Failed to discover Workflow instances: %s", e)
 
     # 5. Fetch ToolAuthorization instances (authorized state only)
     tool_authorizations = []
@@ -299,9 +270,9 @@ def fetch_npl_data() -> dict:
         "catalog": catalog,
         "access_rules": access_rules,
         "revoked_subjects": revoked_subjects,
-        "governance_instances": governance_instances,
-        "tool_configs": tool_configs,
-        "recipient_bindings": recipient_bindings,
+        "guardrails": guardrails,
+        "workflow_config": workflow_config,
+        "workflow_instances": workflow_instances,
         "tool_authorizations": tool_authorizations,
         "npl_url": NPL_URL,
         "gateway_token": token_manager.get_token(),
@@ -322,7 +293,7 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
 
     # Enrich data with bundle metadata (available to OPA as data._bundle_metadata)
     policy_data["_bundle_metadata"] = {
-        "version": "4.0",
+        "version": "5.0",
         "built_at": built_at,
         "revision": revision,
         "sse_event_id": current_sse_event_id,
@@ -338,9 +309,9 @@ def build_bundle(policy_data: dict) -> tuple[bytes, str, str]:
                 "catalog",
                 "access_rules",
                 "revoked_subjects",
-                "governance_instances",
-                "tool_configs",
-                "recipient_bindings",
+                "guardrails",
+                "workflow_config",
+                "workflow_instances",
                 "tool_authorizations",
                 "npl_url",
                 "gateway_token",
@@ -395,9 +366,8 @@ def rebuild():
                 "sse_event_id": current_sse_event_id,
                 "catalog_count": len(policy_data["catalog"]),
                 "access_rules_count": len(policy_data["access_rules"]),
-                "governance_instances_count": len(policy_data["governance_instances"]),
-                "tool_configs_count": sum(len(v) for v in policy_data["tool_configs"].values()),
-                "recipient_bindings_count": len(policy_data["recipient_bindings"]),
+                "guardrails_count": sum(len(v) for v in policy_data["guardrails"].values()),
+                "workflow_instances_count": len(policy_data["workflow_instances"]),
                 "tool_authorizations_count": len(policy_data["tool_authorizations"]),
                 "changed": revision != prev_revision,
             })

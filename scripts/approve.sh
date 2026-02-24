@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# approve.sh — CLI helper for approvers to manage pending tool requests.
+# approve.sh — CLI helper for approvers to manage pending workflow requests.
 #
 # Usage:
 #   ./scripts/approve.sh list                       # List pending approvals
@@ -46,17 +46,17 @@ get_token() {
     | jq -r '.access_token'
 }
 
-# Get all ServiceGovernance instances as JSON
-get_governance_list() {
+# Get all Workflow instances as JSON
+get_workflow_list() {
   curl -sf \
-    "${NPL_URL}/npl/governance/ServiceGovernance/" \
+    "${NPL_URL}/npl/governance/Workflow/" \
     -H "Authorization: Bearer ${TOKEN}" \
     | jq -r '.items'
 }
 
 # Extract just the IDs
-get_governance_ids() {
-  echo "$GOV_LIST" | jq -r '.[]."@id"'
+get_workflow_ids() {
+  echo "$WF_LIST" | jq -r '.[]."@id"'
 }
 
 # ---------------------------------------------------------------------------
@@ -72,25 +72,24 @@ if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
   exit 1
 fi
 
-GOV_BASE="/npl/governance/ServiceGovernance"
-GOV_LIST=$(get_governance_list)
+WF_BASE="/npl/governance/Workflow"
+WF_LIST=$(get_workflow_list)
 
 case "$ACTION" in
   list)
     bold "Pending approvals:"
     echo ""
-    for gid in $(get_governance_ids); do
+    for wid in $(get_workflow_ids); do
       RESPONSE=$(curl -sf -X POST \
-        "${NPL_URL}${GOV_BASE}/${gid}/getPendingRequests" \
+        "${NPL_URL}${WF_BASE}/${wid}/getPendingRequests" \
         -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: application/json" \
         -d '{}' 2>/dev/null || echo "[]")
 
       COUNT=$(echo "$RESPONSE" | jq 'if type == "array" then length else 0 end')
       if [[ "$COUNT" -gt 0 ]]; then
-        # Get service name from the list response
-        SVC_NAME=$(echo "$GOV_LIST" | jq -r --arg id "$gid" '.[] | select(.["@id"] == $id) | .serviceName // "unknown"')
-        bold "  Service: ${SVC_NAME} (${gid})"
+        SVC_NAME=$(echo "$WF_LIST" | jq -r --arg id "$wid" '.[] | select(.["@id"] == $id) | .serviceName // "unknown"')
+        bold "  Service: ${SVC_NAME} (${wid})"
         echo "$RESPONSE" | jq -r '.[] | "    \(.requestId)  \(.toolName)  caller=\(.callerIdentity)  status=\(.status)"'
         echo ""
       fi
@@ -102,9 +101,9 @@ case "$ACTION" in
     REQUEST_ID="$2"
     bold "Approving ${REQUEST_ID}..."
 
-    for gid in $(get_governance_ids); do
+    for wid in $(get_workflow_ids); do
       HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-        "${NPL_URL}${GOV_BASE}/${gid}/approve" \
+        "${NPL_URL}${WF_BASE}/${wid}/approve" \
         -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: application/json" \
         -d "{\"requestId\":\"${REQUEST_ID}\"}")
@@ -114,7 +113,7 @@ case "$ACTION" in
         exit 0
       fi
     done
-    red "ERROR: Request ${REQUEST_ID} not found in any governance instance"
+    red "ERROR: Request ${REQUEST_ID} not found in any workflow instance"
     exit 1
     ;;
 
@@ -124,9 +123,9 @@ case "$ACTION" in
     REASON="$3"
     bold "Denying ${REQUEST_ID}..."
 
-    for gid in $(get_governance_ids); do
+    for wid in $(get_workflow_ids); do
       HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-        "${NPL_URL}${GOV_BASE}/${gid}/deny" \
+        "${NPL_URL}${WF_BASE}/${wid}/deny" \
         -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: application/json" \
         -d "{\"requestId\":\"${REQUEST_ID}\",\"reason\":\"${REASON}\"}")
@@ -136,7 +135,7 @@ case "$ACTION" in
         exit 0
       fi
     done
-    red "ERROR: Request ${REQUEST_ID} not found in any governance instance"
+    red "ERROR: Request ${REQUEST_ID} not found in any workflow instance"
     exit 1
     ;;
 

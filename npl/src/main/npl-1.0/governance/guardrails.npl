@@ -1,0 +1,296 @@
+package governance
+
+/**
+ * Constraint on a tool parameter.
+ * operator: in, not_in, contains, not_contains, regex, max_length
+ */
+struct ToolConstraint {
+    paramName: Text,
+    operator: Text,
+    values: List<Text>,
+    description: Text
+};
+
+/**
+ * Managed allowlist entry for a tool parameter.
+ * matchMode: "exact" (value in list) or "domain" (extract email domain, check patterns)
+ * callerScope: empty = all callers, or specific identity like "jarvis@acme.com"
+ */
+struct AllowlistEntry {
+    paramName: Text,
+    matchMode: Text,
+    callerScope: Text,
+    allowedValues: List<Text>,
+    allowedPatterns: List<Text>,
+    description: Text
+};
+
+/**
+ * Guardrails configuration for a single tool.
+ */
+struct ToolGuardrails {
+    toolName: Text,
+    constraints: List<ToolConstraint>,
+    allowlists: List<AllowlistEntry>
+};
+
+/**
+ * Guardrails protocol — Tier 2 governance.
+ *
+ * Manages constraints and allowlists for tool parameters.
+ * Evaluated in-memory by OPA from bundle data (no NPL call at request time).
+ *
+ * @party pAdmin   Organization administrator
+ * @party pGateway Gateway system service (reads guardrails data for bundle)
+ */
+@api
+protocol[pAdmin, pGateway] Guardrails() {
+    initial state active;
+
+    var serviceName: Text = "";
+    private var toolGuardrails: Map<Text, ToolGuardrails> = mapOf<Text, ToolGuardrails>();
+
+    @api
+    permission[pAdmin] setup(name: Text) | active {
+        require(serviceName == "", "Already initialized");
+        serviceName = name;
+        info("[Guardrails] Initialized for service: " + name);
+    };
+
+    // ========================================================================
+    // Constraint CRUD
+    // ========================================================================
+
+    @api
+    permission[pAdmin] addConstraint(
+        toolName: Text,
+        paramName: Text,
+        operator: Text,
+        values: List<Text>,
+        description: Text
+    ) | active {
+        require(
+            operator == "in" || operator == "not_in" || operator == "contains" ||
+            operator == "not_contains" || operator == "regex" || operator == "max_length",
+            "Operator must be one of: in, not_in, contains, not_contains, regex, max_length"
+        );
+
+        var constraint = ToolConstraint(
+            paramName = paramName,
+            operator = operator,
+            values = values,
+            description = description
+        );
+
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        if (maybeGuardrails.isPresent()) {
+            var existing = maybeGuardrails.getOrFail();
+            var filtered = existing.constraints.filter(
+                function(c: ToolConstraint) -> c.paramName != paramName || c.operator != operator
+            );
+            var updated = ToolGuardrails(
+                toolName = toolName,
+                constraints = filtered.with(constraint),
+                allowlists = existing.allowlists
+            );
+            toolGuardrails = toolGuardrails.with(toolName, updated);
+        } else {
+            var newGuardrails = ToolGuardrails(
+                toolName = toolName,
+                constraints = listOf<ToolConstraint>(constraint),
+                allowlists = listOf<AllowlistEntry>()
+            );
+            toolGuardrails = toolGuardrails.with(toolName, newGuardrails);
+        };
+    };
+
+    @api
+    permission[pAdmin] removeConstraint(toolName: Text, paramName: Text) | active {
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        require(maybeGuardrails.isPresent(), "No guardrails for tool");
+        var existing = maybeGuardrails.getOrFail();
+        var filtered = existing.constraints.filter(
+            function(c: ToolConstraint) -> c.paramName != paramName
+        );
+        var updated = ToolGuardrails(
+            toolName = toolName,
+            constraints = filtered,
+            allowlists = existing.allowlists
+        );
+        toolGuardrails = toolGuardrails.with(toolName, updated);
+    };
+
+    @api
+    permission[pAdmin] clearConstraints(toolName: Text) | active {
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        if (maybeGuardrails.isPresent()) {
+            var existing = maybeGuardrails.getOrFail();
+            var updated = ToolGuardrails(
+                toolName = toolName,
+                constraints = listOf<ToolConstraint>(),
+                allowlists = existing.allowlists
+            );
+            toolGuardrails = toolGuardrails.with(toolName, updated);
+        };
+    };
+
+    // ========================================================================
+    // Allowlist CRUD
+    // ========================================================================
+
+    @api
+    permission[pAdmin] addAllowlist(
+        toolName: Text,
+        paramName: Text,
+        matchMode: Text,
+        callerScope: Text,
+        description: Text
+    ) | active {
+        require(matchMode == "exact" || matchMode == "domain", "matchMode must be 'exact' or 'domain'");
+
+        var entry = AllowlistEntry(
+            paramName = paramName,
+            matchMode = matchMode,
+            callerScope = callerScope,
+            allowedValues = listOf<Text>(),
+            allowedPatterns = listOf<Text>(),
+            description = description
+        );
+
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        if (maybeGuardrails.isPresent()) {
+            var existing = maybeGuardrails.getOrFail();
+            // Remove existing allowlist for same param to avoid duplicates
+            var filtered = existing.allowlists.filter(
+                function(a: AllowlistEntry) -> a.paramName != paramName || a.callerScope != callerScope
+            );
+            var updated = ToolGuardrails(
+                toolName = toolName,
+                constraints = existing.constraints,
+                allowlists = filtered.with(entry)
+            );
+            toolGuardrails = toolGuardrails.with(toolName, updated);
+        } else {
+            var newGuardrails = ToolGuardrails(
+                toolName = toolName,
+                constraints = listOf<ToolConstraint>(),
+                allowlists = listOf<AllowlistEntry>(entry)
+            );
+            toolGuardrails = toolGuardrails.with(toolName, newGuardrails);
+        };
+    };
+
+    @api
+    permission[pAdmin] addAllowedValue(toolName: Text, paramName: Text, value: Text) | active {
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        require(maybeGuardrails.isPresent(), "No guardrails for tool");
+        var existing = maybeGuardrails.getOrFail();
+
+        var updatedAllowlists = existing.allowlists.map(function(a: AllowlistEntry) ->
+            if (a.paramName == paramName) {
+                return AllowlistEntry(
+                    paramName = a.paramName,
+                    matchMode = a.matchMode,
+                    callerScope = a.callerScope,
+                    allowedValues = a.allowedValues.with(value),
+                    allowedPatterns = a.allowedPatterns,
+                    description = a.description
+                );
+            } else {
+                return a;
+            }
+        );
+
+        var updated = ToolGuardrails(
+            toolName = toolName,
+            constraints = existing.constraints,
+            allowlists = updatedAllowlists
+        );
+        toolGuardrails = toolGuardrails.with(toolName, updated);
+    };
+
+    @api
+    permission[pAdmin] addAllowedPattern(toolName: Text, paramName: Text, pattern: Text) | active {
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        require(maybeGuardrails.isPresent(), "No guardrails for tool");
+        var existing = maybeGuardrails.getOrFail();
+
+        var updatedAllowlists = existing.allowlists.map(function(a: AllowlistEntry) ->
+            if (a.paramName == paramName) {
+                return AllowlistEntry(
+                    paramName = a.paramName,
+                    matchMode = a.matchMode,
+                    callerScope = a.callerScope,
+                    allowedValues = a.allowedValues,
+                    allowedPatterns = a.allowedPatterns.with(pattern),
+                    description = a.description
+                );
+            } else {
+                return a;
+            }
+        );
+
+        var updated = ToolGuardrails(
+            toolName = toolName,
+            constraints = existing.constraints,
+            allowlists = updatedAllowlists
+        );
+        toolGuardrails = toolGuardrails.with(toolName, updated);
+    };
+
+    @api
+    permission[pAdmin] removeAllowedValue(toolName: Text, paramName: Text, value: Text) | active {
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        require(maybeGuardrails.isPresent(), "No guardrails for tool");
+        var existing = maybeGuardrails.getOrFail();
+
+        var updatedAllowlists = existing.allowlists.map(function(a: AllowlistEntry) ->
+            if (a.paramName == paramName) {
+                return AllowlistEntry(
+                    paramName = a.paramName,
+                    matchMode = a.matchMode,
+                    callerScope = a.callerScope,
+                    allowedValues = a.allowedValues.filter(function(v: Text) -> v != value),
+                    allowedPatterns = a.allowedPatterns,
+                    description = a.description
+                );
+            } else {
+                return a;
+            }
+        );
+
+        var updated = ToolGuardrails(
+            toolName = toolName,
+            constraints = existing.constraints,
+            allowlists = updatedAllowlists
+        );
+        toolGuardrails = toolGuardrails.with(toolName, updated);
+    };
+
+    @api
+    permission[pAdmin] removeAllowlist(toolName: Text, paramName: Text) | active {
+        var maybeGuardrails = toolGuardrails.getOrNone(toolName);
+        require(maybeGuardrails.isPresent(), "No guardrails for tool");
+        var existing = maybeGuardrails.getOrFail();
+
+        var filtered = existing.allowlists.filter(
+            function(a: AllowlistEntry) -> a.paramName != paramName
+        );
+
+        var updated = ToolGuardrails(
+            toolName = toolName,
+            constraints = existing.constraints,
+            allowlists = filtered
+        );
+        toolGuardrails = toolGuardrails.with(toolName, updated);
+    };
+
+    // ========================================================================
+    // Bundle export
+    // ========================================================================
+
+    @api
+    permission[pAdmin | pGateway] getGuardrailsData() returns List<ToolGuardrails> | active {
+        return toolGuardrails.values();
+    };
+}

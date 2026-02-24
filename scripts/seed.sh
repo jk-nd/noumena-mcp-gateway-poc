@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # seed.sh — Populate the MCP Gateway with realistic demo data.
 #
+# Three-tier governance model:
+#   Tier 1 — Access: catalog + access rules (fail-closed)
+#   Tier 2 — Guardrails: constraints + allowlists (in-memory evaluation)
+#   Tier 3 — Workflow: approval state machine (NPL call)
+#
 # Idempotent: safe to run multiple times (ignores duplicate errors).
 #
 # Usage:
@@ -71,7 +76,7 @@ npl_call_response() {
 # ---------------------------------------------------------------------------
 # 1. Admin token
 # ---------------------------------------------------------------------------
-bold "=== MCP Gateway Seed Script ==="
+bold "=== MCP Gateway Seed Script (Three-Tier Governance) ==="
 echo ""
 bold "1. Acquiring admin token..."
 ADMIN_TOKEN=$(get_token "admin" "${PASSWORD}")
@@ -118,29 +123,29 @@ for svc in duckduckgo mock-calendar; do
 done
 
 # ---------------------------------------------------------------------------
-# 4. Register tools with tags
+# 4. Register tools (no tags — governance is derived from configuration)
 # ---------------------------------------------------------------------------
 bold "4. Registering tools..."
 
 register_tool() {
-  local svc="$1" tool="$2" tag="$3"
+  local svc="$1" tool="$2"
   npl_call "${STORE}/registerTool" \
-    "{\"serviceName\":\"${svc}\",\"toolName\":\"${tool}\",\"tag\":\"${tag}\"}"
-  echo "   ${svc}__${tool} [${tag}]"
+    "{\"serviceName\":\"${svc}\",\"toolName\":\"${tool}\"}"
+  echo "   ${svc}__${tool}"
 }
 
-register_tool "duckduckgo"    "search"       "acl"
-register_tool "mock-calendar" "list_events"  "acl"
-register_tool "mock-calendar" "read_inbox"   "acl"
-register_tool "mock-calendar" "create_event" "logic"
-register_tool "mock-calendar" "send_email"   "logic"
+register_tool "duckduckgo"    "search"
+register_tool "mock-calendar" "list_events"
+register_tool "mock-calendar" "read_inbox"
+register_tool "mock-calendar" "create_event"
+register_tool "mock-calendar" "send_email"
 
 green "   Tools registered"
 
 # ---------------------------------------------------------------------------
-# 5. Access rules
+# 5. Access rules (Tier 1)
 # ---------------------------------------------------------------------------
-bold "5. Adding access rules..."
+bold "5. Adding access rules (Tier 1)..."
 
 add_rule() {
   local id="$1" matchType="$2" claims="$3" identity="$4" services="$5" tools="$6"
@@ -162,21 +167,18 @@ add_rule "jarvis-agent" \
 green "   Access rules added"
 
 # ---------------------------------------------------------------------------
-# 6. ServiceGovernance instances
+# 6. Guardrails instances (Tier 2)
 # ---------------------------------------------------------------------------
-bold "6. Creating ServiceGovernance instances..."
+bold "6. Creating Guardrails instances (Tier 2)..."
 
-# Helper: find existing governance instance by service name, or create a new one.
-find_or_create_governance() {
+find_or_create_guardrails() {
   local svc_name="$1"
 
-  # List existing instances
   local list_response
   list_response=$(curl -sf \
-    "${NPL_URL}/npl/governance/ServiceGovernance/" \
+    "${NPL_URL}/npl/governance/Guardrails/" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo '{"items":[]}')
 
-  # Look for one that matches the service name
   local existing_id
   existing_id=$(echo "$list_response" | jq -r \
     --arg name "$svc_name" \
@@ -187,150 +189,107 @@ find_or_create_governance() {
     return
   fi
 
-  # Create new instance
   local create_response
-  create_response=$(npl_call_response "/npl/governance/ServiceGovernance/" '{"@parties":{}}')
+  create_response=$(npl_call_response "/npl/governance/Guardrails/" '{"@parties":{}}')
   local new_id
   new_id=$(echo "$create_response" | jq -r '.["@id"] // empty')
 
   if [[ -n "$new_id" ]]; then
-    # Initialize with service name
-    npl_call "/npl/governance/ServiceGovernance/${new_id}/setup" "{\"name\":\"${svc_name}\"}"
+    npl_call "/npl/governance/Guardrails/${new_id}/setup" "{\"name\":\"${svc_name}\"}"
   fi
 
   echo "$new_id"
 }
 
-MOCK_CAL_GOV=$(find_or_create_governance "mock-calendar")
-if [[ -n "$MOCK_CAL_GOV" ]]; then
-  green "   mock-calendar governance: ${MOCK_CAL_GOV}"
+MOCK_CAL_GR=$(find_or_create_guardrails "mock-calendar")
+if [[ -n "$MOCK_CAL_GR" ]]; then
+  green "   mock-calendar guardrails: ${MOCK_CAL_GR}"
 else
-  yellow "   WARNING: Could not create mock-calendar governance instance"
-fi
-
-DDG_GOV=$(find_or_create_governance "duckduckgo")
-if [[ -n "$DDG_GOV" ]]; then
-  green "   duckduckgo governance: ${DDG_GOV}"
-else
-  yellow "   WARNING: Could not create duckduckgo governance instance"
+  yellow "   WARNING: Could not create mock-calendar guardrails instance"
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Register tools in governance + add constraints
+# 7. Workflow instances (Tier 3)
 # ---------------------------------------------------------------------------
-bold "7. Configuring governance (two-phase intent confirmation)..."
+bold "7. Creating Workflow instances (Tier 3)..."
 
-#
-# Two-phase workflow:
-#
-#   Phase 1 (READ — open, no gate):
-#     Agent freely reads calendar, inbox, searches — builds context.
-#
-#   Phase 2 (WRITE — gated, requires human confirmation):
-#     Agent prepares the action (create_event, send_email) but CANNOT execute.
-#     The request goes to "pending" with full details visible to the approver.
-#     A human (the requesting user, their manager, or compliance) reviews
-#     the exact action and approves or denies.
-#     Only then does the agent retry and execute.
-#
-# Constraints act as guardrails that catch policy violations even if
-# someone rubber-stamps the approval.
-#
+find_or_create_workflow() {
+  local svc_name="$1"
 
-GOV_BASE="/npl/governance/ServiceGovernance"
+  local list_response
+  list_response=$(curl -sf \
+    "${NPL_URL}/npl/governance/Workflow/" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo '{"items":[]}')
 
-if [[ -n "$MOCK_CAL_GOV" ]]; then
-  # Register tools in governance
-  for tool_tag in "list_events:acl" "read_inbox:acl" "create_event:logic" "send_email:logic"; do
-    tool="${tool_tag%%:*}"
-    tag="${tool_tag##*:}"
-    npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/registerTool" \
-      "{\"toolName\":\"${tool}\",\"tag\":\"${tag}\"}"
-  done
+  local existing_id
+  existing_id=$(echo "$list_response" | jq -r \
+    --arg name "$svc_name" \
+    '.items[] | select(.serviceName == $name) | .["@id"] // empty' 2>/dev/null | head -1)
 
+  if [[ -n "$existing_id" ]]; then
+    echo "$existing_id"
+    return
+  fi
+
+  local create_response
+  create_response=$(npl_call_response "/npl/governance/Workflow/" '{"@parties":{}}')
+  local new_id
+  new_id=$(echo "$create_response" | jq -r '.["@id"] // empty')
+
+  if [[ -n "$new_id" ]]; then
+    npl_call "/npl/governance/Workflow/${new_id}/setup" "{\"name\":\"${svc_name}\"}"
+  fi
+
+  echo "$new_id"
+}
+
+# Only mock-calendar needs a workflow (for approval-gated tools)
+MOCK_CAL_WF=$(find_or_create_workflow "mock-calendar")
+if [[ -n "$MOCK_CAL_WF" ]]; then
+  green "   mock-calendar workflow: ${MOCK_CAL_WF}"
+else
+  yellow "   WARNING: Could not create mock-calendar workflow instance"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Configure guardrails + allowlists + workflow
+# ---------------------------------------------------------------------------
+bold "8. Configuring governance..."
+
+GR_BASE="/npl/governance/Guardrails"
+WF_BASE="/npl/governance/Workflow"
+
+if [[ -n "$MOCK_CAL_GR" ]]; then
   # ── create_event: constraints ──
-  # Constraint: attendees must be internal
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
+  npl_call "${GR_BASE}/${MOCK_CAL_GR}/addConstraint" \
     "{\"toolName\":\"create_event\",\"paramName\":\"attendees\",\"operator\":\"contains\",\"values\":[\"@acme.com\"],\"description\":\"Attendees must be Acme employees\"}"
 
-  # Guardrail: only standard meeting durations
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/addConstraint" \
+  npl_call "${GR_BASE}/${MOCK_CAL_GR}/addConstraint" \
     "{\"toolName\":\"create_event\",\"paramName\":\"duration\",\"operator\":\"in\",\"values\":[\"15\",\"30\",\"60\",\"90\",\"120\"],\"description\":\"Meeting duration must be 15, 30, 60, 90, or 120 minutes\"}"
 
-  # ── send_email: governed by ApprovedRecipients for jarvis; humans pass through ──
-  npl_call "${GOV_BASE}/${MOCK_CAL_GOV}/setGovernanceDescription" \
-    "{\"desc\":\"Calendar governance: create_event auto-allows with constraints (internal attendees, standard durations). send_email governed by ApprovedRecipients for jarvis; humans auto-allow.\"}"
+  # ── send_email: allowlist (replaces ApprovedRecipients) ──
+  npl_call "${GR_BASE}/${MOCK_CAL_GR}/addAllowlist" \
+    "{\"toolName\":\"send_email\",\"paramName\":\"to\",\"matchMode\":\"domain\",\"callerScope\":\"jarvis@acme.com\",\"description\":\"Approved email recipients for jarvis\"}"
 
-  green "   mock-calendar governance configured (create_event: constrained, send_email: auto-allow)"
+  # Add approved domain pattern (acme.com)
+  npl_call "${GR_BASE}/${MOCK_CAL_GR}/addAllowedPattern" \
+    "{\"toolName\":\"send_email\",\"paramName\":\"to\",\"pattern\":\"acme.com\"}"
+
+  # Add approved external recipients
+  npl_call "${GR_BASE}/${MOCK_CAL_GR}/addAllowedValue" \
+    "{\"toolName\":\"send_email\",\"paramName\":\"to\",\"value\":\"dave@external-vendor.com\"}"
+
+  npl_call "${GR_BASE}/${MOCK_CAL_GR}/addAllowedValue" \
+    "{\"toolName\":\"send_email\",\"paramName\":\"to\",\"value\":\"partner@consulting-firm.com\"}"
+
+  green "   mock-calendar guardrails configured (constraints + allowlist)"
 fi
 
-if [[ -n "$DDG_GOV" ]]; then
-  npl_call "${GOV_BASE}/${DDG_GOV}/registerTool" \
-    "{\"toolName\":\"search\",\"tag\":\"acl\"}"
+if [[ -n "$MOCK_CAL_WF" ]]; then
+  npl_call "${WF_BASE}/${MOCK_CAL_WF}/setWorkflowDescription" \
+    "{\"desc\":\"Calendar governance: create_event auto-allows with constraints. send_email governed by allowlist for jarvis.\"}"
 
-  npl_call "${GOV_BASE}/${DDG_GOV}/setGovernanceDescription" \
-    "{\"desc\":\"Search is a read-only action — open access, no constraints.\"}"
-
-  green "   duckduckgo governance configured (open: search)"
-fi
-
-# ---------------------------------------------------------------------------
-# 8. ApprovedRecipients workflow governance (send_email)
-# ---------------------------------------------------------------------------
-bold "8. Creating ApprovedRecipients binding for send_email..."
-
-find_or_create_approved_recipients() {
-  local svc_name="$1"
-
-  # List existing instances
-  local list_response
-  list_response=$(curl -sf \
-    "${NPL_URL}/npl/governance/ApprovedRecipients/" \
-    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo '{"items":[]}')
-
-  # Look for one that matches the service name
-  local existing_id
-  existing_id=$(echo "$list_response" | jq -r \
-    --arg name "$svc_name" \
-    '.items[] | select(.serviceName == $name) | .["@id"] // empty' 2>/dev/null | head -1)
-
-  if [[ -n "$existing_id" ]]; then
-    echo "$existing_id"
-    return
-  fi
-
-  # Create new instance
-  local create_response
-  create_response=$(npl_call_response "/npl/governance/ApprovedRecipients/" '{"@parties":{}}')
-  local new_id
-  new_id=$(echo "$create_response" | jq -r '.["@id"] // empty')
-
-  if [[ -n "$new_id" ]]; then
-    # Initialize: bind to mock-calendar / send_email / "to" param / jarvis only
-    npl_call "/npl/governance/ApprovedRecipients/${new_id}/setup" \
-      "{\"name\":\"${svc_name}\",\"tool\":\"send_email\",\"param\":\"to\",\"agent\":\"jarvis@acme.com\"}"
-  fi
-
-  echo "$new_id"
-}
-
-AR_ID=$(find_or_create_approved_recipients "mock-calendar")
-if [[ -n "$AR_ID" ]]; then
-  green "   ApprovedRecipients instance: ${AR_ID}"
-
-  # acme.com is already an approved domain by default in the protocol.
-  # Add a few demo approved external recipients:
-  npl_call "/npl/governance/ApprovedRecipients/${AR_ID}/addRecipient" \
-    '{"email":"dave@external-vendor.com"}'
-  echo "   Added approved recipient: dave@external-vendor.com"
-
-  npl_call "/npl/governance/ApprovedRecipients/${AR_ID}/addRecipient" \
-    '{"email":"partner@consulting-firm.com"}'
-  echo "   Added approved recipient: partner@consulting-firm.com"
-
-  green "   ApprovedRecipients configured (acme.com domain + 2 external recipients)"
-else
-  yellow "   WARNING: Could not create ApprovedRecipients instance"
+  green "   mock-calendar workflow configured"
 fi
 
 # ---------------------------------------------------------------------------
@@ -369,35 +328,28 @@ fi
 # 10. Summary
 # ---------------------------------------------------------------------------
 echo ""
-bold "=== Seed Complete ==="
+bold "=== Seed Complete (Three-Tier Governance) ==="
 echo ""
 echo "Services:"
-echo "  - duckduckgo    (search [acl])"
-echo "  - mock-calendar (list_events [acl], read_inbox [acl], create_event [logic], send_email [logic])"
+echo "  - duckduckgo    (search)"
+echo "  - mock-calendar (list_events, read_inbox, create_event, send_email)"
 echo ""
-echo "Access rules:"
+echo "Tier 1 — Access rules:"
 echo "  - acme-all        org=acme             -> *__*  (all Acme employees, all services)"
 echo "  - jarvis-agent    jarvis@acme.com      -> mock-calendar__*, duckduckgo__*"
 echo ""
-echo "Governance models:"
-echo "  READ (acl):    list_events, read_inbox, search — auto-allow"
-echo "  WRITE (logic):"
+echo "Tier 2 — Guardrails:"
+if [[ -n "$MOCK_CAL_GR" ]]; then
+  echo "  mock-calendar Guardrails: ${MOCK_CAL_GR}"
+  echo "    create_event [CONSTRAINED] internal attendees, standard durations"
+  echo "    send_email   [ALLOWLIST]   jarvis: @acme.com + 2 pre-approved externals"
+  echo "    list_events, read_inbox    (no guardrails — access sufficient)"
+fi
+echo "  duckduckgo: no guardrails (access sufficient)"
 echo ""
-if [[ -n "$MOCK_CAL_GOV" ]]; then
-  echo "  mock-calendar ServiceGovernance: ${MOCK_CAL_GOV}"
-  echo "    create_event [CONSTRAINED] auto-allow when constraints pass (internal attendees, standard durations)"
-  echo "    send_email   [AUTO-ALLOW]  no constraints (ApprovedRecipients handles jarvis)"
-fi
-if [[ -n "$AR_ID" ]]; then
-  echo "  mock-calendar ApprovedRecipients: ${AR_ID} (jarvis@acme.com only)"
-  echo "    send_email   [APPROVED-RECIPIENTS] @acme.com auto-allow, pre-approved externals auto-allow, rest denied"
-  echo "    Approved domains:    acme.com (default)"
-  echo "    Approved recipients: dave@external-vendor.com, partner@consulting-firm.com"
-  echo "    Human users bypass ApprovedRecipients (only jarvis is restricted)"
-fi
-if [[ -n "$DDG_GOV" ]]; then
-  echo "  duckduckgo ServiceGovernance:    ${DDG_GOV}"
-  echo "    search       [OPEN] auto-allow, no constraints"
+echo "Tier 3 — Workflow:"
+if [[ -n "$MOCK_CAL_WF" ]]; then
+  echo "  mock-calendar Workflow: ${MOCK_CAL_WF} (no tools require workflow currently)"
 fi
 echo ""
 green "Done! Dashboard: http://localhost:8888"

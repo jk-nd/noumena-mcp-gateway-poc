@@ -1,8 +1,8 @@
 """
-MCP Gateway Dashboard — web UI for v4 three-layer governance.
+MCP Gateway Dashboard — web UI for three-tier governance.
 
 Serves a single-page dashboard and proxies authenticated API calls to:
-  - NPL Engine (GatewayStore + ServiceGovernance)
+  - NPL Engine (GatewayStore + Guardrails + Workflow)
   - Keycloak (user management)
   - OPA / Envoy (health checks)
   - Docker Hub (MCP server discovery)
@@ -179,12 +179,12 @@ def ensure_store_id() -> str:
     return _store_id
 
 
-# --- ServiceGovernance discovery ---
-def get_governance_instances() -> dict:
+# --- Guardrails discovery ---
+def get_guardrails_instances() -> dict:
     try:
         token = get_admin_token()
         resp = requests.get(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/",
+            f"{NPL_URL}/npl/governance/Guardrails/",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10,
         )
@@ -197,7 +197,29 @@ def get_governance_instances() -> dict:
                 result[svc] = iid
         return result
     except Exception as e:
-        log.warning("ServiceGovernance discovery failed: %s", e)
+        log.warning("Guardrails discovery failed: %s", e)
+        return {}
+
+
+# --- Workflow discovery ---
+def get_workflow_instances() -> dict:
+    try:
+        token = get_admin_token()
+        resp = requests.get(
+            f"{NPL_URL}/npl/governance/Workflow/",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result = {}
+        for item in resp.json().get("items", []):
+            svc = item.get("serviceName", "")
+            iid = item.get("@id", "")
+            if svc and iid:
+                result[svc] = iid
+        return result
+    except Exception as e:
+        log.warning("Workflow discovery failed: %s", e)
         return {}
 
 
@@ -589,7 +611,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/services/disable": self.handle_disable_service,
             "/api/services/remove": self.handle_remove_service,
             "/api/tools/register": self.handle_register_tool,
-            "/api/tools/set-tag": self.handle_set_tag,
             "/api/tools/remove": self.handle_remove_tool,
             "/api/access-rules/add": self.handle_add_access_rule,
             "/api/access-rules/remove": self.handle_remove_access_rule,
@@ -597,9 +618,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/revoked/remove": self.handle_reinstate_subject,
             "/api/approvals/approve": self.handle_approve,
             "/api/approvals/deny": self.handle_deny,
-            "/api/governance/create": self.handle_create_governance,
-            "/api/governance/bind-recipients": self.handle_bind_recipients,
-            "/api/governance/unbind-recipients": self.handle_unbind_recipients,
+            "/api/governance/create-guardrails": self.handle_create_guardrails,
+            "/api/governance/create-workflow": self.handle_create_workflow,
+            "/api/guardrails/add-allowlist": self.handle_add_allowlist,
+            "/api/guardrails/add-allowed-value": self.handle_add_allowed_value,
+            "/api/guardrails/add-allowed-pattern": self.handle_add_allowed_pattern,
+            "/api/guardrails/remove-allowed-value": self.handle_remove_allowed_value,
+            "/api/guardrails/remove-allowlist": self.handle_remove_allowlist,
             "/api/docker/pull": self.handle_docker_pull,
             "/api/docker/wire": self.handle_docker_wire,
             "/api/docker/stop": self.handle_docker_stop,
@@ -610,9 +635,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/constraints/add": self.handle_add_constraint,
             "/api/constraints/remove": self.handle_remove_constraint,
             "/api/constraints/clear": self.handle_clear_constraints,
-            "/api/governance/set-approval": self.handle_set_approval,
-            "/api/governance/set-deadline": self.handle_set_deadline,
-            "/api/governance/set-description": self.handle_set_description,
+            "/api/workflow/set-requires-workflow": self.handle_set_requires_workflow,
+            "/api/workflow/set-deadline": self.handle_set_deadline,
+            "/api/workflow/set-description": self.handle_set_description,
         }
 
         handler = routes.get(path)
@@ -788,14 +813,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_register_tool(self, body):
         sid = ensure_store_id()
         resp = self.npl_post(f"/npl/store/GatewayStore/{sid}/registerTool", {
-            "serviceName": body["serviceName"], "toolName": body["toolName"], "tag": body.get("tag", "acl"),
-        })
-        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
-
-    def handle_set_tag(self, body):
-        sid = ensure_store_id()
-        resp = self.npl_post(f"/npl/store/GatewayStore/{sid}/setTag", {
-            "serviceName": body["serviceName"], "toolName": body["toolName"], "tag": body["tag"],
+            "serviceName": body["serviceName"], "toolName": body["toolName"],
         })
         self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
 
@@ -834,23 +852,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # === Governance ===
     def handle_get_governance(self):
-        self.send_json({"instances": get_governance_instances()})
+        self.send_json({
+            "guardrails": get_guardrails_instances(),
+            "workflow": get_workflow_instances(),
+        })
 
-    def handle_create_governance(self, body):
+    def handle_create_guardrails(self, body):
         svc = body["serviceName"]
-        instances = get_governance_instances()
+        instances = get_guardrails_instances()
         if svc in instances:
             return self.send_json({"ok": True, "instanceId": instances[svc]})
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/",
+            f"{NPL_URL}/npl/governance/Guardrails/",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"@parties": {}}, timeout=10,
         )
         resp.raise_for_status()
         instance_id = resp.json()["@id"]
         requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{instance_id}/setup",
+            f"{NPL_URL}/npl/governance/Guardrails/{instance_id}/setup",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"name": svc}, timeout=10,
+        )
+        self.send_json({"ok": True, "instanceId": instance_id})
+
+    def handle_create_workflow(self, body):
+        svc = body["serviceName"]
+        instances = get_workflow_instances()
+        if svc in instances:
+            return self.send_json({"ok": True, "instanceId": instances[svc]})
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/Workflow/",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"@parties": {}}, timeout=10,
+        )
+        resp.raise_for_status()
+        instance_id = resp.json()["@id"]
+        requests.post(
+            f"{NPL_URL}/npl/governance/Workflow/{instance_id}/setup",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"name": svc}, timeout=10,
         )
@@ -858,15 +899,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # === Governance Protocols ===
     def handle_get_protocols(self):
-        """Discover all governance protocol instances across all protocol types."""
+        """Discover all governance protocol instances (Guardrails + Workflow)."""
         protocols = []
         token = get_admin_token()
         gw_token = _get_gateway_token()
 
-        # ServiceGovernance instances
+        # Guardrails instances
         try:
             resp = requests.get(
-                f"{NPL_URL}/npl/governance/ServiceGovernance/",
+                f"{NPL_URL}/npl/governance/Guardrails/",
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
             )
@@ -875,122 +916,67 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     svc = item.get("serviceName", "")
                     iid = item.get("@id", "")
                     if svc and iid:
-                        protocols.append({
-                            "type": "ServiceGovernance",
+                        entry = {
+                            "type": "Guardrails",
                             "instanceId": iid,
                             "serviceName": svc,
-                        })
+                        }
+                        # Fetch guardrails data
+                        try:
+                            gr_resp = requests.post(
+                                f"{NPL_URL}/npl/governance/Guardrails/{iid}/getGuardrailsData",
+                                headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
+                                json={}, timeout=10,
+                            )
+                            entry["guardrailsData"] = gr_resp.json() if gr_resp.status_code < 400 else []
+                        except Exception:
+                            entry["guardrailsData"] = []
+                        protocols.append(entry)
         except Exception as e:
-            log.warning("Failed to list ServiceGovernance instances: %s", e)
+            log.warning("Failed to list Guardrails instances: %s", e)
 
-        # ApprovedRecipients instances
+        # Workflow instances
         try:
             resp = requests.get(
-                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
+                f"{NPL_URL}/npl/governance/Workflow/",
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
             )
             if resp.status_code < 400:
                 for item in resp.json().get("items", []):
-                    iid = item.get("@id", "")
                     svc = item.get("serviceName", "")
-                    if not iid or not svc:
-                        continue
-                    entry = {
-                        "type": "ApprovedRecipients",
-                        "instanceId": iid,
-                        "serviceName": svc,
-                        "toolName": item.get("toolName", "send_email"),
-                        "paramName": item.get("paramName", "to"),
-                        "agentIdentity": item.get("agentIdentity", ""),
-                    }
-                    # Fetch recipients and domains
-                    try:
-                        r_resp = requests.post(
-                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{iid}/getApprovedRecipients",
-                            headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
-                            json={}, timeout=10,
-                        )
-                        entry["approvedRecipients"] = r_resp.json() if r_resp.status_code < 400 else []
-                    except Exception:
-                        entry["approvedRecipients"] = []
-                    try:
-                        d_resp = requests.post(
-                            f"{NPL_URL}/npl/governance/ApprovedRecipients/{iid}/getApprovedDomains",
-                            headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
-                            json={}, timeout=10,
-                        )
-                        entry["approvedDomains"] = d_resp.json() if d_resp.status_code < 400 else []
-                    except Exception:
-                        entry["approvedDomains"] = []
-                    protocols.append(entry)
+                    iid = item.get("@id", "")
+                    if svc and iid:
+                        entry = {
+                            "type": "Workflow",
+                            "instanceId": iid,
+                            "serviceName": svc,
+                        }
+                        # Fetch workflow config
+                        try:
+                            wf_resp = requests.post(
+                                f"{NPL_URL}/npl/governance/Workflow/{iid}/getWorkflowConfig",
+                                headers={"Authorization": f"Bearer {gw_token}", "Content-Type": "application/json"},
+                                json={}, timeout=10,
+                            )
+                            entry["workflowConfig"] = wf_resp.json() if wf_resp.status_code < 400 else {}
+                        except Exception:
+                            entry["workflowConfig"] = {}
+                        protocols.append(entry)
         except Exception as e:
-            log.warning("Failed to list ApprovedRecipients instances: %s", e)
+            log.warning("Failed to list Workflow instances: %s", e)
 
         self.send_json({"protocols": protocols})
 
-    def handle_bind_recipients(self, body):
-        """Create and setup an ApprovedRecipients instance for a service/tool."""
-        svc = body.get("serviceName", "")
-        tool = body.get("toolName", "send_email")
-        param = body.get("paramName", "to")
-        agent = body.get("agentIdentity", "")
-        if not svc:
-            return self.send_error_json(400, "serviceName required")
-
-        token = get_admin_token()
-        # Check if binding already exists
-        try:
-            resp = requests.get(
-                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            if resp.status_code < 400:
-                for item in resp.json().get("items", []):
-                    if item.get("serviceName") == svc:
-                        return self.send_json({"ok": True, "instanceId": item["@id"], "existing": True})
-        except Exception:
-            pass
-
-        # Create new instance
-        try:
-            resp = requests.post(
-                f"{NPL_URL}/npl/governance/ApprovedRecipients/",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"@parties": {}}, timeout=10,
-            )
-            resp.raise_for_status()
-            instance_id = resp.json()["@id"]
-
-            # Call setup with agent identity
-            requests.post(
-                f"{NPL_URL}/npl/governance/ApprovedRecipients/{instance_id}/setup",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"name": svc, "tool": tool, "param": param, "agent": agent}, timeout=10,
-            )
-            self.send_json({"ok": True, "instanceId": instance_id})
-        except Exception as e:
-            self.send_error_json(500, f"Failed to create ApprovedRecipients: {e}")
-
-    def handle_unbind_recipients(self, body):
-        """Remove an ApprovedRecipients binding (archive the protocol instance)."""
-        instance_id = body.get("instanceId", "")
-        if not instance_id:
-            return self.send_error_json(400, "instanceId required")
-        # NPL doesn't support deletion, but we can note this is a no-op for now
-        # In practice the evaluator just won't find a matching binding if the protocol is archived
-        self.send_json({"ok": True, "message": "Protocol unbinding is not yet supported. Remove the tool's 'logic' tag to disable governance."})
-
-    # === Approvals ===
+    # === Approvals (Workflow protocol) ===
     def handle_get_approvals(self):
-        instances = get_governance_instances()
+        instances = get_workflow_instances()
         all_pending = []
         token = get_admin_token()
         for svc, iid in instances.items():
             try:
                 resp = requests.post(
-                    f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/getPendingRequests",
+                    f"{NPL_URL}/npl/governance/Workflow/{iid}/getPendingRequests",
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                     json={}, timeout=10,
                 )
@@ -1006,7 +992,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_approve(self, body):
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{body['instanceId']}/approve",
+            f"{NPL_URL}/npl/governance/Workflow/{body['instanceId']}/approve",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"requestId": body["requestId"]}, timeout=10,
         )
@@ -1015,7 +1001,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_deny(self, body):
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{body['instanceId']}/deny",
+            f"{NPL_URL}/npl/governance/Workflow/{body['instanceId']}/deny",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"requestId": body["requestId"], "reason": body.get("reason", "Denied by admin")}, timeout=10,
         )
@@ -1247,16 +1233,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 emit(f"Tool discovery failed (service may need configuration): {e}", "warn")
 
-            # Step 8: Register service + tools in GatewayStore (default to acl)
+            # Step 8: Register service + tools in GatewayStore
             emit("Registering in governance catalog...")
             sid = ensure_store_id()
             self.npl_post(f"/npl/store/GatewayStore/{sid}/registerService", {"serviceName": service_name})
             self.npl_post(f"/npl/store/GatewayStore/{sid}/enableService", {"serviceName": service_name})
             for tool in tools:
                 self.npl_post(f"/npl/store/GatewayStore/{sid}/registerTool", {
-                    "serviceName": service_name, "toolName": tool["name"], "tag": "acl",
+                    "serviceName": service_name, "toolName": tool["name"],
                 })
-            emit(f"Registered {service_name} with {len(tools)} tools in catalog (auto-allow)", "done")
+            emit(f"Registered {service_name} with {len(tools)} tools in catalog", "done")
 
             # Final success message
             emit(f"Service \"{service_name}\" wired successfully!", "complete")
@@ -1520,11 +1506,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error_json(500, f"Schema discovery failed: {e}")
 
-    # === Constraints CRUD ===
+    # === Constraints CRUD (Guardrails protocol) ===
     def handle_get_constraints(self, params):
-        """Get all tool configs/constraints for a service."""
+        """Get all guardrails data (constraints + allowlists) for a service."""
         service = params.get("service", [""])[0]
-        instances = get_governance_instances()
+        instances = get_guardrails_instances()
         if service:
             iid = instances.get(service)
             if not iid:
@@ -1532,7 +1518,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 token = _get_gateway_token()
                 resp = requests.post(
-                    f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/getToolConfigs",
+                    f"{NPL_URL}/npl/governance/Guardrails/{iid}/getGuardrailsData",
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                     json={}, timeout=10,
                 )
@@ -1547,7 +1533,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         for svc, iid in instances.items():
             try:
                 resp = requests.post(
-                    f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/getToolConfigs",
+                    f"{NPL_URL}/npl/governance/Guardrails/{iid}/getGuardrailsData",
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                     json={}, timeout=10,
                 )
@@ -1558,19 +1544,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({"configs": all_configs})
 
     def handle_add_constraint(self, body):
-        """Add a constraint to a tool in a ServiceGovernance instance."""
+        """Add a constraint to a tool in a Guardrails instance."""
         service = body.get("serviceName", "")
-        tool_name = body.get("toolName", "")
-        instances = get_governance_instances()
+        instances = get_guardrails_instances()
         iid = instances.get(service)
         if not iid:
-            return self.send_error_json(404, f"No governance instance for '{service}'")
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/addConstraint",
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/addConstraint",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={
-                "toolName": tool_name,
+                "toolName": body.get("toolName", ""),
                 "paramName": body.get("paramName", ""),
                 "operator": body.get("operator", ""),
                 "values": body.get("values", []),
@@ -1578,26 +1563,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
             timeout=10,
         )
-        if resp.status_code < 400:
-            # Auto-switch tool tag to 'logic' so constraint is enforced by OPA
-            try:
-                sid = ensure_store_id()
-                self.npl_post(f"/npl/store/GatewayStore/{sid}/setTag", {
-                    "serviceName": service, "toolName": tool_name, "tag": "logic",
-                })
-            except Exception:
-                pass  # best-effort
         self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
 
     def handle_remove_constraint(self, body):
         service = body.get("serviceName", "")
-        instances = get_governance_instances()
+        instances = get_guardrails_instances()
         iid = instances.get(service)
         if not iid:
-            return self.send_error_json(404, f"No governance instance for '{service}'")
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/removeConstraint",
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/removeConstraint",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"toolName": body.get("toolName", ""), "paramName": body.get("paramName", "")},
             timeout=10,
@@ -1606,28 +1582,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_clear_constraints(self, body):
         service = body.get("serviceName", "")
-        instances = get_governance_instances()
+        instances = get_guardrails_instances()
         iid = instances.get(service)
         if not iid:
-            return self.send_error_json(404, f"No governance instance for '{service}'")
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/clearConstraints",
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/clearConstraints",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"toolName": body.get("toolName", "")},
             timeout=10,
         )
         self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
 
-    def handle_set_approval(self, body):
+    # === Workflow config ===
+    def handle_set_requires_workflow(self, body):
         service = body.get("serviceName", "")
-        instances = get_governance_instances()
+        instances = get_workflow_instances()
         iid = instances.get(service)
         if not iid:
-            return self.send_error_json(404, f"No governance instance for '{service}'")
+            return self.send_error_json(404, f"No workflow instance for '{service}'")
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/setRequiresApproval",
+            f"{NPL_URL}/npl/governance/Workflow/{iid}/setRequiresWorkflow",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"toolName": body.get("toolName", ""), "required": body.get("required", True)},
             timeout=10,
@@ -1636,13 +1613,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_set_deadline(self, body):
         service = body.get("serviceName", "")
-        instances = get_governance_instances()
+        instances = get_workflow_instances()
         iid = instances.get(service)
         if not iid:
-            return self.send_error_json(404, f"No governance instance for '{service}'")
+            return self.send_error_json(404, f"No workflow instance for '{service}'")
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/setApprovalDeadline",
+            f"{NPL_URL}/npl/governance/Workflow/{iid}/setWorkflowDeadline",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"deadlineHours": body.get("deadlineHours", 168)},
             timeout=10,
@@ -1651,15 +1628,117 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_set_description(self, body):
         service = body.get("serviceName", "")
-        instances = get_governance_instances()
+        instances = get_workflow_instances()
         iid = instances.get(service)
         if not iid:
-            return self.send_error_json(404, f"No governance instance for '{service}'")
+            return self.send_error_json(404, f"No workflow instance for '{service}'")
         token = get_admin_token()
         resp = requests.post(
-            f"{NPL_URL}/npl/governance/ServiceGovernance/{iid}/setGovernanceDescription",
+            f"{NPL_URL}/npl/governance/Workflow/{iid}/setWorkflowDescription",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"desc": body.get("description", "")},
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    # === Allowlist CRUD (Guardrails protocol) ===
+    def handle_add_allowlist(self, body):
+        """Add a managed allowlist for a tool parameter."""
+        service = body.get("serviceName", "")
+        instances = get_guardrails_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/addAllowlist",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "toolName": body.get("toolName", ""),
+                "paramName": body.get("paramName", ""),
+                "matchMode": body.get("matchMode", "exact"),
+                "callerScope": body.get("callerScope", ""),
+                "description": body.get("description", ""),
+            },
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_add_allowed_value(self, body):
+        """Add an allowed value to a tool's allowlist."""
+        service = body.get("serviceName", "")
+        instances = get_guardrails_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/addAllowedValue",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "toolName": body.get("toolName", ""),
+                "paramName": body.get("paramName", ""),
+                "value": body.get("value", ""),
+            },
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_add_allowed_pattern(self, body):
+        """Add an allowed pattern (e.g. domain) to a tool's allowlist."""
+        service = body.get("serviceName", "")
+        instances = get_guardrails_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/addAllowedPattern",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "toolName": body.get("toolName", ""),
+                "paramName": body.get("paramName", ""),
+                "pattern": body.get("pattern", ""),
+            },
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_remove_allowed_value(self, body):
+        """Remove an allowed value from a tool's allowlist."""
+        service = body.get("serviceName", "")
+        instances = get_guardrails_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/removeAllowedValue",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "toolName": body.get("toolName", ""),
+                "paramName": body.get("paramName", ""),
+                "value": body.get("value", ""),
+            },
+            timeout=10,
+        )
+        self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)
+
+    def handle_remove_allowlist(self, body):
+        """Remove an entire allowlist for a tool parameter."""
+        service = body.get("serviceName", "")
+        instances = get_guardrails_instances()
+        iid = instances.get(service)
+        if not iid:
+            return self.send_error_json(404, f"No guardrails instance for '{service}'")
+        token = get_admin_token()
+        resp = requests.post(
+            f"{NPL_URL}/npl/governance/Guardrails/{iid}/removeAllowlist",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "toolName": body.get("toolName", ""),
+                "paramName": body.get("paramName", ""),
+            },
             timeout=10,
         )
         self.send_json({"ok": resp.status_code < 400}, resp.status_code if resp.status_code >= 400 else 200)

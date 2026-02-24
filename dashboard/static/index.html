@@ -79,8 +79,8 @@ td:first-child { color: var(--text); }
 
 /* Tags */
 .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
-.tag-acl { background: var(--green-dim); color: var(--green); }
-.tag-logic { background: var(--amber-dim); color: var(--amber); }
+.tag-guardrailed { background: var(--amber-dim); color: var(--amber); }
+.tag-workflow { background: var(--purple-dim); color: var(--purple); }
 .tag-inactive { background: var(--red-dim); color: var(--red); font-size: 10px; }
 .pill-orphaned { opacity: 0.6; text-decoration: line-through; }
 .tag-enabled { background: var(--green-dim); color: var(--green); }
@@ -301,7 +301,7 @@ td:first-child { color: var(--text); }
   <div class="header-left">
     <div>
       <div class="header-title">MCP Gateway</div>
-      <div class="header-subtitle">v4 Governance Dashboard</div>
+      <div class="header-subtitle">Three-Tier Governance Dashboard</div>
     </div>
     <div class="status-dots" id="statusDots"></div>
   </div>
@@ -323,7 +323,7 @@ td:first-child { color: var(--text); }
     <div class="nav-section">Governance</div>
     <div class="nav-item" data-panel="catalog" onclick="switchPanel('catalog')"><span class="nav-icon">&#9881;</span> Catalog</div>
     <div class="nav-item" data-panel="rules" onclick="switchPanel('rules')"><span class="nav-icon">&#9733;</span> Access Rules</div>
-    <div class="nav-item" data-panel="filters" onclick="switchPanel('filters')"><span class="nav-icon">&#9881;</span> Filters <span class="nav-badge" id="filterBadge" style="display:none">0</span></div>
+    <div class="nav-item" data-panel="filters" onclick="switchPanel('filters')"><span class="nav-icon">&#9881;</span> Guardrails <span class="nav-badge" id="filterBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="workflows" onclick="switchPanel('workflows')"><span class="nav-icon">&#9733;</span> Workflows <span class="nav-badge" id="workflowBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="approvals" onclick="switchPanel('approvals')"><span class="nav-icon">&#9998;</span> Approvals <span class="nav-badge" id="approvalBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="revoked" onclick="switchPanel('revoked')"><span class="nav-icon">&#10007;</span> Revoked</div>
@@ -369,7 +369,7 @@ td:first-child { color: var(--text); }
 
     <!-- Catalog -->
     <div class="panel" id="panel-catalog">
-      <div class="panel-header"><div><div class="panel-title">Service Catalog</div><div class="panel-desc">Services and tools with governance tags. <strong>Governed</strong> tools have access filters or workflow bindings.</div></div>
+      <div class="panel-header"><div><div class="panel-title">Service Catalog</div><div class="panel-desc">Services and tools in the gateway. Tools may have <strong>guardrails</strong> (constraints/allowlists) or <strong>workflow</strong> (approval) governance.</div></div>
         <div style="display:flex;gap:8px;align-items:center">
           <div class="view-toggle">
             <button class="view-btn active" id="viewCards" onclick="setCatalogView('cards')" title="Card view">&#9638;</button>
@@ -387,7 +387,7 @@ td:first-child { color: var(--text); }
 
     <!-- Access Filters -->
     <div class="panel" id="panel-filters">
-      <div class="panel-header"><div><div class="panel-title">Access Filters</div><div class="panel-desc">Parameter-level constraints for governed tools (regex, in/not_in, contains, max_length).</div></div>
+      <div class="panel-header"><div><div class="panel-title">Guardrails</div><div class="panel-desc">Parameter constraints and allowlists for tools (in-memory evaluation by OPA).</div></div>
         <button class="btn btn-primary" onclick="openRuleWizard()">+ New Filter</button>
       </div>
       <div id="constraintsList"></div>
@@ -395,7 +395,7 @@ td:first-child { color: var(--text); }
 
     <!-- Workflows -->
     <div class="panel" id="panel-workflows">
-      <div class="panel-header"><div><div class="panel-title">Workflows</div><div class="panel-desc">Workflow bindings for governed tools (e.g. Approved Recipients).</div></div></div>
+      <div class="panel-header"><div><div class="panel-title">Workflows</div><div class="panel-desc">Workflow governance for tools requiring human approval (NPL state machine).</div></div></div>
       <div id="protocolBindings"></div>
     </div>
 
@@ -539,7 +539,7 @@ async function fetchStatus() { try { state.status = await api('GET', '/api/statu
 async function fetchBundle() { try { state.bundle = await api('GET', '/api/bundle'); } catch(e) {} }
 async function fetchApprovals() { try { state.approvals = (await api('GET', '/api/approvals')).pending || []; } catch(e) { state.approvals = []; } }
 async function fetchUsers() { try { state.users = (await api('GET', '/api/users')).users || []; } catch(e) { state.users = []; } }
-async function fetchGovernance() { try { state.governance = (await api('GET', '/api/governance')).instances || {}; } catch(e) { state.governance = {}; } }
+async function fetchGovernance() { try { const data = await api('GET', '/api/governance'); state.governance = { guardrails: data.guardrails || {}, workflow: data.workflow || {} }; } catch(e) { state.governance = { guardrails: {}, workflow: {} }; } }
 async function fetchBackends() { try { state.backends = await api('GET', '/api/backends') || {}; } catch(e) { state.backends = {}; } }
 async function fetchSuggestions() { try { state.suggestions = await api('GET', '/api/suggestions'); } catch(e) {} }
 async function fetchConstraints() { try { state.constraints = (await api('GET', '/api/constraints')).configs || {}; } catch(e) { state.constraints = {}; } }
@@ -552,14 +552,26 @@ async function refreshAll() {
 }
 
 /* === Protocol helpers === */
-function getProtocolBinding(serviceName, toolName) {
-  for (const p of (state.protocols || [])) {
-    if (p.type === 'ApprovedRecipients' && p.serviceName === serviceName && p.toolName === toolName) {
-      // Only count as bound if it has actual config (recipients, domains, or agent)
-      if ((p.approvedRecipients||[]).length || (p.approvedDomains||[]).length || p.agentIdentity) return p;
-    }
+function getToolGuardrails(serviceName, toolName) {
+  // Check constraints data for this tool's guardrails (constraints + allowlists)
+  const svcConstraints = state.constraints[serviceName] || [];
+  if (Array.isArray(svcConstraints)) {
+    return svcConstraints.find(c => c.toolName === toolName) || null;
   }
   return null;
+}
+function getToolAllowlists(serviceName, toolName) {
+  const gr = getToolGuardrails(serviceName, toolName);
+  return gr ? (gr.allowlists || []) : [];
+}
+function toolRequiresWorkflow(serviceName, toolName) {
+  // Check workflow config from protocols data
+  for (const p of (state.protocols || [])) {
+    if (p.type === 'Workflow' && p.serviceName === serviceName) {
+      return (p.workflowConfig || {})[toolName] === true;
+    }
+  }
+  return false;
 }
 function getServiceProtocols(serviceName) {
   return (state.protocols || []).filter(p => p.serviceName === serviceName);
@@ -621,11 +633,10 @@ function renderCatalog() {
     </div></div>
     <div style="max-height:300px;overflow-y:auto">${tools.length===0?'<div style="color:var(--text3);font-size:13px;padding:8px 0">No tools registered</div>':''}
     ${tools.map(([t,info]) => {
-      const isLogic = info.tag === 'logic';
-      const proto = getProtocolBinding(name, t);
-      const svcConstraints = state.constraints[name] || [];
-      const toolCfg = Array.isArray(svcConstraints) ? svcConstraints.find(c => c.toolName === t) : null;
-      const cCount = toolCfg ? (toolCfg.constraints||[]).length : 0;
+      const toolGr = getToolGuardrails(name, t);
+      const cCount = toolGr ? (toolGr.constraints||[]).length : 0;
+      const aCount = toolGr ? (toolGr.allowlists||[]).length : 0;
+      const hasWorkflow = toolRequiresWorkflow(name, t);
       const ruleCount = (state.bundle.accessRules || []).filter(r => {
         const svcMatch = (r.allow?.services||[]).includes('*') || (r.allow?.services||[]).includes(name);
         const toolMatch = (r.allow?.tools||[]).includes('*') || (r.allow?.tools||[]).includes(t);
@@ -634,13 +645,13 @@ function renderCatalog() {
       // Governance badges: show all that apply
       let govBadges = [];
       if (cCount > 0) {
-        const warn = !isLogic ? ' title="Tag is acl — constraints not enforced until switched to logic"' : '';
-        const bg = isLogic ? 'var(--amber-dim)' : 'var(--red-dim)';
-        const color = isLogic ? 'var(--amber)' : 'var(--red)';
-        govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${bg};color:${color}"${warn}>${cCount} filter${cCount!==1?'s':''}${!isLogic?' ⚠':''}</span>`);
+        govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">${cCount} filter${cCount!==1?'s':''}</span>`);
       }
-      if (proto) {
-        govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">WORKFLOW</span>`);
+      if (aCount > 0) {
+        govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">${aCount} allowlist${aCount!==1?'s':''}</span>`);
+      }
+      if (hasWorkflow) {
+        govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--purple-dim);color:var(--purple)">WORKFLOW</span>`);
       }
       const govBadge = govBadges.join(' ');
       const accessBadge = ruleCount
@@ -704,25 +715,24 @@ function renderCatalogList() {
     if (!collapsed && tools.length > 0) {
       html += `<table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>`;
       for (const [t, info] of tools) {
-        const isLogic = info.tag === 'logic';
-        const proto = getProtocolBinding(name, t);
+        const toolGr = getToolGuardrails(name, t);
+        const cCount = toolGr ? (toolGr.constraints||[]).length : 0;
+        const aCount = toolGr ? (toolGr.allowlists||[]).length : 0;
+        const hasWorkflow = toolRequiresWorkflow(name, t);
         const ruleCount = (state.bundle.accessRules || []).filter(r => {
           const svcMatch = (r.allow?.services||[]).includes('*') || (r.allow?.services||[]).includes(name);
           const toolMatch = (r.allow?.tools||[]).includes('*') || (r.allow?.tools||[]).includes(t);
           return svcMatch && toolMatch;
         }).length;
-        const svcConstraints = state.constraints[name] || [];
-        const toolCfg = Array.isArray(svcConstraints) ? svcConstraints.find(c => c.toolName === t) : null;
-        const cCount = toolCfg ? (toolCfg.constraints||[]).length : 0;
         let govBadges = [];
         if (cCount > 0) {
-          const warn = !isLogic ? ' title="Tag is acl — constraints not enforced until switched to logic"' : '';
-          const bg = isLogic ? 'var(--amber-dim)' : 'var(--red-dim)';
-          const color = isLogic ? 'var(--amber)' : 'var(--red)';
-          govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:${bg};color:${color}"${warn}>${cCount} filter${cCount!==1?'s':''}${!isLogic?' ⚠':''}</span>`);
+          govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">${cCount} filter${cCount!==1?'s':''}</span>`);
         }
-        if (proto) {
-          govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">WORKFLOW</span>`);
+        if (aCount > 0) {
+          govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">${aCount} allowlist${aCount!==1?'s':''}</span>`);
+        }
+        if (hasWorkflow) {
+          govBadges.push(`<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--purple-dim);color:var(--purple)">WORKFLOW</span>`);
         }
         const govBadge = govBadges.join(' ');
         html += `<tr style="border-top:1px solid var(--glass-border)">
@@ -850,14 +860,6 @@ function showDeleteServiceModal(name, toolCount) {
     <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-danger" id="deleteConfirmBtn" disabled onclick="closeModal();removeService('${esc(name)}')">Delete</button></div>`);
   setTimeout(() => document.getElementById('deleteConfirmInput')?.focus(), 100);
 }
-async function toggleTag(s,t,tag) {
-  if(tag==='acl'&&!confirm(`Remove governance from "${t}"? Access filters will no longer apply.`))return;
-  // Auto-create governance instance when first tool is set to logic
-  if(tag==='logic' && !state.governance[s]) {
-    try { await api('POST','/api/governance/create',{serviceName:s}); } catch(e) { /* may already exist */ }
-  }
-  await act(()=>api('POST','/api/tools/set-tag',{serviceName:s,toolName:t,tag}), `${t} ${tag === 'logic' ? 'now governed' : 'governance removed'}`);
-}
 async function removeTool(s,t) { await act(()=>api('POST','/api/tools/remove',{serviceName:s,toolName:t}), 'Tool removed'); }
 function confirmRemoveTool(s,t) {
   const ruleCount = (state.bundle.accessRules||[]).filter(r => {
@@ -896,7 +898,7 @@ function confirmRemoveRule(id, idx) {
 }
 async function approveRequest(iid,rid) { await act(()=>api('POST','/api/approvals/approve',{instanceId:iid,requestId:rid}), `Approved ${rid}`); }
 async function reinstateSubject(id) { await act(()=>api('POST','/api/revoked/remove',{subjectId:id}), 'Reinstated'); }
-async function createGovernance(svc) { if(!confirm(`Enable governance for "${svc}"?`))return; await act(()=>api('POST','/api/governance/create',{serviceName:svc}), `Governance created for ${svc}`); }
+async function createGuardrails(svc) { if(!confirm(`Create guardrails for "${svc}"?`))return; await act(()=>api('POST','/api/governance/create-guardrails',{serviceName:svc}), `Guardrails created for ${svc}`); }
 async function deleteUser(id, name) { if(!confirm(`Delete user "${name}"?`))return; await act(()=>api('POST','/api/users/delete',{userId:id}), 'User deleted'); }
 
 /* === Modals === */
@@ -971,9 +973,7 @@ async function submitAddTool(svc) {
   const customInput = document.getElementById('customToolName');
   let name = sel.value === '__custom__' ? (customInput ? customInput.value.trim() : '') : sel.value.trim();
   if (!name) return;
-  const tagCb = document.getElementById('newToolTag');
-  const tag = tagCb && tagCb.checked ? 'logic' : 'acl';
-  try { await api('POST','/api/tools/register',{serviceName:svc,toolName:name,tag}); closeModal(); toast('Tool added','success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); }
+  try { await api('POST','/api/tools/register',{serviceName:svc,toolName:name}); closeModal(); toast('Tool added','success'); await refreshAll(); } catch(e) { toast('Error: '+(e.message||e),'error'); }
 }
 
 // === Shared Rule Form Builder ===
@@ -1445,53 +1445,52 @@ function renderConstraints() {
   const filterBadge = document.getElementById('filterBadge');
   const workflowBadge = document.getElementById('workflowBadge');
   const allConstraints = state.constraints || {};
-  let totalCount = 0;
+  let totalFilterCount = 0;
+  let totalAllowlistCount = 0;
   Object.values(allConstraints).forEach(cfgs => {
-    if (Array.isArray(cfgs)) cfgs.forEach(c => { totalCount += (c.constraints||[]).length; });
+    if (Array.isArray(cfgs)) cfgs.forEach(c => {
+      totalFilterCount += (c.constraints||[]).length;
+      totalAllowlistCount += (c.allowlists||[]).length;
+    });
   });
-  // Workflow bindings (skip empty/accidental ones)
-  const arProtocols = (state.protocols || []).filter(p =>
-    p.type === 'ApprovedRecipients' &&
-    ((p.approvedRecipients||[]).length || (p.approvedDomains||[]).length || p.agentIdentity)
-  );
-  if (totalCount > 0) { filterBadge.textContent = totalCount; filterBadge.style.display = 'inline'; }
+  // Workflow protocols
+  const wfProtocols = (state.protocols || []).filter(p => p.type === 'Workflow');
+  const wfToolCount = wfProtocols.reduce((n, p) => n + Object.values(p.workflowConfig || {}).filter(v => v).length, 0);
+  const totalGuardrails = totalFilterCount + totalAllowlistCount;
+  if (totalGuardrails > 0) { filterBadge.textContent = totalGuardrails; filterBadge.style.display = 'inline'; }
   else { filterBadge.style.display = 'none'; }
-  if (arProtocols.length > 0) { workflowBadge.textContent = arProtocols.length; workflowBadge.style.display = 'inline'; }
+  if (wfToolCount > 0) { workflowBadge.textContent = wfToolCount; workflowBadge.style.display = 'inline'; }
   else { workflowBadge.style.display = 'none'; }
 
-  // Render workflow bindings panel
+  // Render workflow panel
   const pbEl = document.getElementById('protocolBindings');
   if (pbEl) {
-    if (arProtocols.length) {
+    if (wfProtocols.length) {
       let pbHtml = '';
-      for (const p of arProtocols) {
-        const rCount = (p.approvedRecipients || []).length;
-        const dCount = (p.approvedDomains || []).length;
-        pbHtml += `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)">
+      for (const p of wfProtocols) {
+        const wfTools = Object.entries(p.workflowConfig || {}).filter(([,v]) => v);
+        pbHtml += `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--purple)">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
             <div style="display:flex;align-items:center;gap:8px">
-              <span class="svc-name">${esc(p.serviceName)}.${esc(p.toolName)}</span>
-              <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--amber-dim);color:var(--amber)">APPROVED RECIPIENTS</span>
+              <span class="svc-name">${esc(p.serviceName)}</span>
+              <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:var(--purple-dim);color:var(--purple)">WORKFLOW</span>
             </div>
           </div>
           <div style="font-size:12px;color:var(--text2)">
-            <span style="margin-right:16px">Agent: <strong>${esc(p.agentIdentity||'any')}</strong></span>
-            <span style="margin-right:16px">${dCount} approved domain${dCount!==1?'s':''}</span>
-            <span>${rCount} approved recipient${rCount!==1?'s':''}</span>
+            ${wfTools.length ? `Tools requiring approval: ${wfTools.map(([t]) => `<code style="font-size:11px">${esc(t)}</code>`).join(', ')}` : 'No tools require workflow approval'}
           </div>
-          <div style="font-size:11px;color:var(--text3);margin-top:4px">Manage via NPL Inspector</div>
         </div>`;
       }
       pbEl.innerHTML = pbHtml;
     } else {
-      pbEl.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9733;</div><div class="empty-text">No workflow bindings configured. Workflow bindings (e.g. Approved Recipients) are set up via the tool detail modal or seed script.</div></div></div>';
+      pbEl.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9733;</div><div class="empty-text">No workflow instances configured. Create one via the Governance panel if you need approval-gated tools.</div></div></div>';
     }
   }
 
-  // Render access filters panel
+  // Render guardrails panel (constraints + allowlists)
   const entries = Object.entries(allConstraints);
-  if (!entries.length || totalCount === 0) {
-    el.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No access filters defined. Click "+ New Filter" to add parameter-level filters for governed tools.</div></div></div>';
+  if (!entries.length || totalGuardrails === 0) {
+    el.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No guardrails defined. Click "+ New Filter" to add parameter-level constraints.</div></div></div>';
     return;
   }
   let html = '';
@@ -1499,16 +1498,19 @@ function renderConstraints() {
     if (!Array.isArray(cfgs)) continue;
     for (const cfg of cfgs) {
       const constraints = cfg.constraints || [];
-      if (!constraints.length) continue;
+      const allowlists = cfg.allowlists || [];
+      if (!constraints.length && !allowlists.length) continue;
       const svcOrph = isServiceOrphaned(svc);
       const toolOrph = isToolOrphaned(svc, cfg.toolName);
       const orphTag = (svcOrph || toolOrph) ? ` <span class="tag tag-inactive" title="Will reactivate if service/tool is re-added to catalog">inactive</span>` : '';
+      const badgeCount = constraints.length + allowlists.length;
       html += `<div class="card"><div class="svc-header"><div style="display:flex;align-items:center;gap:8px">
         <span class="svc-name">${esc(svc)}.${esc(cfg.toolName)}</span>
-        <span class="tag tag-logic">${constraints.length} filter${constraints.length!==1?'s':''}</span>${orphTag}
+        <span class="tag tag-guardrailed">${badgeCount} guardrail${badgeCount!==1?'s':''}</span>${orphTag}
       </div><div style="display:flex;gap:6px">
         <button class="btn btn-sm btn-danger" onclick="clearToolConstraints('${esc(svc)}','${esc(cfg.toolName)}')">Clear All</button>
       </div></div>`;
+      // Constraints
       for (const c of constraints) {
         html += `<div class="constraint-card"><div class="constraint-info">
           <div class="constraint-desc">${esc(c.description||'No description')}</div>
@@ -1516,6 +1518,22 @@ function renderConstraints() {
         </div><div style="display:flex;gap:4px">
           <button class="btn btn-sm btn-ghost" onclick="editConstraint('${esc(svc)}','${esc(cfg.toolName)}','${esc(c.paramName)}','${esc(c.operator)}',${esc(JSON.stringify(c.values||[]))},'${esc(c.description||'')}')">Edit</button>
           <button class="btn btn-sm btn-danger" onclick="confirmRemoveConstraint('${esc(svc)}','${esc(cfg.toolName)}','${esc(c.paramName)}')">Remove</button>
+        </div></div>`;
+      }
+      // Allowlists
+      for (const al of allowlists) {
+        const vCount = (al.allowedValues||[]).length;
+        const pCount = (al.allowedPatterns||[]).length;
+        html += `<div class="constraint-card" style="border-left:2px solid var(--amber)"><div class="constraint-info">
+          <div class="constraint-desc">${esc(al.description||'Allowlist')}</div>
+          <div class="constraint-detail">${esc(al.paramName)} <span class="constraint-badge">${esc(al.matchMode||'exact')}</span>
+            ${al.callerScope ? `<span style="font-size:11px;color:var(--text3)">caller: ${esc(al.callerScope)}</span>` : ''}
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">
+            ${vCount} value${vCount!==1?'s':''}, ${pCount} pattern${pCount!==1?'s':''}
+            ${(al.allowedValues||[]).length ? ` (${(al.allowedValues||[]).slice(0,3).map(v => esc(v)).join(', ')}${vCount>3?'...':''})` : ''}
+            ${(al.allowedPatterns||[]).length ? ` patterns: ${(al.allowedPatterns||[]).map(p => '@'+esc(p)).join(', ')}` : ''}
+          </div>
         </div></div>`;
       }
       html += '</div>';
@@ -1547,9 +1565,9 @@ function editConstraint(svc, tool, paramName, operator, values, description) {
   };
   renderWizard();
 }
-async function toggleToolApproval(svc, tool, required) {
-  if(!required && !confirm(`Set auto-allow for "${tool}"? Calls will bypass approval if constraints pass.`)) return;
-  await act(() => api('POST', '/api/governance/set-approval', {serviceName: svc, toolName: tool, required}), required ? 'Approval required' : 'Auto-allow set');
+async function toggleToolWorkflow(svc, tool, required) {
+  if(!required && !confirm(`Remove workflow from "${tool}"? Calls will no longer require approval.`)) return;
+  await act(() => api('POST', '/api/workflow/set-requires-workflow', {serviceName: svc, toolName: tool, required}), required ? 'Workflow required' : 'Workflow removed');
 }
 
 /* === Rule Builder Wizard === */
@@ -1596,16 +1614,16 @@ function renderWizardStep1() {
   const cat = state.bundle.catalog || {};
   const allSvcs = Object.keys(cat).filter(s => cat[s].enabled);
   if (!allSvcs.length) return '<div class="empty"><div class="empty-text">No services in catalog. Add a service first.</div></div>';
-  const gov = state.governance || {};
+  const gov = state.governance || { guardrails: {}, workflow: {} };
   return allSvcs.map(svc => {
     const entry = cat[svc] || {};
     const toolCount = Object.keys(entry.tools || {}).length;
     const sel = wizardState.service === svc ? 'selected' : '';
     const cCount = (state.constraints[svc] || []).reduce((n, c) => n + (c.constraints||[]).length, 0);
-    const hasGov = gov[svc] ? '' : ' (no governance instance yet)';
+    const hasGr = gov.guardrails[svc] ? '' : ' (no guardrails instance yet)';
     return `<div class="selectable-card ${sel}" onclick="wizardSelectService('${esc(svc)}')">
       <div class="sc-title">${esc(svc)}</div>
-      <div class="sc-meta">${toolCount} tool${toolCount!==1?'s':''} ${cCount ? ` &middot; ${cCount} existing rule${cCount!==1?'s':''}` : ''}${hasGov}</div>
+      <div class="sc-meta">${toolCount} tool${toolCount!==1?'s':''} ${cCount ? ` &middot; ${cCount} existing filter${cCount!==1?'s':''}` : ''}${hasGr}</div>
     </div>`;
   }).join('');
 }
@@ -1614,9 +1632,9 @@ async function wizardSelectService(svc) {
   wizardState.service = svc;
   wizardState.tool = '';
   wizardState.tools = [];
-  // Auto-create governance instance if it doesn't exist
-  if (!state.governance[svc]) {
-    try { await api('POST', '/api/governance/create', {serviceName: svc}); await fetchGovernance(); } catch(e) { /* may already exist */ }
+  // Auto-create guardrails instance if it doesn't exist
+  if (!state.governance.guardrails[svc]) {
+    try { await api('POST', '/api/governance/create-guardrails', {serviceName: svc}); await fetchGovernance(); } catch(e) { /* may already exist */ }
   }
   renderWizard();
   // Fetch schemas in background
@@ -1637,7 +1655,7 @@ function renderWizardStep2() {
   // Merge catalog info with schema
   const merged = catTools.map(([name, info]) => {
     const schema = tools.find(t => t.name === name) || {};
-    return { name, tag: info.tag, description: schema.description || '', inputSchema: schema.inputSchema || {} };
+    return { name, description: schema.description || '', inputSchema: schema.inputSchema || {} };
   });
   if (!merged.length) return '<div class="empty"><div class="empty-text">No tools found for this service.</div></div>';
   // Auto-select if only one tool
@@ -1645,8 +1663,10 @@ function renderWizardStep2() {
   return merged.map(t => {
     const sel = wizardState.tool === t.name ? 'selected' : '';
     const params = Object.keys((t.inputSchema || {}).properties || {});
+    const tGr = getToolGuardrails(wizardState.service, t.name);
+    const hasCfg = tGr && ((tGr.constraints||[]).length > 0 || (tGr.allowlists||[]).length > 0);
     return `<div class="selectable-card ${sel}" onclick="wizardSelectTool('${esc(t.name)}')">
-      <div class="sc-title" style="display:flex;align-items:center;gap:8px">${esc(t.name)} ${t.tag==='logic'?'<span class="tag tag-logic" style="font-size:10px">governed</span>':''}</div>
+      <div class="sc-title" style="display:flex;align-items:center;gap:8px">${esc(t.name)} ${hasCfg?'<span class="tag tag-guardrailed" style="font-size:10px">guardrailed</span>':''}</div>
       ${t.description ? `<div class="sc-desc">${esc(t.description)}</div>` : ''}
       ${params.length ? `<div class="sc-meta">Parameters: ${params.map(p => `<code>${esc(p)}</code>`).join(', ')}</div>` : '<div class="sc-meta">No parameters</div>'}
     </div>`;
@@ -1771,12 +1791,6 @@ async function wizardApply() {
       values: valuesList,
       description: s.description,
     });
-    // Auto-switch tool tag to logic so the constraint is enforced
-    const cat = state.bundle.catalog || {};
-    const toolTag = ((cat[s.service] || {}).tools || {})[s.tool]?.tag;
-    if (toolTag === 'acl') {
-      await api('POST', '/api/tools/set-tag', {serviceName: s.service, toolName: s.tool, tag: 'logic'});
-    }
     closeModal();
     toast(s._editMode ? `Filter updated: ${s.service}.${s.tool}.${s.param}` : `Filter added: ${s.service}.${s.tool}.${s.param}`, 'success');
     await refreshAll();
@@ -1790,8 +1804,6 @@ function showToolDetailModal(service, toolName) {
   _currentToolContext = { service, toolName };
   const catalog = state.bundle.catalog || {};
   const svcCatalog = catalog[service] || {};
-  const toolInfo = (svcCatalog.tools || {})[toolName] || {};
-  const tag = toolInfo.tag || 'acl';
   const rules = state.bundle.accessRules || [];
 
   // Find rules granting access to this service+tool
@@ -1825,11 +1837,11 @@ function showToolDetailModal(service, toolName) {
     }
   }
 
-  // Get governance constraints
-  const svcConstraints = state.constraints[service] || [];
-  const toolCfg = Array.isArray(svcConstraints) ? svcConstraints.find(c => c.toolName === toolName) : null;
-  const constraints = toolCfg ? (toolCfg.constraints || []) : [];
-  const reqApproval = toolCfg ? toolCfg.requiresApproval === true : false;
+  // Get guardrails data
+  const toolGr = getToolGuardrails(service, toolName);
+  const constraints = toolGr ? (toolGr.constraints || []) : [];
+  const allowlists = toolGr ? (toolGr.allowlists || []) : [];
+  const hasWorkflow = toolRequiresWorkflow(service, toolName);
 
   let html = `<h3 style="margin-bottom:16px">${esc(service)}.${esc(toolName)}</h3>`;
 
@@ -1888,88 +1900,78 @@ function showToolDetailModal(service, toolName) {
   }
   html += `</div></div>`;
 
-  // Governance section — protocol-aware
-  const proto = getProtocolBinding(service, toolName);
-
+  // Governance section — guardrails + workflow
   html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
   html += `<h4 style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Governance</h4>`;
   html += `</div>`;
 
-  const hasGovernanceInstance = !!state.governance[service];
-  if (tag === 'acl' && !hasGovernanceInstance) {
-    // No governance — offer to add filters
-    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:12px;padding:16px;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);text-align:center">
-      <div style="margin-bottom:8px">No governance configured for this tool.</div>
-      <button class="btn btn-sm btn-primary" onclick="enableGovernanceForTool('${esc(service)}','${esc(toolName)}','ServiceGovernance')">Add Access Filters</button>
-    </div>`;
-  } else if (proto) {
-    // ApprovedRecipients binding
-    html += `<div style="background:var(--amber-dim);border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px">`;
-    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--amber-dim);color:var(--amber);text-transform:uppercase;letter-spacing:0.04em">Approved Recipients Workflow</span>
-      <button class="btn btn-sm btn-ghost" onclick="unbindProtocolFromTool('${esc(service)}','${esc(toolName)}','${esc(proto.instanceId)}')">Unbind Workflow</button>
-    </div>`;
-    html += `<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Checks <code style="font-size:11px">${esc(proto.paramName||'to')}</code> against approved recipients/domains. Manage the list via NPL Inspector.</div>`;
-    // Approved domains
-    const domains = proto.approvedDomains || [];
-    html += `<div style="margin-bottom:6px"><span style="font-size:11px;font-weight:600;color:var(--text3)">Approved Domains (${domains.length}):</span>`;
-    if (domains.length) {
-      html += ` ${domains.map(d => `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:var(--green-dim);color:var(--green);margin-left:4px">@${esc(d)}</span>`).join('')}`;
-    } else {
-      html += ` <span style="font-size:11px;color:var(--text3)">none</span>`;
+  // Guardrails section (constraints + allowlists)
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+  html += `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--amber-dim);color:var(--amber);text-transform:uppercase;letter-spacing:0.04em">Guardrails</span>`;
+  html += `<div style="display:flex;gap:8px;align-items:center">`;
+  html += `<button class="btn btn-sm btn-ghost" onclick="showAddConstraintInline('${esc(service)}','${esc(toolName)}')">+ Add Filter</button>`;
+  html += `</div></div>`;
+  if (constraints.length) {
+    for (const c of constraints) {
+      html += `<div class="constraint-card" style="margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="constraint-desc" style="font-size:13px">${esc(c.description||'No description')}</div>
+          <button class="btn-icon" onclick="removeConstraintInToolContext('${esc(service)}','${esc(toolName)}','${esc(c.paramName)}')" title="Remove filter">&#10005;</button>
+        </div>
+        <div class="constraint-detail" style="font-size:12px;color:var(--text2);margin-top:4px">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
+      </div>`;
     }
-    html += `</div>`;
-    // Approved recipients
-    const recipients = proto.approvedRecipients || [];
-    html += `<div><span style="font-size:11px;font-weight:600;color:var(--text3)">Approved Recipients (${recipients.length}):</span>`;
-    if (recipients.length) {
-      html += ` ${recipients.map(r => `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:var(--accent-dim);color:var(--accent);margin-left:4px">${esc(r)}</span>`).join('')}`;
-    } else {
-      html += ` <span style="font-size:11px;color:var(--text3)">none</span>`;
-    }
-    html += `</div>`;
-    html += `</div>`;
-  } else {
-    // ServiceGovernance (existing behavior)
-    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
-    html += `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--amber-dim);color:var(--amber);text-transform:uppercase;letter-spacing:0.04em">Access Filters</span>`;
-    html += `<div style="display:flex;gap:8px;align-items:center">`;
-    html += `<button class="btn btn-sm btn-ghost" onclick="showAddConstraintInline('${esc(service)}','${esc(toolName)}')">+ Add Filter</button>`;
-    html += `</div></div>`;
-    if (constraints.length) {
-      for (const c of constraints) {
-        html += `<div class="constraint-card" style="margin-bottom:8px">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div class="constraint-desc" style="font-size:13px">${esc(c.description||'No description')}</div>
-            <button class="btn-icon" onclick="removeConstraintInToolContext('${esc(service)}','${esc(toolName)}','${esc(c.paramName)}')" title="Remove filter">&#10005;</button>
-          </div>
-          <div class="constraint-detail" style="font-size:12px;color:var(--text2);margin-top:4px">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
-        </div>`;
-      }
-    } else {
-      html += `<div style="color:var(--text3);font-size:13px;margin-bottom:12px">No access filters defined</div>`;
-    }
-
-    // Inline add constraint form (hidden by default)
-    html += `<div id="addConstraintForm" style="display:none;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px">
-      <h4 style="font-size:13px;margin-bottom:12px">Add Access Filter</h4>
-      <div class="form-row">
-        <div class="form-group"><label>Parameter</label><input id="cParamName" placeholder="e.g. attendees" /></div>
-        <div class="form-group"><label>Operator</label><select id="cOperator">
-          <option value="in">in</option><option value="notIn">notIn</option>
-          <option value="eq">eq</option><option value="neq">neq</option>
-          <option value="lt">lt</option><option value="lte">lte</option>
-          <option value="gt">gt</option><option value="gte">gte</option>
-        </select></div>
-      </div>
-      <div class="form-group" style="margin-bottom:12px"><label>Values (comma-separated)</label><input id="cValues" placeholder="e.g. @acme.com, @partner.com" /></div>
-      <div class="form-group" style="margin-bottom:12px"><label>Description</label><input id="cDesc" placeholder="e.g. Only internal meetings" /></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('addConstraintForm').style.display='none'">Cancel</button>
-        <button class="btn btn-primary btn-sm" onclick="submitInlineConstraint('${esc(service)}','${esc(toolName)}')">Add Filter</button>
-      </div>
-    </div>`;
   }
+  if (allowlists.length) {
+    for (const al of allowlists) {
+      const vCount = (al.allowedValues||[]).length;
+      const pCount = (al.allowedPatterns||[]).length;
+      html += `<div class="constraint-card" style="margin-bottom:8px;border-left:2px solid var(--amber)">
+        <div class="constraint-desc" style="font-size:13px">${esc(al.description||'Allowlist')}</div>
+        <div class="constraint-detail" style="font-size:12px;color:var(--text2);margin-top:4px">${esc(al.paramName)} <span class="constraint-badge">${esc(al.matchMode||'exact')}</span>
+          ${al.callerScope ? `<span style="font-size:11px;color:var(--text3)">caller: ${esc(al.callerScope)}</span>` : ''}
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px">${vCount} value${vCount!==1?'s':''}, ${pCount} pattern${pCount!==1?'s':''}
+          ${(al.allowedPatterns||[]).length ? ` (${(al.allowedPatterns||[]).map(p => '@'+esc(p)).join(', ')})` : ''}
+        </div>
+      </div>`;
+    }
+  }
+  if (!constraints.length && !allowlists.length) {
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:12px">No guardrails defined</div>`;
+  }
+
+  // Workflow section
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;margin-top:16px">`;
+  html += `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--purple-dim);color:var(--purple);text-transform:uppercase;letter-spacing:0.04em">Workflow</span>`;
+  html += `</div>`;
+  if (hasWorkflow) {
+    html += `<div style="background:var(--purple-dim);border:1px solid rgba(168,85,247,0.2);border-radius:var(--radius-sm);padding:12px;margin-bottom:12px">
+      <div style="font-size:13px;color:var(--text)">This tool requires human approval before execution.</div>
+    </div>`;
+  } else {
+    html += `<div style="color:var(--text3);font-size:13px;margin-bottom:12px">No workflow required</div>`;
+  }
+
+  // Inline add constraint form (hidden by default)
+  html += `<div id="addConstraintForm" style="display:none;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px">
+    <h4 style="font-size:13px;margin-bottom:12px">Add Constraint</h4>
+    <div class="form-row">
+      <div class="form-group"><label>Parameter</label><input id="cParamName" placeholder="e.g. attendees" /></div>
+      <div class="form-group"><label>Operator</label><select id="cOperator">
+        <option value="in">in</option><option value="notIn">notIn</option>
+        <option value="eq">eq</option><option value="neq">neq</option>
+        <option value="lt">lt</option><option value="lte">lte</option>
+        <option value="gt">gt</option><option value="gte">gte</option>
+      </select></div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px"><label>Values (comma-separated)</label><input id="cValues" placeholder="e.g. @acme.com, @partner.com" /></div>
+    <div class="form-group" style="margin-bottom:12px"><label>Description</label><input id="cDesc" placeholder="e.g. Only internal meetings" /></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('addConstraintForm').style.display='none'">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitInlineConstraint('${esc(service)}','${esc(toolName)}')">Add Filter</button>
+    </div>
+  </div>`;
 
   html += `<div class="modal-actions"><button class="btn btn-ghost" onclick="_currentToolContext=null;closeModal()">Close</button></div>`;
   showModal(html);
@@ -2099,11 +2101,12 @@ async function removeConstraintInToolContext(service, toolName, paramName) {
   } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
 }
 
-async function toggleApprovalInToolContext(service, toolName, required) {
-  if (!required && !confirm(`Set auto-allow for "${toolName}"? Calls will bypass approval if constraints pass.`)) return;
+async function toggleWorkflowInToolContext(service, toolName, required) {
+  if (!required && !confirm(`Remove workflow from "${toolName}"? Calls will no longer require approval.`)) return;
   try {
-    await api('POST', '/api/governance/set-approval', { serviceName: service, toolName: toolName, required: required });
-    toast(required ? 'Approval required' : 'Auto-allow set', 'success');
+    await ensureWorkflow(service);
+    await api('POST', '/api/workflow/set-requires-workflow', { serviceName: service, toolName: toolName, required: required });
+    toast(required ? 'Workflow required' : 'Workflow removed', 'success');
     await refreshAll();
     showToolDetailModal(service, toolName);
   } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
@@ -2123,48 +2126,22 @@ async function submitInlineConstraint(service, toolName) {
   if (!values.length) { toast('At least one value is required', 'error'); return; }
   try {
     await api('POST', '/api/constraints/add', { serviceName: service, toolName: toolName, paramName: paramName, operator: operator, values: values, description: description });
-    // Auto-switch tool tag to logic so the constraint is enforced
-    const cat = state.bundle.catalog || {};
-    const toolTag = ((cat[service] || {}).tools || {})[toolName]?.tag;
-    if (toolTag === 'acl') {
-      await api('POST', '/api/tools/set-tag', {serviceName: service, toolName: toolName, tag: 'logic'});
-    }
-    toast('Access filter added', 'success');
+    toast('Constraint added', 'success');
     await refreshAll();
     showToolDetailModal(service, toolName);
   } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
 }
 
-/* === Workflow Binding === */
-async function enableGovernanceForTool(service, toolName, protocolType) {
-  try {
-    if (protocolType === 'ApprovedRecipients') {
-      // Workflow binding needs logic tag
-      await api('POST', '/api/tools/set-tag', { serviceName: service, toolName: toolName, tag: 'logic' });
-      await api('POST', '/api/governance/bind-recipients', { serviceName: service, toolName: toolName, paramName: 'to' });
-      toast('Approved Recipients workflow bound', 'success');
-    } else {
-      // Just ensure governance instance exists — tag switches to logic
-      // automatically when a filter is actually added (server-side)
-      if (!state.governance[service]) {
-        await api('POST', '/api/governance/create', { serviceName: service });
-      }
-      toast('Governance enabled', 'success');
-    }
-    await refreshAll();
-    showToolDetailModal(service, toolName);
-  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+/* === Governance Setup Helpers === */
+async function ensureGuardrails(service) {
+  if (!state.governance.guardrails[service]) {
+    try { await api('POST', '/api/governance/create-guardrails', { serviceName: service }); await fetchGovernance(); } catch(e) { /* may already exist */ }
+  }
 }
-
-async function unbindProtocolFromTool(service, toolName, instanceId) {
-  if (!confirm(`Unbind the Approved Recipients workflow from ${service}.${toolName}?`)) return;
-  try {
-    // We can't delete NPL instances, but we revert the tag to acl to disable governance
-    await api('POST', '/api/tools/set-tag', { serviceName: service, toolName: toolName, tag: 'acl' });
-    toast('Workflow unbound', 'success');
-    await refreshAll();
-    showToolDetailModal(service, toolName);
-  } catch(e) { toast('Error: ' + (e.message || e), 'error'); }
+async function ensureWorkflow(service) {
+  if (!state.governance.workflow[service]) {
+    try { await api('POST', '/api/governance/create-workflow', { serviceName: service }); await fetchGovernance(); } catch(e) { /* may already exist */ }
+  }
 }
 
 /* === User Access View === */
@@ -2212,8 +2189,7 @@ function computeUserAccess(user) {
   }
 
   const result = Object.entries(accessMap).map(([svc, info]) => {
-    const svcCatalog = (catalog[svc] || {}).tools || {};
-    const tools = [...info.tools].map(t => ({ name: t, tag: (svcCatalog[t] || {}).tag || 'acl' }));
+    const tools = [...info.tools].map(t => ({ name: t }));
     return { service: svc, tools, rules: info.rules };
   });
   return { access: result, isRevoked, matchingRules };
@@ -2237,7 +2213,10 @@ function showUserAccessModal(userId) {
     for (const svc of access) {
       html += `<div class="card" style="margin-bottom:12px"><div class="svc-header"><span class="svc-name">${esc(svc.service)}</span></div>`;
       for (const tool of svc.tools) {
-        html += `<div class="tool-row"><span class="tool-name">${esc(tool.name)}</span>${tool.tag==='logic'?'<span class="tag tag-logic">governed</span>':''}</div>`;
+        const tGr = getToolGuardrails(svc.service, tool.name);
+        const isGuardrailed = tGr && ((tGr.constraints||[]).length > 0 || (tGr.allowlists||[]).length > 0);
+        const isWf = toolRequiresWorkflow(svc.service, tool.name);
+        html += `<div class="tool-row"><span class="tool-name">${esc(tool.name)}</span>${isGuardrailed?'<span class="tag tag-guardrailed">guardrailed</span>':''}${isWf?'<span class="tag tag-workflow">workflow</span>':''}</div>`;
       }
       html += `<div style="margin-top:8px;font-size:12px;color:var(--text3)">Granted by: ${svc.rules.map(r => `<span class="tag ${(r.matcher?.matchType||'claims')==='claims'?'tag-claims':'tag-identity'}" style="font-size:10px">${esc(r.id)}</span>`).join(' ')}</div></div>`;
     }

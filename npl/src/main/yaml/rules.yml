@@ -1,4 +1,4 @@
-# Party Automation Rules for MCP Gateway (v4)
+# Party Automation Rules for MCP Gateway (v5 Three-Tier Governance)
 #
 # Maps JWT claims to NPL protocol parties.
 # Party names use 'p' prefix to distinguish from JWT claim roles.
@@ -6,9 +6,10 @@
 # Hierarchy:
 # - pAdmin: Organization administrators (policy management)
 # - pGateway: Gateway system service (runtime policy enforcement)
+# - pApprover: Users who can approve workflow requests
 
 # ============================================================================
-# V4 GOVERNANCE — GatewayStore (unified singleton for catalog + access rules)
+# GatewayStore (unified singleton for catalog + access rules)
 # ============================================================================
 
 store.GatewayStore:
@@ -24,10 +25,26 @@ store.GatewayStore:
           - gateway
 
 # ============================================================================
-# V4 GOVERNANCE — ServiceGovernance (one instance per service)
+# Guardrails (Tier 2: constraints + allowlists, in-memory evaluation)
 # ============================================================================
 
-governance.ServiceGovernance:
+governance.Guardrails:
+  pAdmin:
+    set:
+      claims:
+        role:
+          - admin
+  pGateway:
+    set:
+      claims:
+        role:
+          - gateway
+
+# ============================================================================
+# Workflow (Tier 3: approval state machine)
+# ============================================================================
+
+governance.Workflow:
   pAdmin:
     set:
       claims:
@@ -45,7 +62,7 @@ governance.ServiceGovernance:
           - approver
 
 # ============================================================================
-# V4 GOVERNANCE — ToolAuthorization (workflow-gated tool execution)
+# ToolAuthorization (one-shot workflow-gated overrides)
 # ============================================================================
 
 governance.ToolAuthorization:
@@ -56,22 +73,6 @@ governance.ToolAuthorization:
           - user
           - admin
           - approver
-  pGateway:
-    set:
-      claims:
-        role:
-          - gateway
-
-# ============================================================================
-# V4 GOVERNANCE — ApprovedRecipients (workflow governance for send_email)
-# ============================================================================
-
-governance.ApprovedRecipients:
-  pAdmin:
-    set:
-      claims:
-        role:
-          - admin
   pGateway:
     set:
       claims:

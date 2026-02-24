@@ -1,12 +1,9 @@
 package store
 
 /**
- * Tool entry with a governance tag.
- * tag: "acl" (Layer 2 sufficient) or "logic" (requires NPL evaluation)
+ * Tool entry — empty struct (governance is derived from configuration, not tags).
  */
-struct ToolEntry {
-    tag: Text
-};
+struct ToolEntry {};
 
 /**
  * Catalog entry for a registered MCP service.
@@ -56,14 +53,10 @@ struct BundleData {
 };
 
 /**
- * GatewayStore — unified singleton for v4 three-layer governance.
+ * GatewayStore — unified singleton for three-tier governance.
  *
- * Replaces PolicyStore with a simpler model:
- *   - Catalog: services + tools with acl/logic tags
- *   - Access rules: claim-based and identity-based (replaces per-user grants)
- *   - Emergency revocation: fail-closed subject blocking
- *
- * No grants map, no contextual routes, no security policy YAML.
+ * Tier 1 (Access): catalog + access rules (fail-closed).
+ * Governance tiers 2-3 are opt-in overlays via Guardrails and Workflow protocols.
  *
  * @party pAdmin   Organization administrator
  * @party pGateway Gateway system service (reads bundle data at runtime)
@@ -72,7 +65,7 @@ struct BundleData {
 protocol[pAdmin, pGateway] GatewayStore() {
     initial state active;
 
-    // --- Catalog: services + tools with tags ---
+    // --- Catalog: services + tools ---
     private var catalog: Map<Text, CatalogEntry> = mapOf<Text, CatalogEntry>();
 
     // --- Access rules ---
@@ -136,38 +129,21 @@ protocol[pAdmin, pGateway] GatewayStore() {
     };
 
     // ========================================================================
-    // Tool management with tags
+    // Tool management
     // ========================================================================
 
     /**
-     * Register a tool on a service with a tag (acl or logic).
+     * Register a tool on a service.
      */
     @api
-    permission[pAdmin] registerTool(serviceName: Text, toolName: Text, tag: Text) | active {
-        require(tag == "acl" || tag == "logic", "Tag must be 'acl' or 'logic'");
+    permission[pAdmin] registerTool(serviceName: Text, toolName: Text) | active {
         var maybeEntry = catalog.getOrNone(serviceName);
         require(maybeEntry.isPresent(), "Service not found");
         var entry = maybeEntry.getOrFail();
-        var updatedTools = entry.tools.with(toolName, ToolEntry(tag = tag));
+        var updatedTools = entry.tools.with(toolName, ToolEntry());
         var updated = CatalogEntry(enabled = entry.enabled, tools = updatedTools);
         catalog = catalog.with(serviceName, updated);
-        info("[GatewayStore] Registered tool: " + serviceName + "." + toolName + " [" + tag + "]");
-    };
-
-    /**
-     * Change the tag of an existing tool (acl <-> logic).
-     */
-    @api
-    permission[pAdmin] setTag(serviceName: Text, toolName: Text, tag: Text) | active {
-        require(tag == "acl" || tag == "logic", "Tag must be 'acl' or 'logic'");
-        var maybeEntry = catalog.getOrNone(serviceName);
-        require(maybeEntry.isPresent(), "Service not found");
-        var entry = maybeEntry.getOrFail();
-        require(entry.tools.getOrNone(toolName).isPresent(), "Tool not found");
-        var updatedTools = entry.tools.with(toolName, ToolEntry(tag = tag));
-        var updated = CatalogEntry(enabled = entry.enabled, tools = updatedTools);
-        catalog = catalog.with(serviceName, updated);
-        info("[GatewayStore] Set tag: " + serviceName + "." + toolName + " -> " + tag);
+        info("[GatewayStore] Registered tool: " + serviceName + "." + toolName);
     };
 
     /**
