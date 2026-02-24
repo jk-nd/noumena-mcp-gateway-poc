@@ -85,7 +85,7 @@ This document describes the MCP Gateway's service topology, network isolation de
 | Mock Calendar MCP | Node.js | 8000 | backend | Streamable HTTP MCP server for testing |
 | Governance Evaluator | Python | 8090 | policy, public | Argument-level constraint evaluation + NPL approval routing |
 | Dashboard | Python | 8888 | policy, public, backend | Admin web UI: catalog, rules, approvals, users, metrics, orphan container cleanup daemon |
-| Credential Proxy | Python | 9002 | secrets, policy | Vault-to-env credential injection |
+| Credential Proxy | Kotlin/Ktor | 9002 | secrets, policy | Vault-to-env credential injection |
 | Vault | Go | 8200 | secrets | Secret storage (dev mode) |
 | NPL Inspector | React | 8080 | policy, public | NPL state inspection UI |
 | NPL CORS Proxy | Nginx | 12001 | policy, public | CORS proxy for Inspector browser access to NPL |

@@ -633,6 +633,6 @@ This enables:
 
 ## See Also
 
-- [Architecture V2](ARCHITECTURE_V2.md) - Full system architecture
-- [User Access Control](USER_ACCESS_CONTROL.md) - Per-user tool permissions
+- [Architecture Reference](ARCHITECTURE.md) - Full system architecture
+- [How-To Guide](HOWTO.md) - Step-by-step configuration walkthrough
 - [credentials.yaml](../configs/credentials.yaml) - Example configuration
