@@ -7,11 +7,12 @@
 Supersedes the v3 architecture (security policy YAML, per-user grants, classifier DSL,
 contextual route groups with six policy protocols, ~1000-line OPA Rego).
 
-The v4 system is fully operational with: GatewayStore + ServiceGovernance + ApprovedRecipients
-NPL protocols, OPA Rego (~490 lines), three-phase governance evaluator sidecar, admin
+The v4/v5 system is fully operational with: GatewayStore + ServiceGovernance + ApprovedRecipients
+NPL protocols, OPA Rego (~490 lines with in-memory constraint/recipient evaluation), admin
 dashboard with service catalog, access rules, governance rules (with auto acl→logic tag
 switching), approval workflows, user management, Docker Hub discovery, real-time metrics
-panel, and automatic orphan container cleanup.
+panel, and automatic orphan container cleanup. Constraints and recipients are evaluated
+in-memory by OPA from bundle data — only approval workflows call NPL directly.
 
 > **Implementation note**: This document uses `open`/`gated` as design-time tag names.
 > The implementation uses `acl` (= open) and `logic` (= gated) as the actual tag values.
@@ -364,8 +365,8 @@ On confirmation, the gateway replays that exact payload to the upstream MCP serv
 
 ## OPA Rego (Simplified)
 
-The OPA policy concept reduces to ~60 lines (the actual implementation is ~240 lines with
-response headers, tools/list filtering, governance evaluator integration, and edge cases):
+The OPA policy concept reduces to ~60 lines (the actual implementation is ~490 lines with
+response headers, tools/list filtering, in-memory constraint/recipient evaluation, and edge cases):
 
 ```rego
 package envoy.authz

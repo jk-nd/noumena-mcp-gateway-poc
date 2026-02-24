@@ -31,10 +31,10 @@ This document describes the MCP Gateway's service topology, network isolation de
                         │  │:9191:8181│  │    :8282      │  │  :12000   │  │
                         │  └──────────┘  └──────────────┘  └───────────┘  │
                         │                                                  │
-                        │  ┌────────────────────┐  ┌──────────────────┐   │
-                        │  │Governance Evaluator │  │Credential Proxy  │   │
-                        │  │       :8090         │  │     :9002        │   │
-                        │  └────────────────────┘  └──────────────────┘   │
+                        │  ┌──────────────────┐                            │
+                        │  │Credential Proxy  │                            │
+                        │  │     :9002        │                            │
+                        │  └──────────────────┘                            │
                         │                                                  │
                         │  ┌────────────────┐  ┌──────────────────┐       │
                         │  │   Dashboard    │  │ NPL CORS Proxy   │       │
@@ -76,14 +76,13 @@ This document describes the MCP Gateway's service topology, network isolation de
 | Envoy Gateway | C++ | 8000 (MCP), 9901 (admin) | public, backend, policy | MCP protocol termination, JWT validation, ext_authz routing |
 | Keycloak | Java | 11000 (HTTP), 9000 (health) | public | OIDC identity provider (user auth, JWT issuance) |
 | OPA Sidecar | Go | 9191 (gRPC), 8181 (HTTP) | policy | Rego policy evaluation, Envoy ext_authz |
-| Bundle Server | Python | 8282 | policy, public | SSE-driven OPA bundle builder and server |
+| Bundle Server | Python | 8282 | policy, public | SSE-driven OPA bundle builder (catalog, rules, constraints, recipients, authorizations) |
 | NPL Engine | Kotlin | 12000 (API), 12400 (debug) | policy, public | Policy state manager (GatewayStore + ServiceGovernance) |
 | Engine DB | PostgreSQL | 5432 | policy | NPL Engine persistence |
 | AI Gateway (aigw-run) | Go | 8001 | backend | Multi-backend MCP aggregation and routing (Envoy AI Gateway) |
 | DuckDuckGo MCP | Node.js | 8000 | backend | Supergateway sidecar for DuckDuckGo search |
 | GitHub MCP | Node.js | 8000 | backend, secrets | Supergateway sidecar for GitHub (needs credentials) |
 | Mock Calendar MCP | Node.js | 8000 | backend | Streamable HTTP MCP server for testing |
-| Governance Evaluator | Python | 8090 | policy, public | Argument-level constraint evaluation + NPL approval routing |
 | Dashboard | Python | 8888 | policy, public, backend | Admin web UI: catalog, rules, approvals, users, metrics, orphan container cleanup daemon |
 | Credential Proxy | Kotlin/Ktor | 9002 | secrets, policy | Vault-to-env credential injection |
 | Vault | Go | 8200 | secrets | Secret storage (dev mode) |
@@ -113,11 +112,14 @@ Agent                 Envoy              OPA              NPL Engine        aigw
   │                    │                  │ (~1ms, in-memory)  │                  │                │
   │                    │                  │                    │                  │                │
   │                    │                  │ [if tag == logic]  │                  │                │
-  │                    │                  │ Layer 3: NPL       │                  │                │
-  │                    │                  │ http.send ────────►│ Gov. Evaluator   │                │
-  │                    │                  │   evaluate()       │   → NPL Engine   │                │
+  │                    │                  │ Layer 3: Governance│                  │                │
+  │                    │                  │ Constraints (~0ms) │                  │                │
+  │                    │                  │ Recipients (~0ms)  │                  │                │
+  │                    │                  │ [if requiresApproval]                 │                │
+  │                    │                  │ http.send ────────►│ NPL evaluate()   │                │
   │                    │                  │ ◄─────────────────│                  │                │
-  │                    │                  │ (~60ms, network)   │                  │                │
+  │                    │                  │ (~1ms in-memory,   │                  │                │
+  │                    │                  │  +5ms if approval) │                  │                │
   │                    │                  │                    │                  │                │
   │                    │ allow/deny       │                    │                  │                │
   │                    │◄─────────────────│                    │                  │                │
@@ -138,10 +140,11 @@ Agent                 Envoy              OPA              NPL Engine        aigw
 
 - **Layer 1 — Catalog** (~0.5ms): Is the service enabled and tool registered? In-memory bundle check.
 - **Layer 2 — Access Rules** (~0.5ms): Does any access rule (claim-based or identity-based) grant this caller access? In-memory bundle check.
-- **Layer 3 — NPL Governance** (~60ms): For `logic` tools only, OPA calls the governance evaluator sidecar, which runs a **three-phase evaluation**:
-  - Phase 1: Access filter constraints (regex, in/not_in, max_length) from ServiceGovernance
-  - Phase 2: Workflow bindings (ApprovedRecipients — caller-specific recipient validation)
-  - Phase 3: NPL approval routing (pending/approve/deny workflows)
+- **Layer 3 — Governance** (~1ms in-memory, +5ms if NPL approval needed): For `logic` tools only, OPA evaluates governance checks:
+  - Phase 1: Argument constraints (regex, in/not_in, contains, not_contains, max_length) — evaluated in-memory from bundle data
+  - Phase 2: Recipient bindings (ApprovedRecipients — domain/email whitelisting) — evaluated in-memory from bundle data
+  - Phase 3: Approval workflow — if `requiresApproval=true`, calls NPL directly via http.send (the only network hop)
+  - Override: ToolAuthorization one-shot overrides can bypass failed constraints
   `acl` tools skip this layer entirely.
 
 **tools/list Response Filtering**: On `tools/list` requests, OPA computes `visible_tool_names` from the catalog and sets an `x-visible-tools` response header. The Envoy Lua filter reads this header on the response path and removes any tools not in the set — ensuring agents only see catalog-registered tools, even though aigw-run discovers all tools from backends.
@@ -165,7 +168,15 @@ GatewayStore (NPL)               Bundle Server                    OPA
       │ getBundleData()               │                           │
       │──────────────────────────────►│                           │
       │ {catalog, accessRules,        │                           │
-      │  revokedSubjects, token}      │                           │
+      │  revokedSubjects}             │                           │
+      │◄──────────────────────────────│                           │
+      │                               │                           │
+      │ getToolConfigs()              │                           │
+      │ ApprovedRecipients/           │                           │
+      │ ToolAuthorization/            │                           │
+      │◄──────────────────────────────│                           │
+      │ {constraints, recipients,     │                           │
+      │  authorizations}              │                           │
       │◄──────────────────────────────│                           │
       │                               │ build bundle              │
       │                               │ (data.json + manifest)    │

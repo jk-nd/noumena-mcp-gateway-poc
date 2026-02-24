@@ -2269,7 +2269,6 @@ function renderMetrics() {
     { id: 'envoy', name: 'Envoy Gateway', color: 'var(--accent)', render: renderEnvoyMetrics },
     { id: 'opa', name: 'OPA Policy Engine', color: 'var(--green)', render: renderOpaMetrics },
     { id: 'bundle', name: 'Bundle Server', color: 'var(--purple)', render: renderBundleMetrics },
-    { id: 'gov', name: 'Governance Evaluator', color: 'var(--amber)', render: renderGovMetrics },
     { id: 'agg', name: 'AI Gateway', color: 'var(--accent)', render: renderAggMetrics },
   ];
 
@@ -2300,7 +2299,6 @@ function getMetricStatus(id, m) {
   if (id === 'envoy') return (m.envoy && !m.envoy.error) ? 'up' : 'down';
   if (id === 'opa') return (m.opa && !m.opa.error) ? 'up' : 'down';
   if (id === 'bundle') return (m.bundle_server && !m.bundle_server.error) ? 'up' : 'down';
-  if (id === 'gov') return (m.governance_evaluator && !m.governance_evaluator.error) ? 'up' : 'down';
   if (id === 'agg') return (m.aigw && !m.aigw.error) ? 'up' : 'down';
   return 'down';
 }
@@ -2347,14 +2345,6 @@ function renderBundleMetrics(m) {
     + metricItem('SSE Connected', b.sse_connected ? 'Yes' : 'No', {color: b.sse_connected ? 'var(--green)' : 'var(--red)'})
     + metricItem('Rebuild Count', b.rebuild_count != null ? b.rebuild_count : '—')
     + metricItem('Rebuild Errors', b.rebuild_errors != null ? b.rebuild_errors : '0', {color: b.rebuild_errors > 0 ? 'var(--red)' : 'var(--text)'});
-}
-
-function renderGovMetrics(m) {
-  const g = m.governance_evaluator || {};
-  if (g.error) return `<div style="color:var(--text3);padding:8px">Governance evaluator unreachable: ${esc(g.error)}</div>`;
-  return metricItem('Status', g.status || 'ok', {color:'var(--green)'})
-    + metricItem('Cached Services', g.cached_services != null ? g.cached_services : '—')
-    + metricItem('Recipient Bindings', g.recipient_bindings != null ? g.recipient_bindings : '—');
 }
 
 function renderAggMetrics(m) {

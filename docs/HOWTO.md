@@ -300,7 +300,7 @@ Typical propagation time: **2-6 seconds**. The bundle server subscribes to SSE p
 
 ## 5. Governance Rules & Approval Workflows
 
-Governance rules add fine-grained access filters (argument-level constraints) and approval workflows on top of the access rules layer. They apply to tools tagged as **logic** in the catalog. The governance evaluator runs a three-phase evaluation: access filters → workflow bindings (ApprovedRecipients) → NPL approval routing.
+Governance rules add fine-grained access filters (argument-level constraints) and approval workflows on top of the access rules layer. They apply to tools tagged as **logic** in the catalog. OPA evaluates governance checks in three phases: constraints (in-memory) → recipient bindings (in-memory) → NPL approval (network call, rare path).
 
 ### 5.1 ACL vs Logic Tags
 
@@ -309,7 +309,7 @@ Each tool in the catalog has a tag:
 | Tag | Meaning | OPA behavior |
 |-----|---------|--------------|
 | `acl` | Stateless check — access rules sufficient | Allow if catalog + access rules pass |
-| `logic` | Stateful check — requires governance evaluation | Allow only if catalog + access rules + governance evaluator returns allow |
+| `logic` | Stateful check — requires governance evaluation | Allow only if catalog + access rules + in-memory constraints/recipients pass (+ NPL approval if required) |
 
 Toggle tags in the Dashboard via the **Catalog** panel, or via API:
 
@@ -324,7 +324,7 @@ curl -s -X POST "http://localhost:12000/npl/store/GatewayStore/$STORE_ID/setTag"
 
 ### 5.2 Argument-Level Constraints
 
-For logic-tagged tools, you can define argument-level constraints that are evaluated before the request reaches NPL. These are managed through the governance evaluator.
+For logic-tagged tools, you can define argument-level constraints that are evaluated in-memory by OPA from bundle data. Constraint configs are fetched by the bundle server from ServiceGovernance instances.
 
 **Via Dashboard:** Go to **Gov Rules** > **+ New Rule**. The wizard guides you through:
 1. Select a service (must have governance enabled)
@@ -361,14 +361,13 @@ curl -s -X POST "http://localhost:12000/npl/governance/ServiceGovernance/$INSTAN
 
 ### 5.3 Approval Workflows
 
-When a logic-tagged tool call passes constraint checks but still requires human approval, the governance evaluator routes to NPL's ServiceGovernance protocol. The approval flow:
+When a logic-tagged tool call passes constraint checks but still requires human approval, OPA calls NPL's ServiceGovernance directly. The approval flow:
 
 1. Agent calls a logic-tagged tool
-2. OPA calls governance evaluator
-3. Evaluator checks argument constraints
-4. If constraints pass and approval is required, a pending request is created
-5. Admin approves or denies in Dashboard (**Approvals** panel)
-6. On next retry, the tool call is allowed/denied based on the decision
+2. OPA evaluates constraints and recipient bindings in-memory
+3. If constraints pass and `requiresApproval=true`, OPA calls NPL to create a pending request
+4. Admin approves or denies in Dashboard (**Approvals** panel)
+5. On next retry, the tool call is allowed/denied based on the decision
 
 **Via Dashboard:** Go to **Approvals** to see pending requests. Click **Approve** or **Deny**.
 
@@ -404,11 +403,11 @@ npl_call ".../ApprovedRecipients/$ID/setup" \
 **Enforcement flow:**
 
 1. Agent calls `send_email(to: "someone@external.com")`
-2. OPA routes to governance evaluator (logic tag)
-3. Evaluator checks if caller matches `agentIdentity` — if not, falls through to ServiceGovernance
-4. If caller matches, evaluator checks recipient against approved list/domains
-5. If not approved: 403 with reason "Recipient not approved. A supervisor must approve."
-6. Supervisor approves via dashboard → recipient added to approved list → next call succeeds
+2. OPA checks recipient binding in-memory (logic tag)
+3. OPA checks if caller matches `agentIdentity` — if not, binding doesn't apply
+4. If caller matches, OPA checks recipient against approved list/domains from bundle data
+5. If not approved: 403 with reason "Recipient not approved"
+6. Supervisor approves via dashboard → recipient added to approved list → bundle rebuilt → next call succeeds
 
 ---
 
@@ -438,7 +437,6 @@ The Metrics panel shows real-time data from all gateway components in collapsibl
 - **Envoy Gateway** — request counts, response codes (2xx/4xx/5xx), active connections, ext_authz allow/deny
 - **OPA Policy Engine** — health status, decision counts, bundle revision
 - **Bundle Server** — revision, bundle age, SSE connection, rebuild count/errors
-- **Governance Evaluator** — health status, cached services count
 - **AI Gateway (aigw-run)** — active sessions, registered backends
 
 ---
@@ -634,11 +632,12 @@ Look for `x-authz-reason`, `x-mcp-service`, and `x-bundle-revision` in the respo
 **Governance rules not taking effect:**
 - Verify catalog data in OPA: `curl -s http://localhost:8181/v1/data/catalog | jq .`
 - Check if the bundle was rebuilt after changes: compare `x-bundle-revision` header with `curl -s http://localhost:8282/health | jq .revision`
-- For logic-tagged tools, check the governance evaluator: `curl -s http://localhost:8090/health | jq .`
+- For logic-tagged tools, check tool_configs in OPA: `curl -s http://localhost:8181/v1/data/tool_configs | jq .`
+- Check recipient_bindings in OPA: `curl -s http://localhost:8181/v1/data/recipient_bindings | jq .`
 
 **Approval workflow not working:**
 - Verify the ServiceGovernance instance exists for the service
-- Check governance evaluator logs: `docker compose logs governance-evaluator --tail 50`
+- Check bundle server logs: `docker compose logs bundle-server --tail 50`
 - Verify NPL Engine health: `curl -s http://localhost:12000/actuator/health | jq .`
 
 ---

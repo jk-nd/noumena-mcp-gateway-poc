@@ -1,11 +1,11 @@
-# Unit tests for MCP Gateway v4 authorization policy
+# Unit tests for MCP Gateway v5 authorization policy
 #
 # Run with: opa test policies/ -v
 #
 # Tests the three-layer governance model:
 #   Layer 1 — Catalog (acl/logic tags)
 #   Layer 2 — Access Rules (claim-based + identity-based)
-#   Layer 3 — Governance Evaluator → NPL (gated tool evaluation)
+#   Layer 3 — In-memory constraints, recipients, and approval workflows
 
 package envoy.authz
 
@@ -78,6 +78,7 @@ mock_catalog := {
 		"tools": {
 			"list_events": {"tag": "acl"},
 			"create_event": {"tag": "logic"},
+			"send_email": {"tag": "logic"},
 		},
 	},
 	"duckduckgo": {
@@ -111,7 +112,13 @@ mock_access_rules := [
 
 mock_revoked := []
 
-mock_governance_evaluator_url := "http://governance-evaluator:8090"
+# --- Mock governance data (empty defaults for most tests) ---
+
+mock_tool_configs_empty := {}
+
+mock_recipient_bindings_empty := {}
+
+mock_tool_authorizations_empty := []
 
 # ============================================================================
 # 1. Non-tool-call methods (allow if authenticated)
@@ -126,7 +133,6 @@ test_allow_initialize if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_allow_tools_list if {
@@ -138,7 +144,6 @@ test_allow_tools_list if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_allow_ping if {
@@ -150,7 +155,6 @@ test_allow_ping if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_allow_notifications if {
@@ -162,7 +166,6 @@ test_allow_notifications if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -178,7 +181,6 @@ test_deny_tool_call_missing_service if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_tool_call_missing_tool if {
@@ -190,7 +192,6 @@ test_deny_tool_call_missing_tool if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_tool_call_disabled_service if {
@@ -209,7 +210,6 @@ test_deny_tool_call_disabled_service if {
 		with catalog as disabled_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_tool_call_empty_catalog if {
@@ -221,14 +221,13 @@ test_deny_tool_call_empty_catalog if {
 		with catalog as {}
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
 # 3. Access rules: claim match, identity match, wildcard, no match, OR, revoked
 # ============================================================================
 
-# Jarvis (sales) matches "sales-calendar" rule → allowed on mock-calendar open tools
+# Jarvis (sales) matches "sales-calendar" rule -> allowed on mock-calendar open tools
 test_access_rule_claim_match if {
 	allow with input as mock_input(
 		"POST", "/mcp",
@@ -238,7 +237,6 @@ test_access_rule_claim_match if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Jarvis matches identity rule for duckduckgo__search
@@ -251,10 +249,9 @@ test_access_rule_identity_match if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Alice (engineering) matches "engineering-all" → allowed on duckduckgo open tools
+# Alice (engineering) matches "engineering-all" -> allowed on duckduckgo open tools
 test_access_rule_wildcard_tool if {
 	allow with input as mock_input(
 		"POST", "/mcp",
@@ -264,10 +261,9 @@ test_access_rule_wildcard_tool if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Unknown user (external org) → no matching rule → denied
+# Unknown user (external org) -> no matching rule -> denied
 test_access_rule_no_match if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
@@ -277,12 +273,10 @@ test_access_rule_no_match if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Jarvis identity-rule only allows search, not fetch_page → denied
+# Jarvis identity-rule only allows search, not fetch_page -> denied
 test_access_rule_identity_tool_mismatch if {
-	# Only identity rule matches for duckduckgo, and it allows only "search"
 	identity_only_rules := [
 		{
 			"id": "jarvis-duckduckgo",
@@ -299,13 +293,10 @@ test_access_rule_identity_tool_mismatch if {
 		with catalog as mock_catalog
 		with access_rules as identity_only_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # Multiple rules OR semantics — any match allows
 test_access_rule_or_semantics if {
-	# Jarvis matches both "sales-calendar" (claims) AND "jarvis-duckduckgo" (identity)
-	# Either should work independently
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -314,10 +305,9 @@ test_access_rule_or_semantics if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Revoked subject → denied even with matching access rule
+# Revoked subject -> denied even with matching access rule
 test_revoked_subject_denied if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
@@ -327,7 +317,6 @@ test_revoked_subject_denied if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as ["jarvis@acme.com"]
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
@@ -343,7 +332,6 @@ test_acl_tool_allowed if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_acl_tool_denied_no_rule if {
@@ -355,15 +343,13 @@ test_acl_tool_denied_no_rule if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
-# 5. Logic tool path: evaluator allow, deny, pending, unreachable
+# 5. Logic tool path: no constraints, no bindings, no approval -> allow
 # ============================================================================
 
-# Logic tool + evaluator returns allow → allowed
-test_logic_tool_npl_allow if {
+test_logic_tool_no_governance_allow if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -372,13 +358,14 @@ test_logic_tool_npl_allow if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
 }
 
-# Logic tool + evaluator returns deny → denied
-test_logic_tool_npl_deny if {
-	not allow with input as mock_input(
+# Logic tool + approval workflow returns allow -> allowed
+test_logic_tool_approval_allow if {
+	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
 		"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
@@ -386,12 +373,14 @@ test_logic_tool_npl_deny if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+		with npl_approval_decision as {"decision": "allow", "requestId": "REQ-1", "message": "Approved"}
 }
 
-# Logic tool + evaluator returns pending → denied (with pending headers)
-test_logic_tool_npl_pending if {
+# Logic tool + approval workflow returns deny -> denied
+test_logic_tool_approval_deny if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -400,12 +389,14 @@ test_logic_tool_npl_pending if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+		with npl_approval_decision as {"decision": "deny", "requestId": "REQ-1", "message": "Not allowed"}
 }
 
-# Logic tool + evaluator unreachable (no URL) → denied
-test_logic_tool_npl_unreachable if {
+# Logic tool + approval workflow returns pending -> denied
+test_logic_tool_approval_pending if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
@@ -414,52 +405,428 @@ test_logic_tool_npl_unreachable if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-}
-
-# Logic tool + constraint denied with reason in message
-test_logic_tool_constraint_denied if {
-	not allow with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
-	)
-		with catalog as mock_catalog
-		with access_rules as mock_access_rules
-		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "deny", "requestId": "", "message": "Constraint violated: Only allowed domains"}
-}
-
-# Constraint denied — reason header includes constraint message
-test_constraint_denied_reason_header if {
-	r := reason with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":45,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
-	)
-		with catalog as mock_catalog
-		with access_rules as mock_access_rules
-		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "deny", "requestId": "", "message": "Constraint violated: Only allowed domains"}
-
-	contains(r, "Constraint violated")
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+		with npl_approval_decision as {"decision": "pending", "requestId": "REQ-1", "message": "Awaiting approval"}
 }
 
 # ============================================================================
-# 6. Response headers
+# 6. Constraint operators — in, not_in, contains, not_contains, regex, max_length
+# ============================================================================
+
+# --- "in" operator ---
+
+test_constraint_in_pass if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"high\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+test_constraint_in_fail if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"critical\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# --- "not_in" operator ---
+
+test_constraint_not_in_pass if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"category\":\"work\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+test_constraint_not_in_fail if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"category\":\"secret\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# --- "contains" operator ---
+
+test_constraint_contains_pass if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":54,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"attendees\":\"alice@acme.com\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Must be Acme email"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+test_constraint_contains_fail if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":55,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"attendees\":\"bob@evil.com\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Must be Acme email"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# --- "not_contains" operator ---
+
+test_constraint_not_contains_pass if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":56,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"notes\":\"regular meeting\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "notes", "operator": "not_contains", "values": ["confidential", "restricted"], "description": "No sensitive content"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+test_constraint_not_contains_fail if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":57,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"notes\":\"this is confidential info\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "notes", "operator": "not_contains", "values": ["confidential", "restricted"], "description": "No sensitive content"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# --- "regex" operator ---
+
+test_constraint_regex_pass if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":58,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"email\":\"user@acme.com\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "email", "operator": "regex", "values": ["^[a-zA-Z0-9._%+-]+@acme\\.com$"], "description": "Must be Acme email"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+test_constraint_regex_fail if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":59,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"email\":\"user@evil.com\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "email", "operator": "regex", "values": ["^[a-zA-Z0-9._%+-]+@acme\\.com$"], "description": "Must be Acme email"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# --- "max_length" operator ---
+
+test_constraint_max_length_pass if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"Short\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "title", "operator": "max_length", "values": ["50"], "description": "Title max 50 chars"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+test_constraint_max_length_fail if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"This is a very long title that exceeds the maximum allowed length of fifty characters\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "title", "operator": "max_length", "values": ["50"], "description": "Title max 50 chars"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# ============================================================================
+# 7. Constraint edge cases
+# ============================================================================
+
+# Missing argument (not in request) -> skip constraint, pass
+test_constraint_missing_arg_passes if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "nonexistent_arg", "operator": "in", "values": ["a", "b"], "description": "Only when present"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# No tool config exists -> pass (no constraints)
+test_constraint_no_tool_config_passes if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# Multiple constraints, one fails -> deny
+test_constraint_multiple_one_fails if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"high\",\"category\":\"secret\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [
+			{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Valid priority"},
+			{"paramName": "category", "operator": "not_in", "values": ["secret", "classified"], "description": "No secret categories"},
+		], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# ============================================================================
+# 8. Approved Recipients
+# ============================================================================
+
+# Domain match -> allow
+test_recipient_domain_match_allow if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"alice@acme.com\",\"body\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# Exact email match -> allow
+test_recipient_email_match_allow if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"dave@external-vendor.com\",\"body\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": ["dave@external-vendor.com"], "approvedDomains": ["acme.com"]}}
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# Not approved -> deny
+test_recipient_not_approved_deny if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"stranger@evil.com\",\"body\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": ["dave@external-vendor.com"], "approvedDomains": ["acme.com"]}}
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# Agent-specific: different caller bypasses binding -> allow (Path A: no binding applies)
+test_recipient_different_agent_bypasses if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_alice),
+		"{\"jsonrpc\":\"2.0\",\"id\":83,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"stranger@evil.com\",\"body\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# No binding for service -> no effect (Path A passes)
+test_recipient_no_binding_allows if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":84,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"anyone@anywhere.com\",\"body\":\"hello\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {}
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# ============================================================================
+# 9. ToolAuthorization override
+# ============================================================================
+
+# Constraint fails + override exists -> allow
+test_tool_authorization_override_allows if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"critical\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as [{"instanceId": "auth-1", "serviceName": "mock-calendar", "toolName": "create_event", "agentIdentity": "jarvis@acme.com", "scope": "one-shot"}]
+		with has_tool_authorization_override as true
+}
+
+# Constraint fails + no override -> deny
+test_constraint_fail_no_override_denies if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"critical\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as []
+}
+
+# ============================================================================
+# 10. Combined paths
+# ============================================================================
+
+# Constraints pass + no approval + no binding -> allow (fully in-memory)
+test_combined_constraints_pass_no_governance if {
+	allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"high\",\"attendees\":\"bob@acme.com\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [
+			{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Valid priority"},
+			{"paramName": "attendees", "operator": "contains", "values": ["@acme.com"], "description": "Acme only"},
+		], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# Constraints pass + recipient denied -> deny
+test_combined_constraints_pass_recipient_denied if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"stranger@evil.com\",\"body\":\"hi\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with tool_authorizations as mock_tool_authorizations_empty
+}
+
+# Constraints pass + approval pending -> pending with headers
+test_combined_constraints_pass_approval_pending if {
+	not allow with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":102,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+		with npl_approval_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
+}
+
+# ============================================================================
+# 11. Response headers
 # ============================================================================
 
 test_user_id_header if {
 	h := headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/list\",\"params\":{}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":110,\"method\":\"tools/list\",\"params\":{}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 
 	h["x-user-id"] == "jarvis@acme.com"
 }
@@ -468,12 +835,11 @@ test_granted_services_header if {
 	h := headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"tools/list\",\"params\":{}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":111,\"method\":\"tools/list\",\"params\":{}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 
 	# Jarvis matches sales-calendar (mock-calendar) and jarvis-duckduckgo (duckduckgo)
 	contains(h["x-granted-services"], "mock-calendar")
@@ -484,13 +850,15 @@ test_pending_headers if {
 	rh := response_headers with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":112,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+		with npl_approval_decision as {"decision": "pending", "requestId": "REQ-42", "message": "Awaiting"}
 
 	rh["x-request-id"] == "REQ-42"
 	rh["retry-after"] == "30"
@@ -500,12 +868,11 @@ test_reason_header_authorized if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":113,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 
 	r == "Authorized"
 }
@@ -514,25 +881,76 @@ test_reason_header_no_access_rule if {
 	r := reason with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
-		"{\"jsonrpc\":\"2.0\",\"id\":54,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":114,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 
 	contains(r, "not authorized")
 }
 
+# Constraint denied — reason header includes constraint message
+test_constraint_denied_reason_header if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":115,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"priority\":\"critical\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [{"paramName": "priority", "operator": "in", "values": ["high", "medium", "low"], "description": "Must be valid priority"}], "requiresApproval": false}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as []
+
+	contains(r, "Constraint violated")
+}
+
+# Recipient denied — reason header
+test_recipient_denied_reason_header if {
+	r := reason with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":116,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__send_email\",\"arguments\":{\"to\":\"stranger@evil.com\",\"body\":\"hi\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as mock_tool_configs_empty
+		with recipient_bindings as {"mock-calendar": {"toolName": "send_email", "paramName": "to", "agentIdentity": "jarvis@acme.com", "approvedRecipients": [], "approvedDomains": ["acme.com"]}}
+		with tool_authorizations as mock_tool_authorizations_empty
+
+	contains(r, "Recipient not approved")
+}
+
+test_no_pending_headers_when_allowed if {
+	rh := response_headers with input as mock_input(
+		"POST", "/mcp",
+		mock_bearer(mock_jwt_jarvis),
+		"{\"jsonrpc\":\"2.0\",\"id\":117,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
+	)
+		with catalog as mock_catalog
+		with access_rules as mock_access_rules
+		with revoked_subjects as mock_revoked
+		with tool_configs as {"mock-calendar": {"create_event": {"constraints": [], "requiresApproval": true}}}
+		with recipient_bindings as mock_recipient_bindings_empty
+		with tool_authorizations as mock_tool_authorizations_empty
+		with npl_approval_decision as {"decision": "allow", "requestId": "REQ-1", "message": "OK"}
+
+	not rh["x-request-id"]
+	not rh["retry-after"]
+}
+
 # ============================================================================
-# 7. Edge cases
+# 12. Edge cases
 # ============================================================================
 
 test_deny_empty_bundle if {
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":120,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as {}
 		with access_rules as []
@@ -542,12 +960,11 @@ test_deny_empty_bundle if {
 test_deny_no_auth if {
 	not allow with input as mock_input_no_auth(
 		"POST", "/mcp",
-		"{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":121,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_missing_body if {
@@ -555,18 +972,17 @@ test_deny_missing_body if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
-# 8. Service name resolution and granted services
+# 13. Service name resolution and granted services
 # ============================================================================
 
 test_service_name_from_qualified_tool if {
 	result := service_name with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":130,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 
 	result == "mock-calendar"
@@ -576,7 +992,7 @@ test_tool_name_from_qualified_tool if {
 	result := tool_name with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":131,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 
 	result == "list_events"
@@ -599,19 +1015,18 @@ test_granted_services_excludes_disabled if {
 	result := granted_service_names with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/list\",\"params\":{}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":132,\"method\":\"tools/list\",\"params\":{}}",
 	)
 		with catalog as disabled_catalog
 		with access_rules as wildcard_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 
 	"mock-calendar" in result
 	not "duckduckgo" in result
 }
 
 # ============================================================================
-# 9. Stream setup
+# 14. Stream setup
 # ============================================================================
 
 test_allow_stream_setup if {
@@ -619,7 +1034,6 @@ test_allow_stream_setup if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_deny_stream_setup_no_auth if {
@@ -627,11 +1041,10 @@ test_deny_stream_setup_no_auth if {
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
-# 10. Wildcard service access rule
+# 15. Wildcard service access rule
 # ============================================================================
 
 test_wildcard_service_access if {
@@ -646,19 +1059,17 @@ test_wildcard_service_access if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":150,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as wildcard_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 # ============================================================================
-# 10b. Array-valued JWT claims (Keycloak multi-valued attributes)
+# 16. Array-valued JWT claims (Keycloak multi-valued attributes)
 # ============================================================================
 
-# Keycloak encodes some attributes as arrays, e.g. role: ["user"], organization: ["acme"]
 mock_jwt_jarvis_array_claims := token if {
 	header := {"alg": "HS256", "typ": "JWT"}
 	payload := {
@@ -672,20 +1083,17 @@ mock_jwt_jarvis_array_claims := token if {
 	token := io.jwt.encode_sign(header, payload, {"kty": "oct", "k": "dGVzdC1zZWNyZXQta2V5LWZvci1vcGEtdW5pdC10ZXN0cw"})
 }
 
-# Array claims should match claim-based access rules
 test_array_claims_match_access_rule if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis_array_claims),
-		"{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":160,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Array claims with wildcard service rule
 test_array_claims_wildcard_service if {
 	wildcard_rules := [
 		{
@@ -698,31 +1106,28 @@ test_array_claims_wildcard_service if {
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis_array_claims),
-		"{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":161,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as wildcard_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Array claims should appear in granted services
 test_array_claims_granted_services if {
 	result := granted_service_names with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis_array_claims),
-		"{\"jsonrpc\":\"2.0\",\"id\":83,\"method\":\"tools/list\",\"params\":{}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":162,\"method\":\"tools/list\",\"params\":{}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as mock_access_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 
 	"mock-calendar" in result
 }
 
 # ============================================================================
-# 11. MCP Session ID extraction
+# 17. MCP Session ID extraction
 # ============================================================================
 
 test_mcp_session_id_extracted if {
@@ -750,30 +1155,9 @@ test_mcp_session_id_default_empty if {
 }
 
 # ============================================================================
-# 12. No pending headers when not pending
+# 18. Comma-separated claim values (multi-value per key in Map<Text,Text>)
 # ============================================================================
 
-test_no_pending_headers_when_allowed if {
-	rh := response_headers with input as mock_input(
-		"POST", "/mcp",
-		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__create_event\",\"arguments\":{\"title\":\"test\"}}}",
-	)
-		with catalog as mock_catalog
-		with access_rules as mock_access_rules
-		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
-		with npl_decision as {"decision": "allow", "requestId": "REQ-1", "message": "OK"}
-
-	not rh["x-request-id"]
-	not rh["retry-after"]
-}
-
-# ============================================================================
-# 13. Comma-separated claim values (multi-value per key in Map<Text,Text>)
-# ============================================================================
-
-# Rule with "department": "sales,engineering" should match both departments
 test_comma_claims_match_first_value if {
 	comma_rules := [
 		{
@@ -783,16 +1167,14 @@ test_comma_claims_match_first_value if {
 		},
 	]
 
-	# Jarvis has department=sales → should match
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis),
-		"{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":180,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as comma_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_comma_claims_match_second_value if {
@@ -804,16 +1186,14 @@ test_comma_claims_match_second_value if {
 		},
 	]
 
-	# Alice has department=engineering → should match
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_alice),
-		"{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":181,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as comma_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
 test_comma_claims_no_match if {
@@ -825,19 +1205,16 @@ test_comma_claims_no_match if {
 		},
 	]
 
-	# Unknown has department=none → should NOT match
 	not allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_unknown),
-		"{\"jsonrpc\":\"2.0\",\"id\":102,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":182,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as comma_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }
 
-# Comma claims with array-valued JWT (Keycloak)
 test_comma_claims_array_jwt if {
 	comma_rules := [
 		{
@@ -847,14 +1224,12 @@ test_comma_claims_array_jwt if {
 		},
 	]
 
-	# Jarvis with array claims: organization=["acme"], department="sales"
 	allow with input as mock_input(
 		"POST", "/mcp",
 		mock_bearer(mock_jwt_jarvis_array_claims),
-		"{\"jsonrpc\":\"2.0\",\"id\":103,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":183,\"method\":\"tools/call\",\"params\":{\"name\":\"mock-calendar__list_events\",\"arguments\":{}}}",
 	)
 		with catalog as mock_catalog
 		with access_rules as comma_rules
 		with revoked_subjects as mock_revoked
-		with governance_evaluator_url as mock_governance_evaluator_url
 }

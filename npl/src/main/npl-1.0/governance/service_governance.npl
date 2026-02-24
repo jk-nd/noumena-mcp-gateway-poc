@@ -187,7 +187,7 @@ protocol[pAdmin, pGateway, pApprover] ServiceGovernance() {
         governanceDescription = desc;
     };
 
-    // --- Read config (for governance-evaluator cache) ---
+    // --- Read config (for OPA bundle server) ---
 
     @api
     permission[pGateway] getToolConfigs() returns List<ToolConfig> | active {

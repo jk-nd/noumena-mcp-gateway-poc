@@ -220,36 +220,6 @@ services:
         condition: service_healthy
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Governance Evaluator (policy-net — constraint evaluation sidecar)
-  #
-  # Sits between OPA and NPL ServiceGovernance. Evaluates argument-level
-  # constraints (regex, contains, in/not_in, max_length) then routes to
-  # NPL for approval workflows when needed.
-  # ─────────────────────────────────────────────────────────────────────────
-  governance-evaluator:
-    build:
-      context: ..
-      dockerfile: deployments/docker/Dockerfile.governance-evaluator
-    ports:
-      - "8090:8090"
-    environment:
-      NPL_URL: "http://npl-engine:12000"
-      KEYCLOAK_URL: "http://keycloak:11000"
-      KEYCLOAK_REALM: "mcpgateway"
-      GATEWAY_USERNAME: "gateway"
-      GATEWAY_PASSWORD: "Welcome123"
-      CACHE_REFRESH_SECONDS: "30"
-      PORT: "8090"
-    depends_on:
-      npl-engine:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-    networks:
-      - policy-net
-      - public-net  # For Keycloak token requests
-
-  # ─────────────────────────────────────────────────────────────────────────
   # OPA Bundle Server (policy-net — serves NPL policy data as OPA bundle)
   #
   # Subscribes to NPL Engine SSE /api/streams/states for push notifications.
@@ -472,7 +442,6 @@ services:
       OPA_URL: "http://opa:8181"
       BUNDLE_SERVER_URL: "http://bundle-server:8282"
       ENVOY_ADMIN_URL: "http://envoy-gateway:9901"
-      GOVERNANCE_EVALUATOR_URL: "http://governance-evaluator:8090"
       AIGW_CONFIG_PATH: "/aigw-config/mcp-servers.json"
       AIGW_CONTAINER_NAME: "gateway-aigw-run-1"
       AIGW_ADMIN_URL: "http://aigw-run:1064"

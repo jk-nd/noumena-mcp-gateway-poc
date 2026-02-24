@@ -1,9 +1,12 @@
-# MCP Gateway Authorization Policy — v4 Three-Layer Governance
+# MCP Gateway Authorization Policy — v5 In-Memory Governance
 #
 # Three layers, each answers one question:
 #   Layer 1 — Catalog: Is this service/tool available?
 #   Layer 2 — Access Rules: Is this caller allowed?
-#   Layer 3 — NPL Governance: Does this logic-gated call comply? (runtime NPL call)
+#   Layer 3 — Governance: Do constraints, recipients, and approval workflows pass?
+#
+# Layer 3 evaluates constraints and recipients in-memory from bundle data.
+# Only approval workflows (rare path) call NPL via http.send.
 #
 # Fail-closed: default allow = false
 
@@ -26,6 +29,12 @@ default revoked_subjects := []
 
 default governance_instances := {}
 
+default tool_configs := {}
+
+default recipient_bindings := {}
+
+default tool_authorizations := []
+
 catalog := data.catalog
 
 access_rules := data.access_rules
@@ -34,9 +43,13 @@ revoked_subjects := data.revoked_subjects
 
 governance_instances := data.governance_instances
 
-npl_url := data.npl_url
+tool_configs := data.tool_configs
 
-governance_evaluator_url := data.governance_evaluator_url
+recipient_bindings := data.recipient_bindings
+
+tool_authorizations := data.tool_authorizations
+
+npl_url := data.npl_url
 
 # --- JWT decoding ---
 
@@ -113,6 +126,10 @@ mcp_session_id := http_request.headers["mcp-session-id"] if {
 }
 
 default mcp_session_id := ""
+
+# --- Parsed arguments ---
+
+parsed_arguments := object.get(parsed_body, ["params", "arguments"], {})
 
 # --- Layer 1: Catalog check ---
 
@@ -204,6 +221,204 @@ caller_not_revoked if {
 	not user_id in revoked_subjects
 }
 
+# --- Layer 3a: Constraint evaluation (in-memory) ---
+
+# Get tool config for current service/tool
+current_tool_config := tool_configs[service_name][tool_name]
+
+# All constraints pass if tool config exists and none are violated
+all_constraints_pass if {
+	current_tool_config
+	not any_constraint_violated
+}
+
+# Also passes if no tool config exists (no constraints configured)
+all_constraints_pass if {
+	not current_tool_config
+}
+
+# Check if any single constraint is violated
+any_constraint_violated if {
+	some constraint in current_tool_config.constraints
+	constraint_violated(constraint)
+}
+
+# Per-operator violation checks
+
+# "in" — value must be in allowed list
+constraint_violated(c) if {
+	c.operator == "in"
+	arg_value := parsed_arguments[c.paramName]
+	not arg_value in c.values
+}
+
+# "not_in" — value must NOT be in blocked list
+constraint_violated(c) if {
+	c.operator == "not_in"
+	arg_value := parsed_arguments[c.paramName]
+	arg_value in c.values
+}
+
+# "contains" — string must contain at least one of the values
+constraint_violated(c) if {
+	c.operator == "contains"
+	arg_value := parsed_arguments[c.paramName]
+	not any_value_contained(arg_value, c.values)
+}
+
+# "not_contains" — string must NOT contain any of the values
+constraint_violated(c) if {
+	c.operator == "not_contains"
+	arg_value := parsed_arguments[c.paramName]
+	some v in c.values
+	contains(arg_value, v)
+}
+
+# "regex" — string must match at least one pattern
+constraint_violated(c) if {
+	c.operator == "regex"
+	arg_value := parsed_arguments[c.paramName]
+	not any_regex_matches(arg_value, c.values)
+}
+
+# "max_length" — string length must not exceed limit
+constraint_violated(c) if {
+	c.operator == "max_length"
+	arg_value := parsed_arguments[c.paramName]
+	max_len := to_number(c.values[0])
+	count(arg_value) > max_len
+}
+
+# Helpers
+any_value_contained(str, values) if {
+	some v in values
+	contains(str, v)
+}
+
+any_regex_matches(str, patterns) if {
+	some p in patterns
+	regex.match(p, str)
+}
+
+# First violated constraint message (for deny reason)
+constraint_violation_message := msg if {
+	some constraint in current_tool_config.constraints
+	constraint_violated(constraint)
+	msg := sprintf("Constraint violated: %s", [constraint.description])
+}
+
+# --- Layer 3b: Approved Recipients (in-memory) ---
+
+# Whether a recipient binding applies to this service/tool/agent
+recipient_binding_applies if {
+	binding := recipient_bindings[service_name]
+	binding.toolName == tool_name
+	agent_matches_binding(binding)
+}
+
+# Recipient is approved (domain or email match)
+recipient_approved if {
+	binding := recipient_bindings[service_name]
+	binding.toolName == tool_name
+	agent_matches_binding(binding)
+	to_value := parsed_arguments[binding.paramName]
+	recipient_or_domain_approved(binding, to_value)
+}
+
+# Recipient is denied (binding applies but not approved)
+recipient_denied if {
+	binding := recipient_bindings[service_name]
+	binding.toolName == tool_name
+	agent_matches_binding(binding)
+	to_value := parsed_arguments[binding.paramName]
+	not recipient_or_domain_approved(binding, to_value)
+}
+
+agent_matches_binding(binding) if {
+	binding.agentIdentity == ""
+}
+
+agent_matches_binding(binding) if {
+	binding.agentIdentity == user_id
+}
+
+recipient_or_domain_approved(binding, to_value) if {
+	at_idx := indexof(to_value, "@")
+	at_idx >= 0
+	domain := lower(substring(to_value, at_idx + 1, -1))
+	some d in binding.approvedDomains
+	lower(d) == domain
+}
+
+recipient_or_domain_approved(binding, to_value) if {
+	some r in binding.approvedRecipients
+	lower(r) == lower(to_value)
+}
+
+# --- Layer 3c: ToolAuthorization override (one-shot, calls NPL) ---
+
+has_tool_authorization_override if {
+	some auth in tool_authorizations
+	auth.serviceName == service_name
+	auth.toolName == tool_name
+	auth.agentIdentity == user_id
+	consume_resp := http.send({
+		"method": "POST",
+		"url": sprintf("%s/npl/governance/ToolAuthorization/%s/consume", [data.npl_url, auth.instanceId]),
+		"headers": {
+			"Authorization": sprintf("Bearer %s", [data.gateway_token]),
+			"Content-Type": "application/json",
+		},
+		"body": {},
+		"timeout": "5s",
+	})
+	consume_resp.status_code < 400
+}
+
+# --- Layer 3d: Approval workflow (direct NPL call, rare path) ---
+
+requires_approval if {
+	current_tool_config.requiresApproval == true
+}
+
+# Flatten JWT claims to simple key-value map.
+# Handles both scalar strings and single-element arrays from Keycloak.
+caller_claims_flat[k] := v if {
+	some k, v in jwt_payload
+	is_string(v)
+}
+
+caller_claims_flat[k] := v if {
+	some k, arr in jwt_payload
+	is_array(arr)
+	count(arr) > 0
+	v := arr[0]
+	is_string(v)
+}
+
+npl_approval_decision := resp.body if {
+	requires_approval
+	instance_id := governance_instances[service_name]
+	resp := http.send({
+		"method": "POST",
+		"url": sprintf("%s/npl/governance/ServiceGovernance/%s/evaluate", [data.npl_url, instance_id]),
+		"headers": {
+			"Authorization": sprintf("Bearer %s", [data.gateway_token]),
+			"Content-Type": "application/json",
+		},
+		"body": {
+			"toolName": tool_name,
+			"callerIdentity": user_id,
+			"callerClaims": caller_claims_flat,
+			"arguments": json.marshal(parsed_arguments),
+			"sessionId": mcp_session_id,
+			"requestPayload": json.marshal(parsed_body),
+		},
+		"timeout": "5s",
+	})
+	resp.status_code == 200
+}
+
 # --- Stream setup detection ---
 
 is_stream_setup if {
@@ -252,65 +467,48 @@ allow if {
 	caller_not_revoked
 }
 
-# --- Allow: Logic tools (requires NPL allow) ---
+# --- Allow: Logic tools — multiple paths ---
 
+# Path A: Constraints pass, no recipient binding, no approval required
 allow if {
 	not is_stream_setup
-	is_tool_call
-	service_name
-	tool_name
-	user_id
-	service_enabled
-	tool_in_catalog
-	tool_tag == "logic"
-	caller_authorized
-	caller_not_revoked
-	npl_decision.decision == "allow"
+	is_tool_call; service_name; tool_name; user_id
+	service_enabled; tool_in_catalog; tool_tag == "logic"
+	caller_authorized; caller_not_revoked
+	all_constraints_pass
+	not recipient_binding_applies
+	not requires_approval
 }
 
-# --- Governance evaluate call (gated path only) ---
-# Calls the governance-evaluator sidecar, which handles constraint
-# evaluation and routes to NPL for approval workflows when needed.
-
-# Flatten JWT claims to simple key-value map.
-# Handles both scalar strings and single-element arrays from Keycloak.
-caller_claims_flat[k] := v if {
-	some k, v in jwt_payload
-	is_string(v)
+# Path B: Constraints pass, recipient approved
+allow if {
+	not is_stream_setup
+	is_tool_call; service_name; tool_name; user_id
+	service_enabled; tool_in_catalog; tool_tag == "logic"
+	caller_authorized; caller_not_revoked
+	all_constraints_pass
+	recipient_approved
 }
 
-caller_claims_flat[k] := v if {
-	some k, arr in jwt_payload
-	is_array(arr)
-	count(arr) > 0
-	v := arr[0]
-	is_string(v)
+# Path C: Constraints pass, approval workflow allows
+allow if {
+	not is_stream_setup
+	is_tool_call; service_name; tool_name; user_id
+	service_enabled; tool_in_catalog; tool_tag == "logic"
+	caller_authorized; caller_not_revoked
+	all_constraints_pass
+	not recipient_denied
+	npl_approval_decision.decision == "allow"
 }
 
-governance_response := http.send({
-	"method": "POST",
-	"url": sprintf("%s/evaluate", [governance_evaluator_url]),
-	"headers": {
-		"Content-Type": "application/json",
-	},
-	"body": {
-		"serviceName": service_name,
-		"toolName": tool_name,
-		"callerIdentity": user_id,
-		"callerClaims": caller_claims_flat,
-		"arguments": json.marshal(object.get(parsed_body, ["params", "arguments"], {})),
-		"sessionId": mcp_session_id,
-		"requestPayload": json.marshal(parsed_body),
-	},
-	"timeout": "5s",
-}) if {
-	governance_evaluator_url
-	service_name
-}
-
-npl_decision := governance_response.body if {
-	governance_response
-	governance_response.status_code == 200
+# Path D: Constraints fail but authorization override exists
+allow if {
+	not is_stream_setup
+	is_tool_call; service_name; tool_name; user_id
+	service_enabled; tool_in_catalog; tool_tag == "logic"
+	caller_authorized; caller_not_revoked
+	not all_constraints_pass
+	has_tool_authorization_override
 }
 
 # --- Response headers ---
@@ -359,7 +557,8 @@ reason := sprintf("User '%s' is revoked", [user_id]) if {
 	not caller_not_revoked
 }
 
-reason := sprintf("Logic tool pending: %s", [npl_decision.requestId]) if {
+# Constraint violation reason
+reason := constraint_violation_message if {
 	is_tool_call
 	service_name
 	user_id
@@ -368,11 +567,13 @@ reason := sprintf("Logic tool pending: %s", [npl_decision.requestId]) if {
 	tool_tag == "logic"
 	caller_authorized
 	caller_not_revoked
-	npl_decision
-	npl_decision.decision == "pending"
+	not all_constraints_pass
+	not has_tool_authorization_override
+	constraint_violation_message
 }
 
-reason := sprintf("Logic tool denied: %s", [npl_decision.message]) if {
+# Recipient denied reason
+reason := sprintf("Recipient not approved for %s.%s", [service_name, tool_name]) if {
 	is_tool_call
 	service_name
 	user_id
@@ -381,8 +582,40 @@ reason := sprintf("Logic tool denied: %s", [npl_decision.message]) if {
 	tool_tag == "logic"
 	caller_authorized
 	caller_not_revoked
-	npl_decision
-	npl_decision.decision == "deny"
+	all_constraints_pass
+	recipient_denied
+}
+
+# Approval workflow pending
+reason := sprintf("Logic tool pending: %s", [npl_approval_decision.requestId]) if {
+	is_tool_call
+	service_name
+	user_id
+	service_enabled
+	tool_in_catalog
+	tool_tag == "logic"
+	caller_authorized
+	caller_not_revoked
+	all_constraints_pass
+	not recipient_denied
+	npl_approval_decision
+	npl_approval_decision.decision == "pending"
+}
+
+# Approval workflow denied
+reason := sprintf("Logic tool denied: %s", [npl_approval_decision.message]) if {
+	is_tool_call
+	service_name
+	user_id
+	service_enabled
+	tool_in_catalog
+	tool_tag == "logic"
+	caller_authorized
+	caller_not_revoked
+	all_constraints_pass
+	not recipient_denied
+	npl_approval_decision
+	npl_approval_decision.decision == "deny"
 }
 
 reason := "Authorized" if {
@@ -476,14 +709,14 @@ headers["x-bundle-revision"] := data._bundle_metadata.revision if {
 }
 
 # Pending: return request ID and retry hint
-response_headers["x-request-id"] := npl_decision.requestId if {
-	npl_decision
-	npl_decision.decision == "pending"
+response_headers["x-request-id"] := npl_approval_decision.requestId if {
+	npl_approval_decision
+	npl_approval_decision.decision == "pending"
 }
 
 response_headers["retry-after"] := "30" if {
-	npl_decision
-	npl_decision.decision == "pending"
+	npl_approval_decision
+	npl_approval_decision.decision == "pending"
 }
 
 # Visible tools for tools/list response filtering (Lua reads this on response path)

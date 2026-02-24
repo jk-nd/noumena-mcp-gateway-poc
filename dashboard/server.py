@@ -50,7 +50,6 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://envoy-gateway:8000")
 OPA_URL = os.environ.get("OPA_URL", "http://opa:8181")
 BUNDLE_SERVER_URL = os.environ.get("BUNDLE_SERVER_URL", "http://bundle-server:8282")
 ENVOY_ADMIN_URL = os.environ.get("ENVOY_ADMIN_URL", "http://envoy-gateway:9901")
-GOVERNANCE_EVALUATOR_URL = os.environ.get("GOVERNANCE_EVALUATOR_URL", "http://governance-evaluator:8090")
 AIGW_CONFIG_PATH = os.environ.get("AIGW_CONFIG_PATH", "/aigw-config/mcp-servers.json")
 AIGW_CONTAINER_NAME = os.environ.get("AIGW_CONTAINER_NAME", "gateway-aigw-run-1")
 AIGW_ADMIN_URL = os.environ.get("AIGW_ADMIN_URL", "http://aigw-run:1064")
@@ -722,7 +721,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "envoy_clusters": f"{ENVOY_ADMIN_URL}/clusters",
             "opa": f"{OPA_URL}/health",
             "bundle_server": f"{BUNDLE_SERVER_URL}/health",
-            "governance_evaluator": f"{GOVERNANCE_EVALUATOR_URL}/health",
             "aigw": f"{AIGW_ADMIN_URL}/healthz",
             "npl_engine": f"{NPL_URL}/actuator/health",
         }

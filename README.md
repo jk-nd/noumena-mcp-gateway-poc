@@ -47,11 +47,10 @@ An MCP (Model Context Protocol) gateway that enables AI agents and users to secu
 | **Envoy AI Gateway** | MCP protocol handling, JWT validation (Keycloak JWKS), routing to backends via aigw-run, SSE streaming, Lua response filtering (tools/list) |
 | **OPA Sidecar** | ext_authz policy evaluation via Rego; loads policy data from OPA bundles (in-memory, zero network I/O) |
 | **NPL Engine** | Policy state manager: GatewayStore (catalog + access rules + revocation) + ServiceGovernance (per-service workflows) |
-| **Bundle Server** | Reads NPL GatewayStore, serves OPA bundles; SSE-triggered rebuild on NPL mutations |
+| **Bundle Server** | Reads NPL GatewayStore + governance data (constraints, recipients, authorizations), serves OPA bundles; SSE-triggered rebuild on NPL mutations |
 | **Supergateway Sidecars** | Wrap STDIO MCP tools as Streamable HTTP endpoints |
 | **Mock Calendar MCP** | HTTP-native MCP server for bilateral streaming tests (SSE notifications) |
 | **Keycloak** | OIDC authentication provider with user/role management |
-| **Governance Evaluator** | Three-phase constraint evaluation sidecar: access filters (regex, in/not_in, max_length) → workflow bindings (ApprovedRecipients) → NPL approval routing |
 | **Dashboard** | Admin web UI: service catalog, access rules, governance rules, approvals, user management, Docker discovery, real-time metrics, automatic orphan container cleanup |
 | **Credential Proxy** | Fetches secrets from Vault, injects into supergateway containers at startup |
 | **Vault** | Secret storage (API keys, tokens, passwords) |
@@ -157,7 +156,7 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 6. OPA                      Three-layer evaluation (in-memory bundle data):
                               - Layer 1 (Catalog): service enabled? tool registered?
                               - Layer 2 (Access Rules): caller matches a rule for this service/tool?
-                              - Layer 3 (NPL): if tag=logic, governance evaluator check
+                              - Layer 3 (Governance): if tag=logic, in-memory constraints + recipients (+ NPL approval if needed)
 7. OPA → Envoy              allow or deny (with X-OPA-Reason header)
 8. Envoy → Backend MCP      Routes to supergateway sidecar (if allowed)
 9. Backend → Envoy → Agent  SSE response streamed back
@@ -171,7 +170,7 @@ OPA Sidecar (port 9191 gRPC / 8181 HTTP)
 | `tools/list` | Allowed; response filtered to show only catalog-registered tools (Lua filter reads `x-visible-tools` from OPA) |
 | `GET /mcp` (stream setup) | Allowed if user has any matching access rules |
 | `tools/call` (acl tag) | Service enabled, tool in catalog, caller matches access rule |
-| `tools/call` (logic tag) | Above + governance evaluator must return allow |
+| `tools/call` (logic tag) | Above + in-memory constraint/recipient checks pass (+ NPL approval if required) |
 | Missing JWT or unknown user | Denied |
 
 ### Bundle Propagation
@@ -199,12 +198,12 @@ ApprovedRecipients              Workflow governance for sensitive parameters
   └── Supervisor Approval       Human-in-the-loop recipient approval workflow
 ```
 
-Bundle server reads GatewayStore in one call (`getBundleData()`). ServiceGovernance instances are evaluated at request time by the governance evaluator for logic-tagged tools. ApprovedRecipients provides workflow governance for sensitive parameters (e.g., email recipients) with caller-specific enforcement.
+Bundle server reads GatewayStore in one call (`getBundleData()`) plus governance data (tool configs, recipient bindings, tool authorizations) from ServiceGovernance, ApprovedRecipients, and ToolAuthorization instances. All data is included in the OPA bundle for in-memory evaluation.
 
-The governance evaluator uses a **three-phase evaluation** for logic-tagged tools:
-1. **Phase 1 — Access Filters**: Check argument-level constraints (regex, in/not_in, max_length) from ServiceGovernance
-2. **Phase 2 — Workflow Bindings**: Check caller-specific workflows like ApprovedRecipients (e.g., restrict AI agent email recipients)
-3. **Phase 3 — Approval Routing**: Route to NPL for approval workflows if required, or auto-allow if all constraints pass
+For logic-tagged tools, OPA evaluates a **three-phase governance check** entirely in-memory:
+1. **Phase 1 — Constraints**: Check argument-level constraints (regex, in/not_in, contains, not_contains, max_length) from tool configs in the bundle
+2. **Phase 2 — Recipient Bindings**: Check caller-specific recipient restrictions (ApprovedRecipients: domain match, email whitelist)
+3. **Phase 3 — Approval Workflow**: If `requiresApproval=true`, call NPL directly for the approval state machine (rare path, only network hop)
 
 ## Credential Injection
 
@@ -312,10 +311,6 @@ noumena-mcp-gateway/
 │   ├── server.py           # API server: proxies to NPL, Keycloak, OPA, Docker, metrics
 │   └── static/index.html   # SPA: catalog, rules, approvals, users, discover, metrics
 │
-├── governance-evaluator/   # Constraint evaluation sidecar (Python)
-│   └── evaluator.py        # Three-phase: access filters → workflow bindings → NPL approval
-│
-│
 ├── credential-proxy/       # Credential injection service (Kotlin/Ktor)
 │   └── src/main/kotlin/    # VaultClient, CredentialSelector
 │
@@ -339,7 +334,6 @@ noumena-mcp-gateway/
 │   └── docker/
 │       ├── Dockerfile.supergateway        # Supergateway sidecar image
 │       ├── Dockerfile.dashboard           # Admin dashboard image
-│       ├── Dockerfile.governance-evaluator
 │       ├── Dockerfile.credential-proxy
 │       └── Dockerfile.mock-calendar       # HTTP-native MCP server image
 │
