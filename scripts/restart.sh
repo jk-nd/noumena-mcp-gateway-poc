@@ -18,16 +18,24 @@ for arg in "$@"; do
   esac
 done
 
-echo "=== Stopping orphaned inner MCP containers ==="
-# These are spawned by supergateway via 'docker run' and are NOT managed
-# by docker-compose. They hold references to backend-net and must be
-# removed before 'docker compose down' can clean up networks.
+echo "=== Stopping orphaned and dynamically-wired MCP containers ==="
+# Remove inner containers spawned by supergateway (labeled)
 orphans=$(docker ps -aq --filter "label=gateway.parent" 2>/dev/null || true)
 if [ -n "$orphans" ]; then
   echo "$orphans" | xargs docker rm -f
-  echo "  Removed $(echo "$orphans" | wc -l | tr -d ' ') orphaned container(s)"
-else
-  echo "  None found"
+  echo "  Removed $(echo "$orphans" | wc -l | tr -d ' ') labeled orphan(s)"
+fi
+# Remove any containers on gateway_backend-net that aren't core compose services.
+# Dynamically wired services (via Dashboard Discover) attach to this network
+# but aren't in docker-compose.yml, so 'docker compose down' can't remove them.
+if docker network inspect gateway_backend-net >/dev/null 2>&1; then
+  core_services="gateway-aigw-run-1 gateway-duckduckgo-mcp-1 gateway-github-mcp-1 gateway-mock-calendar-mcp-1 gateway-dashboard-1 gateway-envoy-gateway-1"
+  for cid in $(docker network inspect gateway_backend-net --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null); do
+    if ! echo " $core_services " | grep -q " $cid "; then
+      echo "  Removing dynamically-wired container: $cid"
+      docker rm -f "$cid" 2>/dev/null || true
+    fi
+  done
 fi
 
 echo ""
