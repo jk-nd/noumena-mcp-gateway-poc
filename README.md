@@ -391,6 +391,7 @@ curl http://localhost:8181/v1/data
 | Document | Description |
 |----------|-------------|
 | [Architecture Reference](docs/ARCHITECTURE.md) | Service topology, network isolation, data flow diagrams |
+| [Three-Tier Governance Model](docs/GOVERNANCE_MODEL.md) | Conceptual model: Access, Guardrails, Workflows |
 | [v4 Governance Design](docs/DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) | Three-layer governance: catalog, access rules, NPL workflows |
 | [How-To Guide](docs/HOWTO.md) | Step-by-step configuration walkthrough |
 | [Approval Workflow](docs/APPROVAL_WORKFLOW.md) | Human-in-the-loop approval system deep dive |

@@ -290,6 +290,7 @@ JWT claims are mapped to NPL protocol parties via `npl/src/main/yaml/rules.yml`:
 ---
 
 **See also:**
+- [Three-Tier Governance Model](GOVERNANCE_MODEL.md) — conceptual model: Access, Guardrails, Workflows
 - [How-To Guide](HOWTO.md) — step-by-step configuration walkthrough
 - [v4 Governance Design](DESIGN_V4_SIMPLIFIED_GOVERNANCE.md) — three-layer architecture design
 - [Approval Workflow Deep Dive](APPROVAL_WORKFLOW.md) — approval state machine and store-and-forward

@@ -4,6 +4,9 @@
 
 **Implemented** — Design captured 2026-02-19, implemented 2026-02-20. Updated 2026-02-24.
 
+> For the conceptual model behind this design (the three questions, decision matrix, and
+> design principles), see [Three-Tier Governance Model](GOVERNANCE_MODEL.md).
+
 Supersedes the v3 architecture (security policy YAML, per-user grants, classifier DSL,
 contextual route groups with six policy protocols, ~1000-line OPA Rego).
 
