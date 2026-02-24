@@ -323,7 +323,8 @@ td:first-child { color: var(--text); }
     <div class="nav-section">Governance</div>
     <div class="nav-item" data-panel="catalog" onclick="switchPanel('catalog')"><span class="nav-icon">&#9881;</span> Catalog</div>
     <div class="nav-item" data-panel="rules" onclick="switchPanel('rules')"><span class="nav-icon">&#9733;</span> Access Rules</div>
-    <div class="nav-item" data-panel="gov-rules" onclick="switchPanel('gov-rules')"><span class="nav-icon">&#9881;</span> Workflows <span class="nav-badge" id="constraintBadge" style="display:none">0</span></div>
+    <div class="nav-item" data-panel="filters" onclick="switchPanel('filters')"><span class="nav-icon">&#9881;</span> Filters <span class="nav-badge" id="filterBadge" style="display:none">0</span></div>
+    <div class="nav-item" data-panel="workflows" onclick="switchPanel('workflows')"><span class="nav-icon">&#9733;</span> Workflows <span class="nav-badge" id="workflowBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="approvals" onclick="switchPanel('approvals')"><span class="nav-icon">&#9998;</span> Approvals <span class="nav-badge" id="approvalBadge" style="display:none">0</span></div>
     <div class="nav-item" data-panel="revoked" onclick="switchPanel('revoked')"><span class="nav-icon">&#10007;</span> Revoked</div>
 
@@ -384,13 +385,18 @@ td:first-child { color: var(--text); }
       <div id="catalogListView" style="display:none"></div>
     </div>
 
-    <!-- Governance Rules -->
-    <div class="panel" id="panel-gov-rules">
-      <div class="panel-header"><div><div class="panel-title">Workflows</div><div class="panel-desc">Access filters and workflow bindings for governed tools.</div></div>
+    <!-- Access Filters -->
+    <div class="panel" id="panel-filters">
+      <div class="panel-header"><div><div class="panel-title">Access Filters</div><div class="panel-desc">Parameter-level constraints for governed tools (regex, in/not_in, contains, max_length).</div></div>
         <button class="btn btn-primary" onclick="openRuleWizard()">+ New Filter</button>
       </div>
-      <div id="protocolBindings"></div>
       <div id="constraintsList"></div>
+    </div>
+
+    <!-- Workflows -->
+    <div class="panel" id="panel-workflows">
+      <div class="panel-header"><div><div class="panel-title">Workflows</div><div class="panel-desc">Workflow bindings for governed tools (e.g. Approved Recipients).</div></div></div>
+      <div id="protocolBindings"></div>
     </div>
 
     <!-- Access Rules -->
@@ -1436,26 +1442,28 @@ let wizardState = { step: 1, service: '', tool: '', tools: [], param: '', operat
 
 function renderConstraints() {
   const el = document.getElementById('constraintsList');
-  const badge = document.getElementById('constraintBadge');
+  const filterBadge = document.getElementById('filterBadge');
+  const workflowBadge = document.getElementById('workflowBadge');
   const allConstraints = state.constraints || {};
   let totalCount = 0;
   Object.values(allConstraints).forEach(cfgs => {
     if (Array.isArray(cfgs)) cfgs.forEach(c => { totalCount += (c.constraints||[]).length; });
   });
-  // Include active workflow bindings in badge count (skip empty/accidental ones)
+  // Workflow bindings (skip empty/accidental ones)
   const arProtocols = (state.protocols || []).filter(p =>
     p.type === 'ApprovedRecipients' &&
     ((p.approvedRecipients||[]).length || (p.approvedDomains||[]).length || p.agentIdentity)
   );
-  const badgeTotal = totalCount + arProtocols.length;
-  if (badgeTotal > 0) { badge.textContent = badgeTotal; badge.style.display = 'inline'; }
-  else { badge.style.display = 'none'; }
+  if (totalCount > 0) { filterBadge.textContent = totalCount; filterBadge.style.display = 'inline'; }
+  else { filterBadge.style.display = 'none'; }
+  if (arProtocols.length > 0) { workflowBadge.textContent = arProtocols.length; workflowBadge.style.display = 'inline'; }
+  else { workflowBadge.style.display = 'none'; }
 
-  // Render protocol bindings section
+  // Render workflow bindings panel
   const pbEl = document.getElementById('protocolBindings');
   if (pbEl) {
     if (arProtocols.length) {
-      let pbHtml = '<h4 style="font-size:13px;color:var(--text3);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.05em">Workflow Bindings</h4>';
+      let pbHtml = '';
       for (const p of arProtocols) {
         const rCount = (p.approvedRecipients || []).length;
         const dCount = (p.approvedDomains || []).length;
@@ -1467,6 +1475,7 @@ function renderConstraints() {
             </div>
           </div>
           <div style="font-size:12px;color:var(--text2)">
+            <span style="margin-right:16px">Agent: <strong>${esc(p.agentIdentity||'any')}</strong></span>
             <span style="margin-right:16px">${dCount} approved domain${dCount!==1?'s':''}</span>
             <span>${rCount} approved recipient${rCount!==1?'s':''}</span>
           </div>
@@ -1475,16 +1484,17 @@ function renderConstraints() {
       }
       pbEl.innerHTML = pbHtml;
     } else {
-      pbEl.innerHTML = '';
+      pbEl.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9733;</div><div class="empty-text">No workflow bindings configured. Workflow bindings (e.g. Approved Recipients) are set up via the tool detail modal or seed script.</div></div></div>';
     }
   }
 
+  // Render access filters panel
   const entries = Object.entries(allConstraints);
   if (!entries.length || totalCount === 0) {
-    el.innerHTML = '<h4 style="font-size:13px;color:var(--text3);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.05em">Access Filters</h4><div class="card"><div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No access filters defined. Click "New Filter" to add parameter-level filters for governed tools.</div></div></div>';
+    el.innerHTML = '<div class="card"><div class="empty"><div class="empty-icon">&#9881;</div><div class="empty-text">No access filters defined. Click "+ New Filter" to add parameter-level filters for governed tools.</div></div></div>';
     return;
   }
-  let html = '<h4 style="font-size:13px;color:var(--text3);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.05em">Access Filters</h4>';
+  let html = '';
   for (const [svc, cfgs] of entries) {
     if (!Array.isArray(cfgs)) continue;
     for (const cfg of cfgs) {
@@ -1503,7 +1513,10 @@ function renderConstraints() {
         html += `<div class="constraint-card"><div class="constraint-info">
           <div class="constraint-desc">${esc(c.description||'No description')}</div>
           <div class="constraint-detail">${esc(c.paramName)} <span class="constraint-badge">${esc(c.operator)}</span> ${esc((c.values||[]).join(', '))}</div>
-        </div><button class="btn btn-sm btn-danger" onclick="confirmRemoveConstraint('${esc(svc)}','${esc(cfg.toolName)}','${esc(c.paramName)}')">Remove</button></div>`;
+        </div><div style="display:flex;gap:4px">
+          <button class="btn btn-sm btn-ghost" onclick="editConstraint('${esc(svc)}','${esc(cfg.toolName)}','${esc(c.paramName)}','${esc(c.operator)}',${esc(JSON.stringify(c.values||[]))},'${esc(c.description||'')}')">Edit</button>
+          <button class="btn btn-sm btn-danger" onclick="confirmRemoveConstraint('${esc(svc)}','${esc(cfg.toolName)}','${esc(c.paramName)}')">Remove</button>
+        </div></div>`;
       }
       html += '</div>';
     }
@@ -1521,6 +1534,18 @@ function confirmRemoveConstraint(svc, tool, param) {
 async function clearToolConstraints(svc, tool) {
   if (!confirm(`Remove all access filters from ${svc}.${tool}?`)) return;
   await act(() => api('POST', '/api/constraints/clear', {serviceName: svc, toolName: tool}), 'Filters cleared');
+}
+function editConstraint(svc, tool, paramName, operator, values, description) {
+  // Open the wizard pre-populated with existing values for editing
+  // We remove the old constraint and add the updated one on save
+  wizardState = {
+    step: 3, service: svc, tool: tool, tools: [],
+    param: paramName, operator: operator,
+    values: Array.isArray(values) ? values.join(', ') : values,
+    description: description,
+    _editMode: true, _editParam: paramName
+  };
+  renderWizard();
 }
 async function toggleToolApproval(svc, tool, required) {
   if(!required && !confirm(`Set auto-allow for "${tool}"? Calls will bypass approval if constraints pass.`)) return;
@@ -1552,14 +1577,15 @@ function renderWizard() {
   const canNext = s.step < 4 && ((s.step === 1 && s.service) || (s.step === 2 && s.tool) || s.step === 3);
   const isApply = s.step === 4;
 
-  showModal(`<h3>New Governance Rule</h3>
+  const isEdit = s._editMode;
+  showModal(`<h3>${isEdit ? 'Edit Access Filter' : 'New Access Filter'}</h3>
     <div class="wizard-steps">${stepsHtml}</div>
     <div class="wizard-body">${bodyHtml}</div>
     <div class="wizard-actions">
-      <div>${canBack ? `<button class="btn btn-ghost" onclick="wizardBack()">Back</button>` : ''}</div>
+      <div>${canBack && !isEdit ? `<button class="btn btn-ghost" onclick="wizardBack()">Back</button>` : ''}</div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        ${isApply ? `<button class="btn btn-primary" onclick="wizardApply()">Apply Rule</button>` : ''}
+        ${isApply ? `<button class="btn btn-primary" onclick="wizardApply()">${isEdit ? 'Save Changes' : 'Apply Rule'}</button>` : ''}
         ${canNext && !isApply ? `<button class="btn btn-primary" onclick="wizardNext()">Next</button>` : ''}
       </div>
     </div>`);
@@ -1731,6 +1757,12 @@ async function wizardApply() {
   const s = wizardState;
   const valuesList = s.values.split('\n').map(v => v.trim()).filter(Boolean);
   try {
+    // In edit mode, remove old constraint first (may have different param name)
+    if (s._editMode && s._editParam) {
+      await api('POST', '/api/constraints/remove', {
+        serviceName: s.service, toolName: s.tool, paramName: s._editParam
+      });
+    }
     await api('POST', '/api/constraints/add', {
       serviceName: s.service,
       toolName: s.tool,
@@ -1746,7 +1778,7 @@ async function wizardApply() {
       await api('POST', '/api/tools/set-tag', {serviceName: s.service, toolName: s.tool, tag: 'logic'});
     }
     closeModal();
-    toast(`Filter added: ${s.service}.${s.tool}.${s.param}`, 'success');
+    toast(s._editMode ? `Filter updated: ${s.service}.${s.tool}.${s.param}` : `Filter added: ${s.service}.${s.tool}.${s.param}`, 'success');
     await refreshAll();
   } catch(e) {
     toast('Error: ' + (e.message || e), 'error');
@@ -1797,7 +1829,7 @@ function showToolDetailModal(service, toolName) {
   const svcConstraints = state.constraints[service] || [];
   const toolCfg = Array.isArray(svcConstraints) ? svcConstraints.find(c => c.toolName === toolName) : null;
   const constraints = toolCfg ? (toolCfg.constraints || []) : [];
-  const reqApproval = toolCfg ? toolCfg.requiresApproval !== false : true;
+  const reqApproval = toolCfg ? toolCfg.requiresApproval === true : false;
 
   let html = `<h3 style="margin-bottom:16px">${esc(service)}.${esc(toolName)}</h3>`;
 
