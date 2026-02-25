@@ -181,13 +181,13 @@ protocol[pAdmin, pGateway] Guardrails() {
     };
 
     @api
-    permission[pAdmin] addAllowedValue(toolName: Text, paramName: Text, value: Text) | active {
+    permission[pAdmin] addAllowedValue(toolName: Text, paramName: Text, callerScope: Text, value: Text) | active {
         var maybeGuardrails = toolGuardrails.getOrNone(toolName);
         require(maybeGuardrails.isPresent(), "No guardrails for tool");
         var existing = maybeGuardrails.getOrFail();
 
         var updatedAllowlists = existing.allowlists.map(function(a: AllowlistEntry) ->
-            if (a.paramName == paramName) {
+            if (a.paramName == paramName && a.callerScope == callerScope) {
                 return AllowlistEntry(
                     paramName = a.paramName,
                     matchMode = a.matchMode,
@@ -210,13 +210,13 @@ protocol[pAdmin, pGateway] Guardrails() {
     };
 
     @api
-    permission[pAdmin] addAllowedPattern(toolName: Text, paramName: Text, pattern: Text) | active {
+    permission[pAdmin] addAllowedPattern(toolName: Text, paramName: Text, callerScope: Text, pattern: Text) | active {
         var maybeGuardrails = toolGuardrails.getOrNone(toolName);
         require(maybeGuardrails.isPresent(), "No guardrails for tool");
         var existing = maybeGuardrails.getOrFail();
 
         var updatedAllowlists = existing.allowlists.map(function(a: AllowlistEntry) ->
-            if (a.paramName == paramName) {
+            if (a.paramName == paramName && a.callerScope == callerScope) {
                 return AllowlistEntry(
                     paramName = a.paramName,
                     matchMode = a.matchMode,
@@ -239,13 +239,13 @@ protocol[pAdmin, pGateway] Guardrails() {
     };
 
     @api
-    permission[pAdmin] removeAllowedValue(toolName: Text, paramName: Text, value: Text) | active {
+    permission[pAdmin] removeAllowedValue(toolName: Text, paramName: Text, callerScope: Text, value: Text) | active {
         var maybeGuardrails = toolGuardrails.getOrNone(toolName);
         require(maybeGuardrails.isPresent(), "No guardrails for tool");
         var existing = maybeGuardrails.getOrFail();
 
         var updatedAllowlists = existing.allowlists.map(function(a: AllowlistEntry) ->
-            if (a.paramName == paramName) {
+            if (a.paramName == paramName && a.callerScope == callerScope) {
                 return AllowlistEntry(
                     paramName = a.paramName,
                     matchMode = a.matchMode,
@@ -268,13 +268,13 @@ protocol[pAdmin, pGateway] Guardrails() {
     };
 
     @api
-    permission[pAdmin] removeAllowlist(toolName: Text, paramName: Text) | active {
+    permission[pAdmin] removeAllowlist(toolName: Text, paramName: Text, callerScope: Text) | active {
         var maybeGuardrails = toolGuardrails.getOrNone(toolName);
         require(maybeGuardrails.isPresent(), "No guardrails for tool");
         var existing = maybeGuardrails.getOrFail();
 
         var filtered = existing.allowlists.filter(
-            function(a: AllowlistEntry) -> a.paramName != paramName
+            function(a: AllowlistEntry) -> !(a.paramName == paramName && a.callerScope == callerScope)
         );
 
         var updated = ToolGuardrails(
