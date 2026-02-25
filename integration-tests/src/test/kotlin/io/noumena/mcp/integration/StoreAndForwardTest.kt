@@ -175,7 +175,7 @@ class StoreAndForwardTest {
         assertNotNull(capturedRequestId, "capturedRequestId should be set from test 2")
 
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/getPendingRequests"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/getPendingRequests"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -208,7 +208,7 @@ class StoreAndForwardTest {
 
         // Approve
         val approveResp = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/approve"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/approve"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -244,7 +244,7 @@ class StoreAndForwardTest {
 
         // Find the new request ID
         val pendingResp = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/getPendingRequests"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/getPendingRequests"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -257,7 +257,7 @@ class StoreAndForwardTest {
 
         // Deny it
         val denyResp = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/deny"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/deny"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)

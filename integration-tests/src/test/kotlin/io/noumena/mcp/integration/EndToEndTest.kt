@@ -99,10 +99,10 @@ class EndToEndTest {
         //   logic = requires NPL governance evaluation
         NplBootstrap.registerServiceWithTools(
             storeId, "mock-calendar",
-            mapOf("list_events" to "acl", "create_event" to "logic"),
+            mapOf("list_events" to "acl", "create_event" to "logic", "send_email" to "logic"),
             adminToken
         )
-        println("    ✓ mock-calendar registered: list_events=acl, create_event=logic")
+        println("    ✓ mock-calendar registered: list_events=acl, create_event=logic, send_email=logic")
 
         // Add claim-based access rule: department=sales → mock-calendar.*
         NplBootstrap.addAccessRule(
