@@ -18,7 +18,7 @@ struct CatalogEntry {
  * matchType: "claims" (group-based) or "identity" (individual)
  */
 struct AccessRuleMatch {
-    matchType: Text,
+matchType: Text,
     claims: Map<Text, Text>,
     identity: Text
 };
