@@ -23,7 +23,7 @@ jobs:
 
       - name: Run Docker services
         run: |
-          docker compose -f deployments/docker-compose.yml up -d --build dashboard test-runner
+          docker compose -f deployments/docker-compose.yml up -d --build --wait dashboard test-runner
 
       - name: Run integration tests
         run: |
