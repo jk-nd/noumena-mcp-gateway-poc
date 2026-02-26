@@ -113,6 +113,11 @@ class StoreAndForwardTest {
         governanceId = NplBootstrap.ensureServiceGovernance("mock-calendar", adminToken)
         println("    ✓ ServiceGovernance: $governanceId (serviceName=mock-calendar)")
 
+        // Configure tools to require workflow approval
+        NplBootstrap.configureWorkflowTool(governanceId, "send_email", requiresWorkflow = true, adminToken)
+        NplBootstrap.configureWorkflowTool(governanceId, "create_event", requiresWorkflow = true, adminToken)
+        println("    ✓ Workflow tools configured: send_email and create_event require approval")
+
         // Wait for SSE bundle rebuild (includes governance_instances mapping)
         println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for OPA bundle rebuild via SSE...")
         delay(BUNDLE_REBUILD_WAIT)

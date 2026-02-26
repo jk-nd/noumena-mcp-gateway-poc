@@ -296,6 +296,27 @@ object NplBootstrap {
             client.close()
         }
     }
+
+    /** Configure a tool in a Workflow instance to require approval or not. */
+    suspend fun configureWorkflowTool(
+        governanceId: String,
+        toolName: String,
+        requiresWorkflow: Boolean,
+        adminToken: String
+    ) {
+        val client = HttpClient(CIO) {
+            install(ContentNegotiation) { json(json) }
+        }
+        try {
+            client.post("${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/setRequiresWorkflow") {
+                header("Authorization", "Bearer $adminToken")
+                contentType(ContentType.Application.Json)
+                setBody("""{"toolName":"$toolName","required":$requiresWorkflow}""")
+            }
+        } finally {
+            client.close()
+        }
+    }
 }
 
 /**
