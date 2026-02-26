@@ -171,8 +171,7 @@ services:
       - KEYCLOAK_REALM=mcpgateway
       - KEYCLOAK_CLIENT_ID=mcpgateway
     depends_on:
-      - npl-engine
-      - keycloak-provisioning
+      - npl-cors-proxy
     networks:
       - policy-net
       - public-net
@@ -480,7 +479,10 @@ services:
       - policy-net
       - public-net
     depends_on:
-      - npl-engine
+      npl-engine:
+        condition: service_healthy
+      keycloak-provisioning:
+        condition: service_completed_successfully
 
 networks:
   public-net:

@@ -74,10 +74,7 @@ docker compose ps
 
 ### 2. Seed the Gateway
 
-```bash
-cd scripts
-./seed.sh
-```
+The AIGW config see container seeded the AI Gateway.
 
 This bootstraps the GatewayStore with services, tools, access rules, and governance configuration.
 
