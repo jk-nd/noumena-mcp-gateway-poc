@@ -171,8 +171,7 @@ services:
       - KEYCLOAK_REALM=mcpgateway
       - KEYCLOAK_CLIENT_ID=mcpgateway
     depends_on:
-      - npl-engine
-      - keycloak-provisioning
+      - npl-cors-proxy
     networks:
       - policy-net
       - public-net
@@ -451,10 +450,18 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - aigw-config:/aigw-config
     depends_on:
-      npl-engine:
-        condition: service_healthy
+      npl-cors-proxy:
+        condition: service_started
       keycloak:
         condition: service_healthy
+      envoy-gateway:
+        condition: service_started
+      opa:
+        condition: service_started
+      bundle-server:
+        condition: service_started
+      aigw-run:
+        condition: service_started
     networks:
       policy-net:
       public-net:
@@ -472,7 +479,10 @@ services:
       - policy-net
       - public-net
     depends_on:
-      - npl-engine
+      npl-engine:
+        condition: service_healthy
+      keycloak-provisioning:
+        condition: service_completed_successfully
 
 networks:
   public-net:

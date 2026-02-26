@@ -17,12 +17,13 @@ jobs:
       - name: Setup Java and Maven
         uses: actions/setup-java@v4
         with:
+          distribution: 'temurin'
           java-version: '21'
           cache: 'gradle'
 
       - name: Run Docker services
         run: |
-          docker compose -f deployments/docker-compose.yml up -d --build
+          docker compose -f deployments/docker-compose.yml up -d --build --wait dashboard mock-calendar-mcp
 
       - name: Run integration tests
         run: |

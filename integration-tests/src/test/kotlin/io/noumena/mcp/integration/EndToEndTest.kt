@@ -119,6 +119,12 @@ class EndToEndTest {
         NplBootstrap.removeAccessRule(storeId, "engineering-calendar", adminToken)
         println("    ✓ Removed engineering-calendar access rule (Alice must be denied)")
 
+        // Create Workflow/ServiceGovernance instance for mock-calendar and configure tools
+        val governanceId = NplBootstrap.ensureServiceGovernance("mock-calendar", adminToken)
+        NplBootstrap.configureWorkflowTool(governanceId, "send_email", requiresWorkflow = true, adminToken)
+        NplBootstrap.configureWorkflowTool(governanceId, "create_event", requiresWorkflow = true, adminToken)
+        println("    ✓ Workflow configured: send_email and create_event require approval")
+
         // Wait for SSE-triggered bundle rebuild
         println("    Waiting ${BUNDLE_REBUILD_WAIT / 1000}s for OPA bundle rebuild via SSE...")
         delay(BUNDLE_REBUILD_WAIT)
