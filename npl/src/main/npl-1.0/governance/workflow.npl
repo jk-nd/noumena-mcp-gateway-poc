@@ -92,10 +92,15 @@ protocol[pAdmin, pGateway, pApprover] Workflow() {
         callerIdentity: Text,
         callerClaims: Map<Text, Text>,
         arguments: Text,
+        argumentsFingerprint: Text,
         sessionId: Text,
         requestPayload: Text
     ) returns WorkflowEvaluationResult | active {
-        var lookupKey = callerIdentity + ":" + toolName + ":" + arguments;
+        // argumentsFingerprint must be sha256(canonical_json(arguments)), computed by the caller
+        // (OPA: crypto.sha256(json.marshal(parsed_arguments))).
+        // Using the fingerprint instead of raw arguments eliminates sensitivity to JSON
+        // whitespace and key ordering differences between serializers.
+        var lookupKey = callerIdentity + ":" + toolName + ":" + argumentsFingerprint;
         var maybeExisting = pendingRequests.getOrNone(lookupKey);
 
         if (maybeExisting.isPresent()) {

@@ -436,6 +436,7 @@ npl_workflow_decision := resp.body if {
 			"callerIdentity": user_id,
 			"callerClaims": caller_claims_flat,
 			"arguments": json.marshal(parsed_arguments),
+			"argumentsFingerprint": crypto.sha256(json.marshal(parsed_arguments)),
 			"sessionId": mcp_session_id,
 			"requestPayload": json.marshal(parsed_body),
 		},
