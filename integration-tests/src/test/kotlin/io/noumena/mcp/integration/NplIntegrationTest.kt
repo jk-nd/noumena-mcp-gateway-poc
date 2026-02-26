@@ -105,45 +105,29 @@ class NplIntegrationTest {
 
         val tools = mockCal["tools"]?.jsonObject
         assertNotNull(tools, "Should have tools")
-        assertEquals("acl", tools!!["list_events"]?.jsonObject?.get("tag")?.jsonPrimitive?.content)
-        assertEquals("logic", tools["create_event"]?.jsonObject?.get("tag")?.jsonPrimitive?.content)
+        assertNotNull(tools!!["list_events"], "list_events should be registered")
+        assertNotNull(tools["create_event"], "create_event should be registered")
 
-        println("    ✓ getBundleData confirms: list_events=acl, create_event=logic")
+        println("    ✓ getBundleData confirms: list_events and create_event registered")
     }
 
     // ── Tool CRUD with Tags ─────────────────────────────────────────────────
 
     @Test
     @Order(4)
-    fun `tag switching open to gated`() = runBlocking {
+    fun `catalog tools are accessible after registration`() = runBlocking {
         Assumptions.assumeTrue(::storeId.isInitialized, "GatewayStore not created")
 
-        // Switch list_events from acl to logic
-        val resp = client.post(
-            "${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/setTag"
-        ) {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events", "tag": "logic"}""")
-        }
-        assertTrue(resp.status.isSuccess(), "setTag should succeed")
-
+        // Tool-level tagging was moved to the Workflow protocol (setRequiresWorkflow).
+        // GatewayStore catalog only tracks tool presence; verify both tools are still there.
         val bundleData = getBundleData()
-        val tag = bundleData["catalog"]?.jsonObject
+        val tools = bundleData["catalog"]?.jsonObject
             ?.get("mock-calendar")?.jsonObject
             ?.get("tools")?.jsonObject
-            ?.get("list_events")?.jsonObject
-            ?.get("tag")?.jsonPrimitive?.content
-        assertEquals("logic", tag, "list_events should now be logic")
-        println("    ✓ list_events tag switched to logic")
-
-        // Switch back to acl
-        client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/setTag") {
-            header("Authorization", "Bearer $adminToken")
-            contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "mock-calendar", "toolName": "list_events", "tag": "acl"}""")
-        }
-        println("    ✓ list_events tag restored to acl")
+        assertNotNull(tools, "Should have tools")
+        assertNotNull(tools!!["list_events"], "list_events should be in catalog")
+        assertNotNull(tools["create_event"], "create_event should be in catalog")
+        println("    ✓ Catalog tools verified: list_events and create_event present")
     }
 
     @Test
@@ -172,17 +156,15 @@ class NplIntegrationTest {
         client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/registerTool") {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
-            setBody("""{"serviceName": "mock-calendar", "toolName": "create_event", "tag": "logic"}""")
+            setBody("""{"serviceName": "mock-calendar", "toolName": "create_event"}""")
         }
 
         bundleData = getBundleData()
-        val tag = bundleData["catalog"]?.jsonObject
+        val toolsAfterReadd = bundleData["catalog"]?.jsonObject
             ?.get("mock-calendar")?.jsonObject
             ?.get("tools")?.jsonObject
-            ?.get("create_event")?.jsonObject
-            ?.get("tag")?.jsonPrimitive?.content
-        assertEquals("logic", tag, "create_event should be re-added as logic")
-        println("    ✓ create_event re-added as logic")
+        assertNotNull(toolsAfterReadd!!["create_event"], "create_event should be re-added")
+        println("    ✓ create_event re-added")
     }
 
     // ── Disable/Enable Service ──────────────────────────────────────────────

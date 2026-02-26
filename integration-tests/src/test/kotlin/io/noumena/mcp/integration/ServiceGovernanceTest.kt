@@ -11,6 +11,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
+import java.security.MessageDigest
 
 /**
  * Integration tests for ServiceGovernance — per-service governance protocol (v4).
@@ -69,25 +70,25 @@ class ServiceGovernanceTest {
         println("    ✓ ServiceGovernance instance: $governanceId (serviceName=test-service)")
     }
 
-    // ── Tool registration ─────────────────────────────────────────────────
+    // ── Tool configuration ────────────────────────────────────────────────
 
     @Test
     @Order(1)
-    fun `register tools with tags`() = runBlocking {
-        callAdmin("registerTool", """{"toolName": "read_data", "tag": "acl"}""")
-        callAdmin("registerTool", """{"toolName": "write_data", "tag": "logic"}""")
-        println("    ✓ Registered tools: read_data=acl, write_data=logic")
+    fun `configure tools with workflow requirements`() = runBlocking {
+        callAdmin("setRequiresWorkflow", """{"toolName": "read_data", "required": false}""")
+        callAdmin("setRequiresWorkflow", """{"toolName": "write_data", "required": true}""")
+        println("    ✓ Configured tools: read_data=requiresWorkflow:false, write_data=requiresWorkflow:true")
     }
 
     @Test
     @Order(2)
-    fun `set tag changes tool governance`() = runBlocking {
-        callAdmin("setTag", """{"toolName": "read_data", "tag": "logic"}""")
-        println("    ✓ read_data tag changed to logic")
+    fun `setRequiresWorkflow changes tool governance`() = runBlocking {
+        callAdmin("setRequiresWorkflow", """{"toolName": "read_data", "required": true}""")
+        println("    ✓ read_data requiresWorkflow changed to true")
 
         // Change back
-        callAdmin("setTag", """{"toolName": "read_data", "tag": "acl"}""")
-        println("    ✓ read_data tag restored to acl")
+        callAdmin("setRequiresWorkflow", """{"toolName": "read_data", "required": false}""")
+        println("    ✓ read_data requiresWorkflow restored to false")
     }
 
     // ── Evaluate: gated → pending ─────────────────────────────────────────
@@ -155,7 +156,7 @@ class ServiceGovernanceTest {
     @Order(6)
     fun `getPendingRequests returns pending items`() = runBlocking {
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/getPendingRequests"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/getPendingRequests"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
@@ -288,19 +289,21 @@ class ServiceGovernanceTest {
         sessionId: String = "",
         requestPayload: String = ""
     ): JsonObject {
+        val fingerprint = fingerprintOf(arguments)
         val body = """
         {
             "toolName": "$toolName",
             "callerIdentity": "$callerIdentity",
             "callerClaims": {},
             "arguments": ${json.encodeToString(JsonElement.serializer(), JsonPrimitive(arguments))},
+            "argumentsFingerprint": "$fingerprint",
             "sessionId": "$sessionId",
             "requestPayload": ${json.encodeToString(JsonElement.serializer(), JsonPrimitive(requestPayload))}
         }
         """.trimIndent()
 
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/evaluate"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/evaluate"
         ) {
             header("Authorization", "Bearer $gatewayToken")
             contentType(ContentType.Application.Json)
@@ -308,20 +311,26 @@ class ServiceGovernanceTest {
         }
 
         assertTrue(response.status.isSuccess(),
-            "evaluate() should succeed: ${response.status} - ${response.bodyAsText()}")
+            "Workflow.evaluate() should succeed: ${response.status} - ${response.bodyAsText()}")
         return json.parseToJsonElement(response.bodyAsText()).jsonObject
     }
 
     private suspend fun callAdmin(action: String, body: String) {
         val response = client.post(
-            "${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$governanceId/$action"
+            "${TestConfig.nplUrl}/npl/governance/Workflow/$governanceId/$action"
         ) {
             header("Authorization", "Bearer $adminToken")
             contentType(ContentType.Application.Json)
             setBody(body)
         }
         assertTrue(response.status.isSuccess(),
-            "ServiceGovernance.$action should succeed: ${response.status} - ${response.bodyAsText()}")
+            "Workflow.$action should succeed: ${response.status} - ${response.bodyAsText()}")
+    }
+
+    private fun fingerprintOf(arguments: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hashBytes = digest.digest(arguments.toByteArray(Charsets.UTF_8))
+        return hashBytes.joinToString("") { "%02x".format(it) }
     }
 
     @AfterAll

@@ -1,0 +1,29 @@
+name: Run the test suite
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: "ubuntu-latest"
+    steps:
+      - name: Checkout Git Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java and Maven
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Run Docker services
+        run: |
+          docker compose -f deployments/docker-compose.yml up -d --build
+
+      - name: Run integration tests
+        run: |
+          ./gradlew :integration-tests:test

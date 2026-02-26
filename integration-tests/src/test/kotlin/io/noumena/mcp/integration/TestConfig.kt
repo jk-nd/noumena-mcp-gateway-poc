@@ -197,12 +197,12 @@ object NplBootstrap {
                 contentType(ContentType.Application.Json)
                 setBody("""{"serviceName": "$serviceName"}""")
             }
-            // Register tools with tags
-            for ((toolName, tag) in tools) {
+            // Register tools
+            for ((toolName, _) in tools) {
                 client.post("${TestConfig.nplUrl}/npl/store/GatewayStore/$storeId/registerTool") {
                     header("Authorization", "Bearer $adminToken")
                     contentType(ContentType.Application.Json)
-                    setBody("""{"serviceName": "$serviceName", "toolName": "$toolName", "tag": "$tag"}""")
+                    setBody("""{"serviceName": "$serviceName", "toolName": "$toolName"}""")
                 }
             }
         } finally {
@@ -254,13 +254,13 @@ object NplBootstrap {
         }
     }
 
-    /** Find or create a ServiceGovernance instance for a service. Returns the instance ID. */
+    /** Find or create a Workflow instance for a service. Returns the instance ID. */
     suspend fun ensureServiceGovernance(serviceName: String, adminToken: String): String {
         val client = HttpClient(CIO) {
             install(ContentNegotiation) { json(json) }
         }
         try {
-            val listResp = client.get("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/") {
+            val listResp = client.get("${TestConfig.nplUrl}/npl/governance/Workflow/") {
                 header("Authorization", "Bearer $adminToken")
             }
             if (listResp.status.isSuccess()) {
@@ -274,7 +274,7 @@ object NplBootstrap {
                 }
             }
             // Create instance (parameterless constructor)
-            val createResp = client.post("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/") {
+            val createResp = client.post("${TestConfig.nplUrl}/npl/governance/Workflow/") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"@parties": {}}""")
@@ -282,13 +282,13 @@ object NplBootstrap {
             val instanceId = json.parseToJsonElement(createResp.bodyAsText()).jsonObject["@id"]!!.jsonPrimitive.content
 
             // Call setup() to set serviceName and transition created → active
-            val initResp = client.post("${TestConfig.nplUrl}/npl/governance/ServiceGovernance/$instanceId/setup") {
+            val initResp = client.post("${TestConfig.nplUrl}/npl/governance/Workflow/$instanceId/setup") {
                 header("Authorization", "Bearer $adminToken")
                 contentType(ContentType.Application.Json)
                 setBody("""{"name": "$serviceName"}""")
             }
             if (!initResp.status.isSuccess()) {
-                throw RuntimeException("ServiceGovernance.setup() failed: ${initResp.status} - ${initResp.bodyAsText()}")
+                throw RuntimeException("Workflow.setup() failed: ${initResp.status} - ${initResp.bodyAsText()}")
             }
 
             return instanceId
